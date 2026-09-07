@@ -109,6 +109,26 @@ import ZIPFoundation
     #expect(departure.product?.name == "Bus 10")
 }
 
+@Test func hafasModelsAcceptTheCurrentATPNearbyAndDepartureShapes() throws {
+    let nearbyJSON = """
+    {"stopLocationOrCoordLocation":[{"StopLocation":{"id":"A=1@L=42@","extId":"42","name":"Gare","lon":6.1,"lat":49.6,"dist":59,"products":32}}]}
+    """.data(using: .utf8)!
+
+    let nearby = try JSONDecoder().decode(HafasNearbyStopsEnvelope.self, from: nearbyJSON)
+    #expect(nearby.stopLocations.values.first?.name == "Gare")
+    #expect(nearby.stopLocations.values.first?.products == 32)
+
+    let boardJSON = """
+    {"Departure":[{"JourneyDetailRef":{"ref":"1|2"},"Product":[{"name":"Bus 19","line":"19","lineId":"route-19","cls":"32","operator":"AVL"}],"direction":"Luxembourg, Gare","time":"12:00:00","date":"2026-09-03","rtTime":"12:02:00","rtDate":"2026-09-03","cancelled":false}]}
+    """.data(using: .utf8)!
+
+    let board = try JSONDecoder().decode(HafasDepartureBoardEnvelope.self, from: boardJSON)
+    let departure = try #require(board.departureBoard.departures.values.first)
+    #expect(departure.product?.line == "19")
+    #expect(departure.product?.operatorName == "AVL")
+    #expect(departure.direction == "Luxembourg, Gare")
+}
+
 @Test func apiClientAcceptsAnAppEnteredRelayURL() throws {
     let client = try MobiliteitAPIClient(
         apiKey: "relay-key",

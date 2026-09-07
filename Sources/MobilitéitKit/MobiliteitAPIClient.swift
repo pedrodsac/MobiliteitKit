@@ -298,6 +298,30 @@ public struct HafasNearbyStopsEnvelope: Hashable, Sendable, Decodable {
     public let stopLocations: OneOrMany<HafasStopLocation>
 
     enum CodingKeys: String, CodingKey { case stopLocations = "StopLocation" }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: DynamicKey.self)
+
+        // The ATP relay returns the documented HAFAS locations in a wrapper
+        // array. Older responses exposed StopLocation directly at the root.
+        if let key = DynamicKey(stringValue: "stopLocationOrCoordLocation"), values.contains(key) {
+            let locations = try values.decode([HafasNearbyLocation].self, forKey: key)
+            stopLocations = OneOrMany(locations.compactMap(\.stopLocation))
+            return
+        }
+
+        guard let key = DynamicKey(stringValue: "StopLocation") else {
+            stopLocations = OneOrMany([])
+            return
+        }
+        stopLocations = try values.decodeIfPresent(OneOrMany<HafasStopLocation>.self, forKey: key) ?? OneOrMany([])
+    }
+}
+
+private struct HafasNearbyLocation: Hashable, Sendable, Decodable {
+    let stopLocation: HafasStopLocation?
+
+    enum CodingKeys: String, CodingKey { case stopLocation = "StopLocation" }
 }
 
 /// The decoded response returned by `departureBoard`.
@@ -413,7 +437,11 @@ public struct HafasDeparture: Hashable, Sendable, Codable {
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         journeyReference = try values.decodeIfPresent(HafasJourneyReference.self, forKey: .journeyReference)
-        product = try values.decodeIfPresent(HafasProduct.self, forKey: .product)
+        if let singleProduct = try? values.decode(HafasProduct.self, forKey: .product) {
+            product = singleProduct
+        } else {
+            product = try values.decodeIfPresent(OneOrMany<HafasProduct>.self, forKey: .product)?.values.first
+        }
         notes = try Self.decodeNestedArray(values, key: .notes, nested: "Note")
         passlist = try Self.decodeNestedArray(values, key: .passlist, nested: "Stop")
         name = try values.decodeIfPresent(String.self, forKey: .name)
