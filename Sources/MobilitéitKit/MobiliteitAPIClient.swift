@@ -601,9 +601,27 @@ public struct HafasPasslistStop: Hashable, Sendable, Codable {
     public let departureDate: String?
     public let arrivalTime: String?
     public let arrivalDate: String?
+    /// Optional per-stop predictions. HAFAS deployments vary, so these remain
+    /// deliberately optional rather than turning an omitted field into an
+    /// on-time assertion.
+    public let realtimeDepartureTime: String?
+    public let realtimeDepartureDate: String?
+    public let realtimeArrivalTime: String?
+    public let realtimeArrivalDate: String?
+    public let realtimeDepartureTrack: String?
+    public let realtimeArrivalTrack: String?
+    public let cancelled: Bool?
+    public let boarding: Bool?
+    public let alighting: Bool?
+    public let realtimeBoarding: Bool?
+    public let realtimeAlighting: Bool?
     enum CodingKeys: String, CodingKey {
         case name, id, externalID = "extId", routeIndex = "routeIdx", longitude = "lon", latitude = "lat"
         case departureTime = "depTime", departureDate = "depDate", arrivalTime = "arrTime", arrivalDate = "arrDate"
+        case realtimeDepartureTime = "rtDepTime", realtimeDepartureDate = "rtDepDate"
+        case realtimeArrivalTime = "rtArrTime", realtimeArrivalDate = "rtArrDate"
+        case realtimeDepartureTrack = "rtDepTrack", realtimeArrivalTrack = "rtArrTrack"
+        case cancelled, boarding, alighting, realtimeBoarding = "rtBoarding", realtimeAlighting = "rtAlighting"
     }
 
     public init(from decoder: Decoder) throws {
@@ -618,6 +636,17 @@ public struct HafasPasslistStop: Hashable, Sendable, Codable {
         departureDate = try values.decodeIfPresent(String.self, forKey: .departureDate)
         arrivalTime = try values.decodeIfPresent(String.self, forKey: .arrivalTime)
         arrivalDate = try values.decodeIfPresent(String.self, forKey: .arrivalDate)
+        realtimeDepartureTime = try values.decodeIfPresent(String.self, forKey: .realtimeDepartureTime)
+        realtimeDepartureDate = try values.decodeIfPresent(String.self, forKey: .realtimeDepartureDate)
+        realtimeArrivalTime = try values.decodeIfPresent(String.self, forKey: .realtimeArrivalTime)
+        realtimeArrivalDate = try values.decodeIfPresent(String.self, forKey: .realtimeArrivalDate)
+        realtimeDepartureTrack = try values.decodeIfPresent(String.self, forKey: .realtimeDepartureTrack)
+        realtimeArrivalTrack = try values.decodeIfPresent(String.self, forKey: .realtimeArrivalTrack)
+        cancelled = try values.decodeIfPresent(Bool.self, forKey: .cancelled)
+        boarding = try values.decodeIfPresent(Bool.self, forKey: .boarding)
+        alighting = try values.decodeIfPresent(Bool.self, forKey: .alighting)
+        realtimeBoarding = try values.decodeIfPresent(Bool.self, forKey: .realtimeBoarding)
+        realtimeAlighting = try values.decodeIfPresent(Bool.self, forKey: .realtimeAlighting)
     }
 }
 

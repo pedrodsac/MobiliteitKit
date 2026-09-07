@@ -143,10 +143,61 @@ import ZIPFoundation
     }
 }
 
+@Test func routingSnapshotProvidesOfflineRaptorJourney() async throws {
+    let folder = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let archiveURL = folder.appendingPathComponent("fixture.zip")
+    let databaseURL = folder.appendingPathComponent("transit.sqlite")
+    try writeFixtureArchive(to: archiveURL)
+    _ = try await GTFSArchiveInstaller.install(archiveAt: archiveURL, databaseAt: databaseURL, generation: 9)
+
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(identifier: "Europe/Berlin")!
+    let anchor = try #require(calendar.date(from: DateComponents(year: 2026, month: 9, day: 4, hour: 1)))
+    let router = try await TransitRouter(databaseURL: databaseURL)
+    let session = try await router.makeSession(for: .init(origin: .stop(id: "stop-a"), destination: .stop(id: "stop-b"), departureTime: anchor))
+    let page = try await session.initial()
+    let journey = try #require(page.journeys.first)
+    #expect(journey.legs.count == 1)
+    #expect(journey.transferCount == 0)
+    #expect(journey.effectiveArrival > anchor)
+}
+
+@Test func realtimeOverlayInjectsDelayedPastBoarding() async throws {
+    let folder = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let archiveURL = folder.appendingPathComponent("fixture.zip")
+    let databaseURL = folder.appendingPathComponent("transit.sqlite")
+    try writeFixtureArchive(to: archiveURL)
+    _ = try await GTFSArchiveInstaller.install(archiveAt: archiveURL, databaseAt: databaseURL)
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(identifier: "Europe/Berlin")!
+    let anchor = try #require(calendar.date(from: DateComponents(year: 2026, month: 9, day: 4, hour: 1, minute: 15)))
+    let departure = try #require(calendar.date(from: DateComponents(year: 2026, month: 9, day: 4, hour: 1, minute: 20)))
+    let arrival = try #require(calendar.date(from: DateComponents(year: 2026, month: 9, day: 4, hour: 1, minute: 30)))
+    let serviceDate = try GTFSDate(parsing: "20260903")
+    let live = FixtureRealtime(patches: [.init(tripID: "trip-1", serviceDate: serviceDate, events: [
+        .init(stopID: "stop-a", effectiveDeparture: departure),
+        .init(stopID: "stop-b", effectiveArrival: arrival),
+    ])])
+    let router = try await TransitRouter(databaseURL: databaseURL, realtimeProvider: live)
+    let session = try await router.makeSession(for: .init(origin: .stop(id: "stop-a"), destination: .stop(id: "stop-b"), departureTime: anchor, realtimePolicy: .bestEffort()))
+    let page = try await session.initial()
+    let journey = try #require(page.journeys.first)
+    #expect(journey.effectiveDeparture == departure)
+    #expect(journey.effectiveArrival == arrival)
+    #expect(journey.scheduledDeparture < anchor)
+}
+
 private func temporaryDirectory() throws -> URL {
     let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
     try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     return url
+}
+
+private struct FixtureRealtime: RealtimeRoutingProvider {
+    let patches: [RealtimeTripPatch]
+    func patches(for stopIDs: [String], from: Date, through: Date) async throws -> [RealtimeTripPatch] { patches }
 }
 
 private func writeFixtureArchive(to url: URL) throws {

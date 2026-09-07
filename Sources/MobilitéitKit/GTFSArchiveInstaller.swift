@@ -86,8 +86,11 @@ public enum GTFSArchiveInstaller {
             throw GTFSArchiveError.unsupportedArchive(error.localizedDescription)
         }
 
-        let required = ["agency.txt", "stops.txt", "routes.txt", "trips.txt", "stop_times.txt", "calendar.txt", "shapes.txt"]
-        let optional = ["calendar_dates.txt", "frequencies.txt", "transfers.txt"]
+        // GTFS deliberately permits calendar.txt and shapes.txt to be absent.
+        // calendar_dates.txt is sufficient when it describes all active dates;
+        // shapes are presentation data and never a routing prerequisite.
+        let required = ["agency.txt", "stops.txt", "routes.txt", "trips.txt", "stop_times.txt"]
+        let optional = ["calendar.txt", "calendar_dates.txt", "shapes.txt", "frequencies.txt", "transfers.txt", "pathways.txt", "levels.txt"]
         var files: [String: URL] = [:]
         for name in required + optional {
             guard let entry = archive[name] else {
@@ -108,12 +111,15 @@ public enum GTFSArchiveInstaller {
             try importAgencies(from: files["agency.txt"]!, into: database)
             try importStops(from: files["stops.txt"]!, into: database)
             try importRoutes(from: files["routes.txt"]!, into: database)
+            guard files["calendar.txt"] != nil || files["calendar_dates.txt"] != nil else {
+                throw GTFSArchiveError.missingRequiredFile("calendar.txt or calendar_dates.txt")
+            }
             let calendarState = try importCalendars(
-                calendarURL: files["calendar.txt"]!,
+                calendarURL: files["calendar.txt"],
                 dateExceptionsURL: files["calendar_dates.txt"],
                 into: database
             )
-            try importShapes(from: files["shapes.txt"]!, into: database)
+            if let shapes = files["shapes.txt"] { try importShapes(from: shapes, into: database) }
 
             var ids = try IdentifierMaps.load(from: database)
             try importTrips(from: files["trips.txt"]!, ids: ids, into: database)
@@ -124,6 +130,9 @@ public enum GTFSArchiveInstaller {
             }
             if let transfersURL = files["transfers.txt"] {
                 try importTransfers(from: transfersURL, ids: ids, into: database)
+            }
+            if let pathwaysURL = files["pathways.txt"] {
+                try importPathways(from: pathwaysURL, ids: ids, into: database)
             }
 
             let info = try materializeServiceDates(calendarState, ids: ids, generation: generation, into: database)
@@ -175,7 +184,8 @@ private extension GTFSArchiveInstaller {
             id INTEGER PRIMARY KEY, gtfs_id TEXT NOT NULL UNIQUE, code TEXT, name TEXT NOT NULL,
             stop_description TEXT, lat_e6 INTEGER NOT NULL, lon_e6 INTEGER NOT NULL,
             location_type INTEGER NOT NULL, parent_station_id TEXT,
-            wheelchair_boarding INTEGER NOT NULL, platform_code TEXT, search_name TEXT NOT NULL
+            wheelchair_boarding INTEGER NOT NULL, platform_code TEXT, search_name TEXT NOT NULL,
+            stop_timezone TEXT, level_id TEXT, stop_access INTEGER
         );
         CREATE VIRTUAL TABLE stop_spatial USING rtree(id, min_lat, max_lat, min_lon, max_lon);
         CREATE TABLE shape (
@@ -193,6 +203,7 @@ private extension GTFSArchiveInstaller {
             trip_id INTEGER NOT NULL REFERENCES trip(id), stop_id INTEGER NOT NULL REFERENCES stop(id),
             sequence INTEGER NOT NULL, arrival_sec INTEGER, departure_sec INTEGER,
             stop_headsign TEXT, pickup_type INTEGER NOT NULL, dropoff_type INTEGER NOT NULL,
+            shape_dist_traveled REAL, timepoint INTEGER, continuous_pickup INTEGER, continuous_dropoff INTEGER,
             PRIMARY KEY(trip_id, sequence)
         ) WITHOUT ROWID;
         CREATE TABLE frequency (
@@ -201,11 +212,17 @@ private extension GTFSArchiveInstaller {
             PRIMARY KEY(trip_id, start_sec)
         ) WITHOUT ROWID;
         CREATE TABLE transfer_rule (
-            id INTEGER PRIMARY KEY, from_stop_id INTEGER NOT NULL REFERENCES stop(id),
-            to_stop_id INTEGER NOT NULL REFERENCES stop(id), transfer_type INTEGER NOT NULL,
+            id INTEGER PRIMARY KEY, from_stop_id INTEGER REFERENCES stop(id),
+            to_stop_id INTEGER REFERENCES stop(id), transfer_type INTEGER NOT NULL,
             min_transfer_sec INTEGER, from_route_id INTEGER REFERENCES route(id),
             to_route_id INTEGER REFERENCES route(id), from_trip_id INTEGER REFERENCES trip(id),
             to_trip_id INTEGER REFERENCES trip(id)
+        );
+        CREATE TABLE pathway (
+            id INTEGER PRIMARY KEY, gtfs_id TEXT NOT NULL UNIQUE,
+            from_stop_id INTEGER NOT NULL REFERENCES stop(id), to_stop_id INTEGER NOT NULL REFERENCES stop(id),
+            pathway_mode INTEGER, is_bidirectional INTEGER, length REAL, traversal_time INTEGER,
+            stair_count INTEGER, max_slope REAL, min_width REAL, signposted_as TEXT, reversed_signposted_as TEXT
         );
         """)
     }
@@ -244,8 +261,8 @@ private extension GTFSArchiveInstaller {
         var csv = try StreamingCSV(url: url, file: "stops.txt")
         for column in ["stop_id", "stop_name", "stop_lat", "stop_lon"] { try csv.requireColumn(column) }
         let insert = try database.prepare("""
-            INSERT INTO stop(gtfs_id,code,name,stop_description,lat_e6,lon_e6,location_type,parent_station_id,wheelchair_boarding,platform_code,search_name)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?)
+            INSERT INTO stop(gtfs_id,code,name,stop_description,lat_e6,lon_e6,location_type,parent_station_id,wheelchair_boarding,platform_code,search_name,stop_timezone,level_id,stop_access)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """)
         let spatial = try database.prepare("INSERT INTO stop_spatial(id,min_lat,max_lat,min_lon,max_lon) VALUES(?,?,?,?,?)")
         while let row = try csv.nextRow() {
@@ -264,6 +281,9 @@ private extension GTFSArchiveInstaller {
             try insert.bind(try row.integer("wheelchair_boarding", required: false) ?? 0, at: 9)
             try insert.bind(row.optional("platform_code"), at: 10)
             try insert.bind(normalizeSearch(name), at: 11)
+            try insert.bind(row.optional("stop_timezone"), at: 12)
+            try insert.bind(row.optional("level_id"), at: 13)
+            try insert.bind(try row.integer("stop_access", required: false), at: 14)
             try insert.step()
 
             try spatial.reset()
@@ -296,7 +316,7 @@ private extension GTFSArchiveInstaller {
     }
 
     static func importCalendars(
-        calendarURL: URL,
+        calendarURL: URL?,
         dateExceptionsURL: URL?,
         into database: SQLiteDatabase
     ) throws -> CalendarImportState {
@@ -310,11 +330,12 @@ private extension GTFSArchiveInstaller {
             VALUES(?,?,?,?,?,?,?,?,?,?)
         """)
 
-        var csv = try StreamingCSV(url: calendarURL, file: "calendar.txt")
-        for column in ["service_id", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "start_date", "end_date"] {
-            try csv.requireColumn(column)
-        }
-        while let row = try csv.nextRow() {
+        if let calendarURL {
+          var csv = try StreamingCSV(url: calendarURL, file: "calendar.txt")
+          for column in ["service_id", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "start_date", "end_date"] {
+              try csv.requireColumn(column)
+          }
+          while let row = try csv.nextRow() {
             let serviceID = try row.required("service_id")
             let start = try GTFSDate(parsing: row.required("start_date"))
             let end = try GTFSDate(parsing: row.required("end_date"))
@@ -336,6 +357,7 @@ private extension GTFSArchiveInstaller {
             rules[serviceID] = CalendarRule(weekdays: days, start: start, end: end)
             firstDate = firstDate.map { Swift.min($0, start) } ?? start
             lastDate = lastDate.map { Swift.max($0, end) } ?? end
+          }
         }
 
         if let dateExceptionsURL {
@@ -419,8 +441,11 @@ private extension GTFSArchiveInstaller {
             try statement.bind(row.optional("trip_short_name"), at: 5)
             try statement.bind(try row.integer("direction_id", required: false), at: 6)
             try statement.bind(row.optional("block_id"), at: 7)
-            if let shapeID = row.optional("shape_id") {
-                try statement.bind(try ids.requiredShape(shapeID, row: row), at: 8)
+            if let shapeID = row.optional("shape_id"), let shape = ids.shape[shapeID] {
+                // Shapes are optional GTFS presentation data. A feed that
+                // omits shapes.txt remains routable even when trips retain
+                // historical shape identifiers.
+                try statement.bind(shape, at: 8)
             } else {
                 try statement.bind(Optional<Int>.none, at: 8)
             }
@@ -434,8 +459,8 @@ private extension GTFSArchiveInstaller {
         var csv = try StreamingCSV(url: url, file: "stop_times.txt")
         for column in ["trip_id", "stop_id", "stop_sequence"] { try csv.requireColumn(column) }
         let statement = try database.prepare("""
-            INSERT INTO stop_time(trip_id,stop_id,sequence,arrival_sec,departure_sec,stop_headsign,pickup_type,dropoff_type)
-            VALUES(?,?,?,?,?,?,?,?)
+            INSERT INTO stop_time(trip_id,stop_id,sequence,arrival_sec,departure_sec,stop_headsign,pickup_type,dropoff_type,shape_dist_traveled,timepoint,continuous_pickup,continuous_dropoff)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
         """)
         while let row = try csv.nextRow() {
             let tripID = try row.required("trip_id")
@@ -450,6 +475,10 @@ private extension GTFSArchiveInstaller {
             try statement.bind(row.optional("stop_headsign"), at: 6)
             try statement.bind(try row.integer("pickup_type", required: false) ?? 0, at: 7)
             try statement.bind(try row.integer("drop_off_type", required: false) ?? 0, at: 8)
+            try statement.bind(try row.double("shape_dist_traveled", required: false), at: 9)
+            try statement.bind(try row.integer("timepoint", required: false), at: 10)
+            try statement.bind(try row.integer("continuous_pickup", required: false), at: 11)
+            try statement.bind(try row.integer("continuous_drop_off", required: false), at: 12)
             try statement.step()
         }
     }
@@ -477,23 +506,54 @@ private extension GTFSArchiveInstaller {
 
     static func importTransfers(from url: URL, ids: IdentifierMaps, into database: SQLiteDatabase) throws {
         var csv = try StreamingCSV(url: url, file: "transfers.txt")
-        for column in ["from_stop_id", "to_stop_id", "transfer_type"] { try csv.requireColumn(column) }
+        try csv.requireColumn("transfer_type")
         let statement = try database.prepare("""
             INSERT INTO transfer_rule(from_stop_id,to_stop_id,transfer_type,min_transfer_sec,from_route_id,to_route_id,from_trip_id,to_trip_id)
             VALUES(?,?,?,?,?,?,?,?)
         """)
         while let row = try csv.nextRow() {
-            let fromStopID = try row.required("from_stop_id")
-            let toStopID = try row.required("to_stop_id")
+            let type = try row.integer("transfer_type")!
+            let fromStopID = row.optional("from_stop_id")
+            let toStopID = row.optional("to_stop_id")
+            // Linked transfer types are allowed to omit stop endpoints. Other
+            // types need a concrete physical pair to be meaningful.
+            if type != 4 && type != 5 && (fromStopID == nil || toStopID == nil) {
+                throw GTFSArchiveError.invalidValue(file: row.file, line: row.line, column: "from_stop_id/to_stop_id", value: "required for transfer type \(type)")
+            }
             try statement.reset()
-            try statement.bind(try ids.requiredStop(fromStopID, row: row), at: 1)
-            try statement.bind(try ids.requiredStop(toStopID, row: row), at: 2)
-            try statement.bind(try row.integer("transfer_type")!, at: 3)
+            try statement.bind(try fromStopID.map { try ids.requiredStop($0, row: row) }, at: 1)
+            try statement.bind(try toStopID.map { try ids.requiredStop($0, row: row) }, at: 2)
+            try statement.bind(type, at: 3)
             try statement.bind(try row.integer("min_transfer_time", required: false), at: 4)
             try statement.bind(try ids.routeID(row.optional("from_route_id"), row: row), at: 5)
             try statement.bind(try ids.routeID(row.optional("to_route_id"), row: row), at: 6)
             try statement.bind(try ids.tripID(row.optional("from_trip_id"), row: row), at: 7)
             try statement.bind(try ids.tripID(row.optional("to_trip_id"), row: row), at: 8)
+            try statement.step()
+        }
+    }
+
+    static func importPathways(from url: URL, ids: IdentifierMaps, into database: SQLiteDatabase) throws {
+        var csv = try StreamingCSV(url: url, file: "pathways.txt")
+        for column in ["pathway_id", "from_stop_id", "to_stop_id"] { try csv.requireColumn(column) }
+        let statement = try database.prepare("""
+            INSERT INTO pathway(gtfs_id,from_stop_id,to_stop_id,pathway_mode,is_bidirectional,length,traversal_time,stair_count,max_slope,min_width,signposted_as,reversed_signposted_as)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+        """)
+        while let row = try csv.nextRow() {
+            try statement.reset()
+            try statement.bind(try row.required("pathway_id"), at: 1)
+            try statement.bind(try ids.requiredStop(row.required("from_stop_id"), row: row), at: 2)
+            try statement.bind(try ids.requiredStop(row.required("to_stop_id"), row: row), at: 3)
+            try statement.bind(try row.integer("pathway_mode", required: false), at: 4)
+            try statement.bind(try row.integer("is_bidirectional", required: false), at: 5)
+            try statement.bind(try row.double("length", required: false), at: 6)
+            try statement.bind(try row.integer("traversal_time", required: false), at: 7)
+            try statement.bind(try row.integer("stair_count", required: false), at: 8)
+            try statement.bind(try row.double("max_slope"), at: 9)
+            try statement.bind(try row.double("min_width"), at: 10)
+            try statement.bind(row.optional("signposted_as"), at: 11)
+            try statement.bind(row.optional("reversed_signposted_as"), at: 12)
             try statement.step()
         }
     }
@@ -528,6 +588,7 @@ private extension GTFSArchiveInstaller {
             ("feed_end", state.lastDate.compactString),
             ("maximum_service_time", String(maximumTime.rawValue)),
             ("generation", String(generation)),
+            ("schema_version", "2"),
         ]
         for (key, value) in pairs {
             try metadata.reset(); try metadata.bind(key, at: 1); try metadata.bind(value, at: 2); try metadata.step()
