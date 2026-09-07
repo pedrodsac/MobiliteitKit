@@ -96,6 +96,19 @@ import ZIPFoundation
     #expect(departure.passlist.values.first?.name == "Gare")
 }
 
+@Test func hafasDepartureBoardAcceptsTheCurrentTopLevelResponse() throws {
+    // ATP currently returns `Departure` at the response root, without a
+    // `DepartureBoard` wrapper.
+    let boardJSON = """
+    {"Departure":{"JourneyDetailRef":{"ref":"1|2"},"Product":{"name":"Bus 10","cls":"32"},"time":"12:00:00","date":"2026-09-03"}}
+    """.data(using: .utf8)!
+
+    let board = try JSONDecoder().decode(HafasDepartureBoardEnvelope.self, from: boardJSON)
+    let departure = try #require(board.departureBoard.departures.values.first)
+    #expect(departure.journeyReference?.reference == "1|2")
+    #expect(departure.product?.name == "Bus 10")
+}
+
 @Test func apiClientAcceptsAnAppEnteredRelayURL() throws {
     let client = try MobiliteitAPIClient(
         apiKey: "relay-key",

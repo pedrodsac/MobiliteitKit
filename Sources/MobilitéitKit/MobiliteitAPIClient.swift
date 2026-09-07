@@ -300,10 +300,24 @@ public struct HafasNearbyStopsEnvelope: Hashable, Sendable, Decodable {
     enum CodingKeys: String, CodingKey { case stopLocations = "StopLocation" }
 }
 
-/// The decoded response envelope returned by `departureBoard`.
+/// The decoded response returned by `departureBoard`.
+///
+/// The current ATP endpoint puts `Departure` directly at the top level. Older
+/// HAFAS deployments have wrapped the same value in `DepartureBoard`, so
+/// accept both shapes while the public client continues to return a single
+/// canonical board value.
 public struct HafasDepartureBoardEnvelope: Hashable, Sendable, Decodable {
     public let departureBoard: HafasDepartureBoard
     enum CodingKeys: String, CodingKey { case departureBoard = "DepartureBoard" }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        if let wrapped = try values.decodeIfPresent(HafasDepartureBoard.self, forKey: .departureBoard) {
+            departureBoard = wrapped
+        } else {
+            departureBoard = try HafasDepartureBoard(from: decoder)
+        }
+    }
 }
 
 /// A decoded HAFAS departure-board payload.
