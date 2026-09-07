@@ -421,6 +421,8 @@ public struct HafasDeparture: Hashable, Sendable, Codable {
     public let cancelled: Bool?
     public let reachable: Bool?
     public let direction: String?
+    public let platform: HafasPlatform?
+    public let realtimePlatform: HafasPlatform?
     public let trainNumber: String?
     public let trainCategory: String?
 
@@ -431,7 +433,8 @@ public struct HafasDeparture: Hashable, Sendable, Codable {
         case passlist = "Stops"
         case name, type, stop, stopID = "stopid", stopExternalID = "stopExtId"
         case plannedTime = "time", plannedDate = "date", realtimeTime = "rtTime", realtimeDate = "rtDate"
-        case prognosisType, cancelled, reachable, direction, trainNumber, trainCategory
+        case prognosisType, cancelled, reachable, direction, platform, realtimePlatform = "rtPlatform"
+        case trainNumber, trainCategory
     }
 
     public init(from decoder: Decoder) throws {
@@ -457,6 +460,8 @@ public struct HafasDeparture: Hashable, Sendable, Codable {
         cancelled = try values.decodeIfPresent(Bool.self, forKey: .cancelled)
         reachable = try values.decodeIfPresent(Bool.self, forKey: .reachable)
         direction = try values.decodeIfPresent(String.self, forKey: .direction)
+        platform = try values.decodeIfPresent(HafasPlatform.self, forKey: .platform)
+        realtimePlatform = try values.decodeIfPresent(HafasPlatform.self, forKey: .realtimePlatform)
         trainNumber = try values.decodeIfPresent(String.self, forKey: .trainNumber)
         trainCategory = try values.decodeIfPresent(String.self, forKey: .trainCategory)
     }
@@ -470,6 +475,27 @@ public struct HafasDeparture: Hashable, Sendable, Codable {
             return try container.decodeIfPresent(OneOrMany<Value>.self, forKey: nestedKey) ?? .init([])
         }
         return try values.decode(OneOrMany<Value>.self, forKey: key)
+    }
+}
+
+/// A platform/quay value. ATP normally returns an object, but some HAFAS
+/// deployments return the display text directly.
+public struct HafasPlatform: Hashable, Sendable, Codable {
+    public let type: String?
+    public let text: String?
+
+    enum CodingKeys: String, CodingKey { case type, text }
+
+    public init(from decoder: Decoder) throws {
+        if let text = try? decoder.singleValueContainer().decode(String.self) {
+            type = nil
+            self.text = text
+            return
+        }
+
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        type = try values.decodeIfPresent(String.self, forKey: .type)
+        text = try values.decodeIfPresent(String.self, forKey: .text)
     }
 }
 
