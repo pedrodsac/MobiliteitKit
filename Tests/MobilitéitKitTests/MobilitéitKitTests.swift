@@ -96,6 +96,18 @@ import ZIPFoundation
     #expect(departure.passlist.values.first?.name == "Gare")
 }
 
+@Test func apiClientAcceptsAnAppEnteredRelayURL() throws {
+    let client = try MobiliteitAPIClient(
+        apiKey: "relay-key",
+        apiURL: "  https://relay.example.com/hafas  "
+    )
+
+    #expect(client.baseURL.absoluteString == "https://relay.example.com/hafas")
+    #expect(throws: MobiliteitAPIError.invalidRequest("apiURL must be an absolute HTTP(S) URL")) {
+        _ = try MobiliteitAPIClient(apiKey: "relay-key", apiURL: "not a URL")
+    }
+}
+
 private func temporaryDirectory() throws -> URL {
     let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
     try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)

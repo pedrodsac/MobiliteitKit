@@ -4,6 +4,20 @@
 package: nearby stops and departure boards. Requests and responses are typed,
 `async`, and `Sendable`.
 
+The host app may let the user enter the API endpoint. This supports relay
+services, including ones mounted under a path prefix:
+
+```swift
+let client = try MobiliteitAPIClient(
+    apiKey: apiKey,
+    apiURL: savedAPIURLText
+)
+```
+
+The entered value must be an absolute HTTP(S) URL. If the app uses the regular
+Mobilitéit endpoint, the existing `MobiliteitAPIClient(apiKey:)` initializer
+uses it by default.
+
 ## Find nearby stops
 
 ```swift

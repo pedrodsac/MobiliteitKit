@@ -341,27 +341,38 @@ public actor GTFSStore {
         at date: Date = Date(),
         horizon: TimeInterval = 4 * 60 * 60,
         limit: Int = 30
-    ) throws -> [ScheduledDeparture] {
-        guard horizon >= 0, horizon.isFinite, limit > 0 else { return [] }
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = try feedTimeZone()
-        let startComponents = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
-        guard let year = startComponents.year, let month = startComponents.month, let day = startComponents.day,
-              let hour = startComponents.hour, let minute = startComponents.minute, let second = startComponents.second else {
-            return []
-        }
-        let wallDate = try GTFSDate(year: year, month: month, day: day)
-        let wallSeconds = Int64(hour * 3_600 + minute * 60 + second)
-        let startAbsolute = Int64(installedFeedInfo.firstServiceDate.days(until: wallDate)) * 86_400 + wallSeconds
-        let endAbsolute = startAbsolute + Int64(horizon.rounded(.up))
-        let firstCandidateDay = Int(floor(Double(startAbsolute) / 86_400.0)) - 1
-        let lastCandidateDay = Int(floor(Double(endAbsolute) / 86_400.0))
-        var events: [(ScheduledDeparture, Int64)] = []
-
-        for dayIndex in max(0, firstCandidateDay)...min(lastCandidateDay, installedFeedInfo.firstServiceDate.days(until: installedFeedInfo.lastServiceDate)) {
+	) throws -> [ScheduledDeparture] {
+		guard horizon >= 0, horizon.isFinite, limit > 0 else { return [] }
+		var calendar = Calendar(identifier: .gregorian)
+		calendar.timeZone = try feedTimeZone()
+		let startComponents = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
+		guard let year = startComponents.year, let month = startComponents.month, let day = startComponents.day,
+			  let hour = startComponents.hour, let minute = startComponents.minute, let second = startComponents.second else {
+			return []
+		}
+		let wallDate = try GTFSDate(year: year, month: month, day: day)
+		let wallSeconds = Int64(hour * 3_600 + minute * 60 + second)
+		let startAbsolute = Int64(installedFeedInfo.firstServiceDate.days(until: wallDate)) * 86_400 + wallSeconds
+		let endAbsolute = startAbsolute + Int64(horizon.rounded(.up))
+		let firstCandidateDay = Int(floor(Double(startAbsolute) / 86_400.0)) - 1
+		let lastCandidateDay = Int(floor(Double(endAbsolute) / 86_400.0))
+		var events: [(ScheduledDeparture, Int64)] = []
+		
+		let max = max(0, firstCandidateDay)
+		let min = min(lastCandidateDay, installedFeedInfo.firstServiceDate.days(until: installedFeedInfo.lastServiceDate))
+		
+		let range: ClosedRange<Int>
+		
+		if max > min {
+			range = min...max
+		} else {
+			range = max...min
+		}
+		
+		for dayIndex in range {
             let base = Int64(dayIndex) * 86_400
-            let lower = max(Int64(0), startAbsolute - base)
-            let upper = min(Int64(installedFeedInfo.maximumServiceTime.rawValue), endAbsolute - base)
+			let lower = Swift.max(Int64(0), startAbsolute - base)
+			let upper = Swift.min(Int64(installedFeedInfo.maximumServiceTime.rawValue), endAbsolute - base)
             guard lower <= upper else { continue }
             let day = ServiceDay(index: Int32(dayIndex))
             let values = try scheduleEvents(

@@ -146,9 +146,12 @@ public struct HafasDepartureBoardRequest: Hashable, Sendable {
 /// Keep the API key outside source control—e.g. in an app's Keychain-backed
 /// configuration—and avoid logging generated request URLs.
 public struct MobiliteitAPIClient: Sendable {
+    /// The default Mobilitéit HAFAS API endpoint.
+    public static let defaultBaseURL = URL(string: "https://cdt.hafas.de/opendata/apiserver")!
+
     /// The HAFAS access key used for requests.
     public let apiKey: String
-    /// The endpoint root. Override this for a compatible test server.
+    /// The endpoint root. Override this for a relay or compatible test server.
     public let baseURL: URL
     private let session: URLSession
 
@@ -160,12 +163,41 @@ public struct MobiliteitAPIClient: Sendable {
     ///   - session: The URL session used for requests.
     public init(
         apiKey: String,
-        baseURL: URL = URL(string: "https://cdt.hafas.de/opendata/apiserver")!,
+        baseURL: URL = MobiliteitAPIClient.defaultBaseURL,
         session: URLSession = .shared
     ) {
         self.apiKey = apiKey
         self.baseURL = baseURL
         self.session = session
+    }
+
+    /// Creates a client from a URL entered or stored by the host app.
+    ///
+    /// This overload is useful for settings screens and relay deployments,
+    /// where the endpoint is typically kept as a `String` in app storage.
+    /// The value may include a path prefix, such as
+    /// `https://relay.example.com/hafas`.
+    ///
+    /// - Parameters:
+    ///   - apiKey: The access key issued for the API, or the value expected by
+    ///     the relay service.
+    ///   - apiURL: An absolute HTTP or HTTPS API endpoint root.
+    ///   - session: The URL session used for requests.
+    /// - Throws: ``MobiliteitAPIError/invalidRequest(_:)`` when `apiURL` is
+    ///   not an absolute HTTP(S) URL with a host.
+    public init(
+        apiKey: String,
+        apiURL: String,
+        session: URLSession = .shared
+    ) throws {
+        let value = apiURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: value),
+              url.host != nil,
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else {
+            throw MobiliteitAPIError.invalidRequest("apiURL must be an absolute HTTP(S) URL")
+        }
+        self.init(apiKey: apiKey, baseURL: url, session: session)
     }
 
     /// Fetches stops near a WGS-84 coordinate.

@@ -62,6 +62,16 @@ let board = try await client.departureBoard(
 )
 ```
 
+If the app lets the user configure an API relay, pass the saved text value to
+the string-based initializer. The value can include a relay path prefix:
+
+```swift
+let client = try MobiliteitAPIClient(
+    apiKey: apiKey,
+    apiURL: savedAPIURLText
+)
+```
+
 Keep the API key in the host app's secure configuration and present live board
 results as an overlay beside the offline schedule. The package does not merge
 or mutate the installed GTFS database with realtime responses.

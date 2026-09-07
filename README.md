@@ -86,6 +86,19 @@ HAFAS stop IDs are opaque and are not assumed to equal GTFS stop IDs. Live
 board results should be displayed as an overlay alongside—not a mutation of—the
 offline schedule.
 
+The host app can expose the API endpoint as a setting. This also supports a
+relay service with a path prefix:
+
+~~~swift
+let client = try MobiliteitAPIClient(
+    apiKey: apiKey,
+    apiURL: savedAPIURLText
+)
+~~~
+
+`savedAPIURLText` must be an absolute `http://` or `https://` URL. If the
+setting is omitted, the client uses the default Mobilitéit HAFAS endpoint.
+
 ## Data boundaries
 
 This particular archive has no useful fare, station hierarchy/accessibility,
