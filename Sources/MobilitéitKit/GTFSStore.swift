@@ -107,6 +107,43 @@ public actor GTFSStore {
         return result
     }
 
+    /// Returns the distinct routes serving each requested stop.
+    ///
+    /// The lookup is independent of a service date so callers can classify
+    /// stops without issuing one timetable query per stop. Input identifiers
+    /// are deduplicated and capped at 500 to stay within the store's bounded
+    /// query contract.
+    public func routes(servingStopIDs stopIDs: [String]) throws -> [String: [TransitRoute]] {
+        var seen: Set<String> = []
+        let identifiers = stopIDs
+            .filter { !$0.isEmpty && seen.insert($0).inserted }
+            .prefix(500)
+        guard !identifiers.isEmpty else { return [:] }
+
+        let placeholders = Array(repeating: "?", count: identifiers.count).joined(separator: ",")
+        let statement = try database.prepare("""
+            SELECT DISTINCT s.gtfs_id,
+                   r.gtfs_id,a.gtfs_id,r.short_name,r.long_name,r.route_type,r.color,r.text_color,r.route_description
+            FROM stop s
+            JOIN stop_time st ON st.stop_id=s.id
+            JOIN trip t ON t.id=st.trip_id
+            JOIN route r ON r.id=t.route_id
+            LEFT JOIN agency a ON a.id=r.agency_id
+            WHERE s.gtfs_id IN (\(placeholders))
+            ORDER BY s.gtfs_id, r.short_name, r.long_name, r.gtfs_id
+        """)
+        for (offset, identifier) in identifiers.enumerated() {
+            try statement.bind(identifier, at: Int32(offset + 1))
+        }
+
+        var result: [String: [TransitRoute]] = [:]
+        while try statement.step() {
+            guard let stopID = statement.text(0) else { continue }
+            result[stopID, default: []].append(Self.route(from: statement, at: 1))
+        }
+        return result
+    }
+
     /// Looks up one stop by its source GTFS identifier.
     public func stop(id: String) throws -> TransitStop? {
         let statement = try database.prepare(Self.stopSelect + " WHERE gtfs_id = ?")
