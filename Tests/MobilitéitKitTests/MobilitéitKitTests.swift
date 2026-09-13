@@ -84,15 +84,16 @@ import ZIPFoundation
     let archiveURL = folder.appendingPathComponent("routes-by-stop.zip")
     let databaseURL = folder.appendingPathComponent("transit.sqlite")
     try writeArchive(to: archiveURL, files: scenarioFiles(
-        routes: "bus,operator,10,Bus,3\ntram,operator,T1,Tram,0\ntrain,operator,RE,Train,2\n",
+        routes: "bus,operator,10,Bus,3\nbus-2,operator,2,Bus 2,3\ntram,operator,T1,Tram,0\ntrain,operator,RE,Train,2\n",
         stops: scenarioStops([
             ("bus-stop", "Bus stop", 49.600000),
             ("tram-stop", "Tram stop", 49.601000),
             ("train-stop", "Train stop", 49.602000),
         ]),
-        trips: "bus,service,bus-run,,,,\ntram,service,tram-run,,,,\ntrain,service,train-run,,,,\n",
+        trips: "bus,service,bus-run,,,,\nbus-2,service,bus-2-run,,,,\ntram,service,tram-run,,,,\ntrain,service,train-run,,,,\n",
         stopTimes: "bus-run,08:00:00,08:00:00,bus-stop,1\n"
             + "bus-run,08:05:00,08:05:00,bus-stop,2\n"
+            + "bus-2-run,08:10:00,08:10:00,bus-stop,1\n"
             + "tram-run,08:00:00,08:00:00,tram-stop,1\n"
             + "train-run,08:00:00,08:00:00,train-stop,1\n"
     ))
@@ -109,9 +110,12 @@ import ZIPFoundation
     ])
 
     #expect(routes.keys.sorted() == ["bus-stop", "train-stop", "tram-stop"])
-    #expect(routes["bus-stop"]?.map(\.id) == ["bus"])
+    #expect(routes["bus-stop"]?.map(\.id) == ["bus", "bus-2"])
     #expect(routes["tram-stop"]?.map(\.type) == [0])
     #expect(routes["train-stop"]?.map(\.type) == [2])
+
+    let overLimit = (0..<500).map { "missing-\($0)" } + ["bus-stop"]
+    #expect(try await store.routes(servingStopIDs: overLimit)["bus-stop"] == nil)
 }
 
 @Test func hafasModelsHandleSingleAndNestedResponseValues() throws {
