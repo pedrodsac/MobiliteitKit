@@ -82,8 +82,8 @@ public struct HafasNearbyStopsRequest: Hashable, Sendable {
 /// `stationID` must be the opaque HAFAS `StopLocation.id`. It is not assumed
 /// to be the same identifier as a GTFS stop ID.
 public struct HafasDepartureBoardRequest: Hashable, Sendable {
-    /// The opaque HAFAS stop id (`StopLocation.id`), rather than assuming GTFS
-    /// stop IDs and HAFAS IDs are interchangeable.
+    /// A HAFAS stop id (`StopLocation.id`) or, for Luxembourg's current feed,
+    /// the numeric GTFS stop id accepted by the ATP departure-board endpoint.
     public let stationID: String
     /// Deprecated by HAFAS, retained for callers that need legacy behavior.
     public let externalStationID: String?
