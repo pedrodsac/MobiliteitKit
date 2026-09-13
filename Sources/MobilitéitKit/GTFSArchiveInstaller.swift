@@ -28,12 +28,15 @@ public enum GTFSArchiveInstaller {
         generation: Int = 1,
         session: URLSession = .shared
     ) async throws -> FeedInfo {
+        debugLog("Download started: \(sourceURL.absoluteString)")
         let (temporaryURL, response) = try await session.download(from: sourceURL)
         defer { try? FileManager.default.removeItem(at: temporaryURL) }
         if let response = response as? HTTPURLResponse,
            !(200..<300).contains(response.statusCode) {
             throw GTFSArchiveError.downloadFailed(statusCode: response.statusCode)
         }
+        let byteCount = (try? temporaryURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        debugLog("Download finished: \(byteCount) bytes; starting SQLite import")
         return try await install(archiveAt: temporaryURL, databaseAt: databaseURL, generation: generation)
     }
 
@@ -66,6 +69,7 @@ public enum GTFSArchiveInstaller {
         databaseAt databaseURL: URL,
         generation: Int
     ) throws -> FeedInfo {
+        debugLog("Preparing GTFS import (generation \(generation))")
         let manager = FileManager.default
         let parent = databaseURL.deletingLastPathComponent()
         try manager.createDirectory(at: parent, withIntermediateDirectories: true)
@@ -101,6 +105,7 @@ public enum GTFSArchiveInstaller {
             _ = try archive.extract(entry, to: output)
             files[name] = output
         }
+        debugLog("Archive extracted: \(files.keys.sorted().joined(separator: ", "))")
 
         let database = try SQLiteDatabase(path: temporaryDatabaseURL.path)
         try database.execute("PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF; PRAGMA temp_store = MEMORY;")
@@ -108,6 +113,7 @@ public enum GTFSArchiveInstaller {
         try database.execute("BEGIN IMMEDIATE")
 
         do {
+            debugLog("Importing agencies, stops, routes, and calendars")
             try importAgencies(from: files["agency.txt"]!, into: database)
             try importStops(from: files["stops.txt"]!, into: database)
             try importRoutes(from: files["routes.txt"]!, into: database)
@@ -122,8 +128,10 @@ public enum GTFSArchiveInstaller {
             if let shapes = files["shapes.txt"] { try importShapes(from: shapes, into: database) }
 
             var ids = try IdentifierMaps.load(from: database)
+            debugLog("Importing trips")
             try importTrips(from: files["trips.txt"]!, ids: ids, into: database)
             ids.trip = try IdentifierMaps.ids(table: "trip", in: database)
+            debugLog("Importing stop times (this is usually the longest stage)")
             try importStopTimes(from: files["stop_times.txt"]!, ids: ids, into: database)
             if let frequencyURL = files["frequencies.txt"] {
                 try importFrequencies(from: frequencyURL, ids: ids, into: database)
@@ -135,6 +143,7 @@ public enum GTFSArchiveInstaller {
                 try importPathways(from: pathwaysURL, ids: ids, into: database)
             }
 
+            debugLog("Materializing service dates and indexes")
             let info = try materializeServiceDates(calendarState, ids: ids, generation: generation, into: database)
             try createIndexes(in: database)
             try database.execute("COMMIT; PRAGMA optimize;")
@@ -144,11 +153,20 @@ public enum GTFSArchiveInstaller {
             } else {
                 try manager.moveItem(at: temporaryDatabaseURL, to: databaseURL)
             }
+            debugLog("GTFS import complete: service \(info.firstServiceDate) through \(info.lastServiceDate)")
             return info
         } catch {
             try? database.execute("ROLLBACK")
             throw error
         }
+    }
+
+    private static func debugLog(_ message: String) {
+        #if DEBUG
+        print("[MobiliteitKit GTFS] \(Date.now.formatted(date: .omitted, time: .standard)): \(message)")
+        #else
+        _ = message
+        #endif
     }
 }
 
