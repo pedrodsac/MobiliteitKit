@@ -106,7 +106,7 @@ private struct SnapshotStop: Sendable { let id: String; let model: TransitStop; 
 private struct SnapshotTime: Sendable { let stop: Int; let sequence: Int; let arrival: Int32?; let departure: Int32?; let pickup: Int; let dropoff: Int }
 private struct SnapshotTrip: Sendable { let id: String; let route: Int; let service: Int; let times: [SnapshotTime]; let headsign: String? }
 private struct SnapshotRule: Sendable { let from: Int?; let to: Int?; let type: Int; let minimum: Int?; let fromRoute: Int?; let toRoute: Int?; let fromTrip: Int?; let toTrip: Int? }
-private struct SnapshotPath: Sendable { let from: Int; let to: Int; let seconds: Int }
+private struct SnapshotPath: Sendable { let from: Int; let to: Int; let seconds: Int; let distance: Double }
 private struct RoutingSnapshot: Sendable {
     let info: FeedInfo; let converter: ServiceInstantConverter; let stops: [SnapshotStop]; let stopByID: [String: Int]; let routes: [TransitRoute]; let trips: [SnapshotTrip]; let active: [Set<Int>]; let rules: [SnapshotRule]; let paths: [SnapshotPath]
     let patterns: [[Int]]
@@ -149,7 +149,7 @@ private enum SnapshotBuilder {
         }
         var active = Array(repeating: Set<Int>(), count: info.firstServiceDate.days(until: info.lastServiceDate) + 1); let activeStmt = try db.prepare("SELECT day_index,service_id FROM service_date"); while try activeStmt.step() { let day = activeStmt.int(0); if active.indices.contains(day), let s = serviceIndex[activeStmt.int(1)] { active[day].insert(s) } }
         let rstmt = try db.prepare("SELECT from_stop_id,to_stop_id,transfer_type,min_transfer_sec,from_route_id,to_route_id,from_trip_id,to_trip_id FROM transfer_rule"); var rules: [SnapshotRule] = []; while try rstmt.step() { rules.append(.init(from: rstmt.isNull(0) ? nil : sqliteStopIndex[rstmt.int(0)], to: rstmt.isNull(1) ? nil : sqliteStopIndex[rstmt.int(1)], type: rstmt.int(2), minimum: rstmt.isNull(3) ? nil : rstmt.int(3), fromRoute: rstmt.isNull(4) ? nil : routeIndex[rstmt.int(4)], toRoute: rstmt.isNull(5) ? nil : routeIndex[rstmt.int(5)], fromTrip: rstmt.isNull(6) ? nil : tripIndex[rstmt.int(6)], toTrip: rstmt.isNull(7) ? nil : tripIndex[rstmt.int(7)])) }
-        var paths: [SnapshotPath] = []; if let pstmt = try? db.prepare("SELECT from_stop_id,to_stop_id,traversal_time,is_bidirectional FROM pathway") { while try pstmt.step() { guard !pstmt.isNull(2), let a = sqliteStopIndex[pstmt.int(0)], let b = sqliteStopIndex[pstmt.int(1)] else { continue }; paths.append(.init(from: a, to: b, seconds: pstmt.int(2))); if pstmt.int(3) == 1 { paths.append(.init(from: b, to: a, seconds: pstmt.int(2))) } } }
+        var paths: [SnapshotPath] = []; if let pstmt = try? db.prepare("SELECT from_stop_id,to_stop_id,traversal_time,is_bidirectional,length FROM pathway") { while try pstmt.step() { guard !pstmt.isNull(2), let a = sqliteStopIndex[pstmt.int(0)], let b = sqliteStopIndex[pstmt.int(1)] else { continue }; let path = SnapshotPath(from: a, to: b, seconds: pstmt.int(2), distance: pstmt.isNull(4) ? 0 : pstmt.double(4)); paths.append(path); if pstmt.int(3) == 1 { paths.append(.init(from: b, to: a, seconds: path.seconds, distance: path.distance)) } } }
         // Grouping by route + ordered occurrence sequence gives RAPTOR patterns,
         // never merely route_id. Families are split conservatively by an
         // overtaking check at search time (small feeds remain inexpensive).
@@ -169,6 +169,13 @@ public actor TransitRouter {
 public actor JourneyPlanningSession {
     private let snapshot: RoutingSnapshot; private let query: RouteQuery; private let walking: (any WalkingRoutingProvider)?; private let realtimeProvider: (any RealtimeRoutingProvider)?
     private var all: [Journey] = []; private var visibleStart = 0; private var visibleEnd = 0; private var revision: UInt64 = 0; private var state: PageRealtimeState; private var metrics = RoutingMetrics()
+    fileprivate struct BuiltJourney {
+        let journey: Journey
+        let firstBoard: Date
+        let tripInstanceKey: String
+        let minimumTransferSlack: Int
+        let totalTransferSlack: Int
+    }
     fileprivate init(snapshot: RoutingSnapshot, query: RouteQuery, walking: (any WalkingRoutingProvider)?, realtime: (any RealtimeRoutingProvider)?) throws { self.snapshot = snapshot; self.query = query; self.walking = walking; self.realtimeProvider = realtime; self.state = query.realtimePolicy == .disabled ? .disabled : .unavailable }
     public func initial(count: Int = 5) async throws -> JourneyPage { if all.isEmpty { all = try await generate(anchor: query.departureTime); visibleStart = 0 }; visibleEnd = min(all.count, max(0, count)); return page() }
     public func later(count: Int = 3) async throws -> JourneyPage { if all.isEmpty { _ = try await initial() }; visibleEnd = min(all.count, visibleEnd + max(0, count)); return page() }
@@ -189,8 +196,16 @@ public actor JourneyPlanningSession {
         }
         metrics.pointRaptorScans += 1
         let candidates = Raptor.search(snapshot: snapshot, query: query, access: access, egress: egress, patches: patches)
-        var journeys = candidates.compactMap { buildJourney($0, access: access, egress: egress) }
-        journeys = strictEnvelope(journeys).sorted(by: journeyOrder)
+        var representatives: [String: BuiltJourney] = [:]
+        for candidate in candidates {
+            guard let journey = buildJourney(candidate, access: access, egress: egress) else { continue }
+            if let existing = representatives[journey.tripInstanceKey] {
+                if prefers(journey, over: existing) { representatives[journey.tripInstanceKey] = journey }
+            } else {
+                representatives[journey.tripInstanceKey] = journey
+            }
+        }
+        var journeys = strictEnvelope(Array(representatives.values)).sorted(by: journeyOrder).map(\.journey)
         let direct = try await directWalk(anchor: anchor)
         if let direct, !journeys.isEmpty { let minDuration = journeys.map(\.duration).min()!; let first = journeys.map(\.effectiveArrival).min()!; if direct.duration < minDuration { return [direct] }; if direct.effectiveArrival < first { journeys.insert(direct, at: 0) } } else if let direct, journeys.isEmpty { return [direct] }
         metrics.profileGenerationMilliseconds = Int(Date().timeIntervalSince(started) * 1_000)
@@ -220,49 +235,172 @@ public actor JourneyPlanningSession {
         var edges: [Edge] = []; for (i,s) in candidates { metrics.walkingRequests += 1; if let route = try? await walking.route(.init(source: c, destination: s.model.coordinate, departure: anchor)) { edges.append(.init(stop: i, seconds: route.durationSeconds, distance: route.distanceMeters, walk: route)) } }; return edges
     }
     private func directWalk(anchor: Date) async throws -> Journey? { guard case let .coordinate(a,al) = query.origin, case let .coordinate(b,bl) = query.destination, let walking, let route = try? await walking.route(.init(source: a, destination: b, departure: anchor)) else { return nil }; let arrival = anchor.addingTimeInterval(TimeInterval(route.durationSeconds)); let leg = WalkingLeg(from: .init(coordinate: a, label: al), to: .init(coordinate: b, label: bl), departure: anchor, arrival: arrival, duration: TimeInterval(route.durationSeconds), distanceMeters: route.distanceMeters, polyline: route.polyline, steps: route.steps, source: .provider); return .init(id: .init("walk:\(a.latitude),\(a.longitude):\(b.latitude),\(b.longitude)"), origin: query.origin, destination: query.destination, scheduledDeparture: anchor, scheduledArrival: arrival, effectiveDeparture: anchor, effectiveArrival: arrival, transferCount: 0, walkingDuration: TimeInterval(route.durationSeconds), walkingDistance: route.distanceMeters, waitingDuration: 0, inVehicleDuration: 0, legs: [.walk(leg)], feedGeneration: snapshot.info.generation) }
-    private func buildJourney(_ candidate: Raptor.Candidate, access: [Edge], egress: [Edge]) -> Journey? {
-        guard let a = access.first(where: { $0.stop == candidate.firstStop }), let e = egress.first(where: { $0.stop == candidate.lastStop }) else { return nil }
-        let depart = candidate.firstDeparture.addingTimeInterval(-TimeInterval(a.seconds)); let arrive = candidate.lastArrival.addingTimeInterval(TimeInterval(e.seconds)); guard depart >= query.departureTime, let firstLeg = candidate.legs.first, let lastLeg = candidate.legs.last else { return nil }
-        let scheduledDepart = firstLeg.scheduledBoard.addingTimeInterval(-TimeInterval(a.seconds))
-        let scheduledArrive = lastLeg.scheduledAlight.addingTimeInterval(TimeInterval(e.seconds))
-        let legs = candidate.legs.map { item -> JourneyLeg in let trip = snapshot.trips[item.trip]; let board = snapshot.stops[item.board].model; let alight = snapshot.stops[item.alight].model; let b = JourneyStopEvent(stop: board, scheduledTime: item.scheduledBoard, effectiveTime: item.boardTime); let x = JourneyStopEvent(stop: alight, scheduledTime: item.scheduledAlight, effectiveTime: item.alightTime); let middle = trip.times[(item.boardPos + 1)..<item.alightPos].map { JourneyStopEvent(stop: snapshot.stops[$0.stop].model, scheduledTime: snapshot.converter.date(serviceDate: item.day, serviceSeconds: $0.arrival ?? $0.departure ?? 0), effectiveTime: snapshot.converter.date(serviceDate: item.day, serviceSeconds: $0.arrival ?? $0.departure ?? 0)) }; return .transit(.init(tripID: trip.id, route: snapshot.routes[trip.route], headsign: trip.headsign, board: b, alight: x, intermediateStops: Array(middle), scheduledDeparture: item.scheduledBoard, scheduledArrival: item.scheduledAlight, effectiveDeparture: item.boardTime, effectiveArrival: item.alightTime)) }
-        let signature = candidate.legs.map { "\(snapshot.trips[$0.trip].id):\($0.boardPos)-\($0.alightPos):\($0.day.compactString)" }.joined(separator: "|")
-        return .init(id: .init(signature), origin: query.origin, destination: query.destination, scheduledDeparture: scheduledDepart, scheduledArrival: scheduledArrive, effectiveDeparture: depart, effectiveArrival: arrive, transferCount: max(0, candidate.legs.count - 1), walkingDuration: TimeInterval(a.seconds + e.seconds), walkingDistance: a.distance + e.distance, waitingDuration: 0, inVehicleDuration: candidate.legs.reduce(0) { $0 + $1.alightTime.timeIntervalSince($1.boardTime) }, legs: legs, feedGeneration: snapshot.info.generation)
+    private func buildJourney(_ candidate: Raptor.Candidate, access: [Edge], egress: [Edge]) -> BuiltJourney? {
+        guard let a = access.first(where: { $0.stop == candidate.firstStop }), let e = egress.first(where: { $0.stop == candidate.lastStop }), let firstTransit = candidate.firstTransit, let lastTransit = candidate.lastTransit else { return nil }
+        let depart = candidate.firstDeparture.addingTimeInterval(-TimeInterval(a.seconds)); let arrive = candidate.lastArrival.addingTimeInterval(TimeInterval(e.seconds)); guard depart >= query.departureTime else { return nil }
+        let scheduledDepart = firstTransit.scheduledBoard.addingTimeInterval(-TimeInterval(a.seconds))
+        let scheduledArrive = lastTransit.scheduledAlight.addingTimeInterval(candidate.lastArrival.timeIntervalSince(lastTransit.alightTime) + TimeInterval(e.seconds))
+        var legs: [JourneyLeg] = []
+        if let walk = a.walk {
+            let from = endpointLocation(query.origin)
+            let to = JourneyLocation(stop: snapshot.stops[candidate.firstStop].model, coordinate: snapshot.stops[candidate.firstStop].model.coordinate, label: snapshot.stops[candidate.firstStop].model.name)
+            legs.append(.walk(.init(from: from, to: to, departure: depart, arrival: candidate.firstDeparture, duration: TimeInterval(walk.durationSeconds), distanceMeters: walk.distanceMeters, polyline: walk.polyline, steps: walk.steps, source: .provider)))
+        }
+        for item in candidate.legs {
+            switch item {
+            case let .transit(item):
+                let trip = snapshot.trips[item.trip]
+                let board = snapshot.stops[item.board].model
+                let alight = snapshot.stops[item.alight].model
+                let b = JourneyStopEvent(stop: board, scheduledTime: item.scheduledBoard, effectiveTime: item.boardTime)
+                let x = JourneyStopEvent(stop: alight, scheduledTime: item.scheduledAlight, effectiveTime: item.alightTime)
+                let middle = trip.times[(item.boardPos + 1)..<item.alightPos].map { JourneyStopEvent(stop: snapshot.stops[$0.stop].model, scheduledTime: snapshot.converter.date(serviceDate: item.day, serviceSeconds: $0.arrival ?? $0.departure ?? 0), effectiveTime: snapshot.converter.date(serviceDate: item.day, serviceSeconds: $0.arrival ?? $0.departure ?? 0)) }
+                legs.append(.transit(.init(tripID: trip.id, route: snapshot.routes[trip.route], headsign: trip.headsign, board: b, alight: x, intermediateStops: Array(middle), scheduledDeparture: item.scheduledBoard, scheduledArrival: item.scheduledAlight, effectiveDeparture: item.boardTime, effectiveArrival: item.alightTime)))
+            case let .pathway(item):
+                let fromStop = snapshot.stops[item.from].model
+                let toStop = snapshot.stops[item.to].model
+                legs.append(.walk(.init(from: .init(stop: fromStop, coordinate: fromStop.coordinate, label: fromStop.name), to: .init(stop: toStop, coordinate: toStop.coordinate, label: toStop.name), departure: item.departure, arrival: item.arrival, duration: TimeInterval(item.seconds), distanceMeters: item.distance, polyline: [fromStop.coordinate, toStop.coordinate], steps: [], source: .pathway)))
+            }
+        }
+        if let walk = e.walk {
+            let from = JourneyLocation(stop: snapshot.stops[candidate.lastStop].model, coordinate: snapshot.stops[candidate.lastStop].model.coordinate, label: snapshot.stops[candidate.lastStop].model.name)
+            let to = endpointLocation(query.destination)
+            let departure = candidate.lastArrival
+            legs.append(.walk(.init(from: from, to: to, departure: departure, arrival: departure.addingTimeInterval(TimeInterval(walk.durationSeconds)), duration: TimeInterval(walk.durationSeconds), distanceMeters: walk.distanceMeters, polyline: walk.polyline, steps: walk.steps, source: .provider)))
+        }
+        let signature = candidate.tripInstanceKey(snapshot: snapshot)
+        let inVehicle = candidate.transitLegs.reduce(0) { $0 + $1.alightTime.timeIntervalSince($1.boardTime) }
+        let walkingDuration = TimeInterval(a.seconds + e.seconds + candidate.pathwaySeconds)
+        let waiting = max(0, arrive.timeIntervalSince(depart) - inVehicle - walkingDuration)
+        let journey = Journey(id: .init(signature), origin: query.origin, destination: query.destination, scheduledDeparture: scheduledDepart, scheduledArrival: scheduledArrive, effectiveDeparture: depart, effectiveArrival: arrive, transferCount: max(0, candidate.transitLegs.count - 1), walkingDuration: walkingDuration, walkingDistance: a.distance + e.distance + candidate.pathwayDistance, waitingDuration: waiting, inVehicleDuration: inVehicle, legs: legs, feedGeneration: snapshot.info.generation)
+        return .init(journey: journey, firstBoard: candidate.firstDeparture, tripInstanceKey: signature, minimumTransferSlack: candidate.transferSlacks.min() ?? .max, totalTransferSlack: candidate.transferSlacks.reduce(0, +))
+    }
+    private func endpointLocation(_ endpoint: JourneyEndpoint) -> JourneyLocation {
+        switch endpoint {
+        case let .coordinate(coordinate, label):
+            return .init(coordinate: coordinate, label: label)
+        case let .stop(id):
+            let stop = snapshot.stops[snapshot.stopByID[id]!].model
+            return .init(stop: stop, coordinate: stop.coordinate, label: stop.name)
+        }
+    }
+
+    private func prefers(_ lhs: BuiltJourney, over rhs: BuiltJourney) -> Bool {
+        (lhs.minimumTransferSlack, lhs.totalTransferSlack, -lhs.journey.effectiveArrival.timeIntervalSinceReferenceDate, -lhs.journey.walkingDuration, lhs.journey.id) > (rhs.minimumTransferSlack, rhs.totalTransferSlack, -rhs.journey.effectiveArrival.timeIntervalSinceReferenceDate, -rhs.journey.walkingDuration, rhs.journey.id)
     }
 }
 
 private enum Raptor {
-    struct Leg { let trip: Int; let board: Int; let alight: Int; let boardPos: Int; let alightPos: Int; let day: GTFSDate; let scheduledBoard: Date; let scheduledAlight: Date; let boardTime: Date; let alightTime: Date }
-    struct Candidate { let legs: [Leg]; let firstStop: Int; let lastStop: Int; let firstDeparture: Date; let lastArrival: Date }
-    private struct Label { let time: Date; let legs: [Leg]; let firstStop: Int; let firstDeparture: Date }
+    // Retain enough non-dominated prefixes to fill a five-result page while
+    // keeping regional, full-feed searches bounded.
+    private static let profileWidth = 8
+    private static let profileHorizon: TimeInterval = 86_400
+    fileprivate struct TripInstance: Hashable { let trip: Int; let day: GTFSDate }
+    struct TransitLeg { let trip: Int; let board: Int; let alight: Int; let boardPos: Int; let alightPos: Int; let day: GTFSDate; let scheduledBoard: Date; let scheduledAlight: Date; let boardTime: Date; let alightTime: Date }
+    struct PathwayLeg { let from: Int; let to: Int; let seconds: Int; let distance: Double; let departure: Date; let arrival: Date }
+    enum Leg { case transit(TransitLeg); case pathway(PathwayLeg) }
+    struct Candidate {
+        let legs: [Leg]; let firstStop: Int; let lastStop: Int; let firstDeparture: Date; let lastArrival: Date
+        let transferSlacks: [Int]; let pathwaySeconds: Int; let pathwayDistance: Double
+        var transitLegs: [TransitLeg] { legs.compactMap { if case let .transit(leg) = $0 { return leg }; return nil } }
+        var firstTransit: TransitLeg? { transitLegs.first }
+        var lastTransit: TransitLeg? { transitLegs.last }
+        func tripInstanceKey(snapshot: RoutingSnapshot) -> String { transitLegs.map { "\(snapshot.trips[$0.trip].id)@\($0.day.compactString)" }.joined(separator: "|") }
+    }
+    fileprivate struct Label {
+        let id: UUID; let time: Date; let legs: [Leg]; let firstStop: Int; let firstDeparture: Date?
+        let lastTransit: TransitLeg?; let transferSlacks: [Int]; let pathwaySeconds: Int; let pathwayDistance: Double
+        let tripKey: [TripInstance]
+    }
     static func search(snapshot: RoutingSnapshot, query: RouteQuery, access: [JourneyPlanningSession.Edge], egress: [JourneyPlanningSession.Edge], patches: [RealtimeTripPatch]) -> [Candidate] {
         guard !access.isEmpty, !egress.isEmpty else { return [] }
         let maxRounds = (query.preferences.maxTransfers ?? max(1, snapshot.trips.count)) + 1
-        var labels: [Int: Label] = [:]; for a in access { labels[a.stop] = .init(time: query.departureTime.addingTimeInterval(TimeInterval(a.seconds)), legs: [], firstStop: a.stop, firstDeparture: query.departureTime.addingTimeInterval(TimeInterval(a.seconds))) }
+        var labels: [Int: [Label]] = [:]
+        for a in access {
+            _ = insert(.init(id: UUID(), time: query.departureTime.addingTimeInterval(TimeInterval(a.seconds)), legs: [], firstStop: a.stop, firstDeparture: nil, lastTransit: nil, transferSlacks: [], pathwaySeconds: 0, pathwayDistance: 0, tripKey: []), at: a.stop, into: &labels)
+        }
         var destination: [Candidate] = []
-        for _ in 0..<maxRounds { var next: [Int: Label] = [:]
+        for _ in 0..<maxRounds { var next: [Int: [Label]] = [:]
             // Patterns are constructed from route + ordered stop occurrences;
             // scanning each family once per round is the RAPTOR unit of work.
             for family in snapshot.patterns { for tripIndex in family { let trip = snapshot.trips[tripIndex]; guard query.preferences.allowedModes.contains(routeType: snapshot.routes[trip.route].type) else { continue }
-                for dayOffset in snapshot.active.indices where snapshot.active[dayOffset].contains(trip.service) { let day = snapshot.info.firstServiceDate.adding(days: dayOffset); let patch = patches.first { $0.tripID == trip.id && $0.serviceDate == day }; guard patch?.status != .cancelled && patch?.status != .unreachable else { continue }
-                    for boardPos in trip.times.indices { let bt = trip.times[boardPos]; guard let depart = bt.departure, bt.pickup == 0 else { continue }; guard let source = labels[bt.stop] else { continue }; let scheduled = snapshot.converter.date(serviceDate: day, serviceSeconds: depart); let effective = patchTime(patch, stop: snapshot.stops[bt.stop].id, departure: true) ?? scheduled; guard let transfer = transferDecision(snapshot: snapshot, incoming: source.legs.last, at: bt.stop, outgoing: tripIndex, preferences: query.preferences), effective >= source.time.addingTimeInterval(TimeInterval(source.legs.isEmpty ? 0 : transfer)) else { continue }
-                        for alightPos in (boardPos + 1)..<trip.times.count { let at = trip.times[alightPos]; guard at.dropoff == 0, let arrival = at.arrival else { continue }; let schedArrival = snapshot.converter.date(serviceDate: day, serviceSeconds: arrival); let effectiveArrival = patchTime(patch, stop: snapshot.stops[at.stop].id, departure: false) ?? schedArrival; let leg = Leg(trip: tripIndex, board: bt.stop, alight: at.stop, boardPos: boardPos, alightPos: alightPos, day: day, scheduledBoard: scheduled, scheduledAlight: schedArrival, boardTime: effective, alightTime: effectiveArrival); let label = Label(time: effectiveArrival, legs: source.legs + [leg], firstStop: source.firstStop, firstDeparture: source.legs.isEmpty ? effective : source.firstDeparture); if next[at.stop].map({ $0.time <= label.time }) != true { next[at.stop] = label } }
+                for dayOffset in snapshot.active.indices where snapshot.active[dayOffset].contains(trip.service) { let day = snapshot.info.firstServiceDate.adding(days: dayOffset); let serviceStart = snapshot.converter.date(serviceDate: day, serviceSeconds: 0); guard serviceStart <= query.departureTime.addingTimeInterval(profileHorizon), serviceStart.addingTimeInterval(TimeInterval(snapshot.info.maximumServiceTime.rawValue)) >= query.departureTime else { continue }; let patch = patches.first { $0.tripID == trip.id && $0.serviceDate == day }; guard patch?.status != .cancelled && patch?.status != .unreachable else { continue }
+                    for boardPos in trip.times.indices { let bt = trip.times[boardPos]; guard let depart = bt.departure, bt.pickup == 0, let sources = labels[bt.stop] else { continue }; let scheduled = snapshot.converter.date(serviceDate: day, serviceSeconds: depart); let effective = patchTime(patch, stop: snapshot.stops[bt.stop].id, departure: true) ?? scheduled
+                        for source in sources {
+                            guard let transfer = transferDecision(snapshot: snapshot, incoming: source.lastTransit, at: bt.stop, outgoing: tripIndex, preferences: query.preferences), effective >= source.time.addingTimeInterval(TimeInterval(source.lastTransit == nil ? 0 : transfer)) else { continue }
+                            let slacks = source.lastTransit == nil ? source.transferSlacks : source.transferSlacks + [Int(effective.timeIntervalSince(source.time)) - transfer]
+                            for alightPos in (boardPos + 1)..<trip.times.count { let at = trip.times[alightPos]; guard at.dropoff == 0, let arrival = at.arrival else { continue }; let schedArrival = snapshot.converter.date(serviceDate: day, serviceSeconds: arrival); let effectiveArrival = patchTime(patch, stop: snapshot.stops[at.stop].id, departure: false) ?? schedArrival; let leg = TransitLeg(trip: tripIndex, board: bt.stop, alight: at.stop, boardPos: boardPos, alightPos: alightPos, day: day, scheduledBoard: scheduled, scheduledAlight: schedArrival, boardTime: effective, alightTime: effectiveArrival); let label = Label(id: UUID(), time: effectiveArrival, legs: source.legs + [.transit(leg)], firstStop: source.firstStop, firstDeparture: source.firstDeparture ?? effective, lastTransit: leg, transferSlacks: slacks, pathwaySeconds: source.pathwaySeconds, pathwayDistance: source.pathwayDistance, tripKey: source.tripKey + [.init(trip: tripIndex, day: day)]); _ = insert(label, at: at.stop, into: &next) }
+                        }
                     }
                 }
             } }
-            // Internal pathways are explicit GTFS footpaths, so they remain
-            // usable without MapKit and never use geometric invented timings.
-            for path in snapshot.paths { if let l = next[path.from] { let candidate = Label(time: l.time.addingTimeInterval(TimeInterval(path.seconds)), legs: l.legs, firstStop: l.firstStop, firstDeparture: l.firstDeparture); if next[path.to].map({ $0.time <= candidate.time }) != true { next[path.to] = candidate } } }
-            for e in egress { if let l = next[e.stop] { destination.append(.init(legs: l.legs, firstStop: l.firstStop, lastStop: e.stop, firstDeparture: l.firstDeparture, lastArrival: l.time)) } }
+            relaxPathways(snapshot: snapshot, labels: &next)
+            for e in egress { for label in next[e.stop] ?? [] where label.firstDeparture != nil { destination.append(.init(legs: label.legs, firstStop: label.firstStop, lastStop: e.stop, firstDeparture: label.firstDeparture!, lastArrival: label.time, transferSlacks: label.transferSlacks, pathwaySeconds: label.pathwaySeconds, pathwayDistance: label.pathwayDistance)) } }
             labels = next; if labels.isEmpty { break }
         }
-        var seen = Set<String>(); return destination.filter { !$0.legs.isEmpty && seen.insert($0.legs.map { "\($0.trip)-\($0.boardPos)-\($0.alightPos)-\($0.day.compactString)" }.joined(separator: "|")).inserted }
+        return destination
     }
+
+    private static func relaxPathways(snapshot: RoutingSnapshot, labels: inout [Int: [Label]]) {
+        var changed = true
+        while changed {
+            changed = false
+            let sources = labels
+            for path in snapshot.paths {
+                for source in sources[path.from] ?? [] {
+                    let arrival = source.time.addingTimeInterval(TimeInterval(path.seconds))
+                    let leg = PathwayLeg(from: path.from, to: path.to, seconds: path.seconds, distance: path.distance, departure: source.time, arrival: arrival)
+                    let label = Label(id: UUID(), time: arrival, legs: source.legs + [.pathway(leg)], firstStop: source.firstStop, firstDeparture: source.firstDeparture, lastTransit: source.lastTransit, transferSlacks: source.transferSlacks, pathwaySeconds: source.pathwaySeconds + path.seconds, pathwayDistance: source.pathwayDistance + path.distance, tripKey: source.tripKey)
+                    if insert(label, at: path.to, into: &labels) { changed = true }
+                }
+            }
+        }
+    }
+
+    private static func insert(_ candidate: Label, at stop: Int, into labels: inout [Int: [Label]]) -> Bool {
+        var bestByTrip: [[TripInstance]: Label] = [:]
+        for label in (labels[stop] ?? []) + [candidate] {
+            if let existing = bestByTrip[label.tripKey] {
+                if prefers(label, over: existing) { bestByTrip[label.tripKey] = label }
+            } else {
+                bestByTrip[label.tripKey] = label
+            }
+        }
+        var profile = Array(bestByTrip.values)
+        profile = profile.filter { candidate in !profile.contains { other in
+            guard let candidateDeparture = candidate.firstDeparture, let otherDeparture = other.firstDeparture else { return false }
+            return otherDeparture >= candidateDeparture && other.time <= candidate.time && (otherDeparture > candidateDeparture || other.time < candidate.time)
+        } }
+        profile.sort { lhs, rhs in
+            if (lhs.firstDeparture ?? .distantPast) != (rhs.firstDeparture ?? .distantPast) { return (lhs.firstDeparture ?? .distantPast) < (rhs.firstDeparture ?? .distantPast) }
+            if lhs.time != rhs.time { return lhs.time < rhs.time }
+            if lhs.minimumSlack != rhs.minimumSlack { return lhs.minimumSlack > rhs.minimumSlack }
+            if lhs.totalSlack != rhs.totalSlack { return lhs.totalSlack > rhs.totalSlack }
+            if lhs.pathwaySeconds != rhs.pathwaySeconds { return lhs.pathwaySeconds < rhs.pathwaySeconds }
+            return precedes(lhs.tripKey, rhs.tripKey)
+        }
+        profile = Array(profile.prefix(profileWidth))
+        labels[stop] = profile
+        return profile.contains(where: { $0.id == candidate.id })
+    }
+
+    private static func prefers(_ lhs: Label, over rhs: Label) -> Bool {
+        (lhs.minimumSlack, lhs.totalSlack, -lhs.time.timeIntervalSinceReferenceDate, -Double(lhs.pathwaySeconds), -lhs.pathwayDistance, -Double(lhs.legs.count)) > (rhs.minimumSlack, rhs.totalSlack, -rhs.time.timeIntervalSinceReferenceDate, -Double(rhs.pathwaySeconds), -rhs.pathwayDistance, -Double(rhs.legs.count))
+    }
+
+    private static func precedes(_ lhs: [TripInstance], _ rhs: [TripInstance]) -> Bool {
+        for (a, b) in zip(lhs, rhs) {
+            if a.trip != b.trip { return a.trip < b.trip }
+            if a.day != b.day { return a.day < b.day }
+        }
+        return lhs.count < rhs.count
+    }
+
     private static func patchTime(_ patch: RealtimeTripPatch?, stop: String, departure: Bool) -> Date? { guard let event = patch?.events.first(where: { $0.stopID == stop }) else { return nil }; return departure ? event.effectiveDeparture : event.effectiveArrival }
     /// Resolves the single maximally-specific GTFS transfer rule. Returning nil
     /// means type 3 forbids the operation. This is intentionally centralised so
     /// numerical scan code cannot accidentally apply several conflicting rules.
-    private static func transferDecision(snapshot: RoutingSnapshot, incoming: Leg?, at stop: Int, outgoing: Int, preferences: RoutingPreferences) -> Int? {
+    private static func transferDecision(snapshot: RoutingSnapshot, incoming: TransitLeg?, at stop: Int, outgoing: Int, preferences: RoutingPreferences) -> Int? {
         guard let incoming else { return 0 }
         let inTrip = snapshot.trips[incoming.trip], outTrip = snapshot.trips[outgoing]
         func equivalent(_ ruleStop: Int?, _ actual: Int) -> Bool {
@@ -282,6 +420,11 @@ private enum Raptor {
     }
 }
 
-private func strictEnvelope(_ journeys: [Journey]) -> [Journey] { journeys.filter { b in !journeys.contains { a in a.id != b.id && a.effectiveDeparture > b.effectiveDeparture && a.effectiveArrival < b.effectiveArrival } } }
-private func journeyOrder(_ a: Journey, _ b: Journey) -> Bool { (a.effectiveDeparture, a.effectiveArrival, a.transferCount, a.walkingDuration, a.duration, a.id) < (b.effectiveDeparture, b.effectiveArrival, b.transferCount, b.walkingDuration, b.duration, b.id) }
+private extension Raptor.Label {
+    var minimumSlack: Int { transferSlacks.min() ?? .max }
+    var totalSlack: Int { transferSlacks.reduce(0, +) }
+}
+
+private func strictEnvelope(_ journeys: [JourneyPlanningSession.BuiltJourney]) -> [JourneyPlanningSession.BuiltJourney] { journeys.filter { b in !journeys.contains { a in a.tripInstanceKey != b.tripInstanceKey && a.firstBoard >= b.firstBoard && a.journey.effectiveArrival <= b.journey.effectiveArrival && (a.firstBoard > b.firstBoard || a.journey.effectiveArrival < b.journey.effectiveArrival) } } }
+private func journeyOrder(_ a: JourneyPlanningSession.BuiltJourney, _ b: JourneyPlanningSession.BuiltJourney) -> Bool { (a.firstBoard, a.journey.effectiveArrival, a.journey.transferCount, a.journey.walkingDuration, a.journey.duration, a.tripInstanceKey) < (b.firstBoard, b.journey.effectiveArrival, b.journey.transferCount, b.journey.walkingDuration, b.journey.duration, b.tripInstanceKey) }
 private func distance(_ a: Coordinate, _ b: Coordinate) -> Double { let p = a.latitude * .pi / 180, q = b.latitude * .pi / 180, dp = q-p, dl = (b.longitude-a.longitude) * .pi / 180; let x = sin(dp/2)*sin(dp/2)+cos(p)*cos(q)*sin(dl/2)*sin(dl/2); return 6_371_000 * 2 * atan2(sqrt(x),sqrt(1-x)) }
