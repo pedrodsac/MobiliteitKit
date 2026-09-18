@@ -261,6 +261,25 @@ import ZIPFoundation
     #expect(page.journeys.allSatisfy { $0.effectiveArrival < date(hour: 9) })
 }
 
+@Test func routePlannerCanExpandAStableInitialProfile() async throws {
+    let fixture = try await installedRouter(
+        using: profileFixtureFiles(),
+        walking: FixtureWalkingProvider(routes: [])
+    )
+    defer { try? FileManager.default.removeItem(at: fixture.folder) }
+    let session = try await fixture.router.makeSession(for: .init(
+        origin: .stop(id: "origin"),
+        destination: .stop(id: "destination"),
+        departureTime: date(hour: 8)
+    ))
+
+    let initial = try await session.initial(count: 5, searchHorizon: 12 * 60)
+    #expect(initial.journeys.map(transitTripInstanceSequence) == [["run-1"], ["run-2"]])
+
+    let expanded = try await session.expanded(count: 5)
+    #expect(expanded.journeys.map(transitTripInstanceSequence) == [["run-1"], ["run-2"], ["run-3"], ["run-4"], ["run-5"]])
+}
+
 @Test func routePlannerWalksToTheNearbyStopWithTheQuickestJourney() async throws {
     let origin = Coordinate(latitude: 49.600000, longitude: 6.100000)
     let fixture = try await installedRouter(using: walkingChoiceFixtureFiles(), walking: FixtureWalkingProvider(routes: [

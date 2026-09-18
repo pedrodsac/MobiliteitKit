@@ -169,6 +169,7 @@ public actor TransitRouter {
 public actor JourneyPlanningSession {
     private let snapshot: RoutingSnapshot; private let query: RouteQuery; private let walking: (any WalkingRoutingProvider)?; private let realtimeProvider: (any RealtimeRoutingProvider)?
     private var all: [Journey] = []; private var visibleStart = 0; private var visibleEnd = 0; private var revision: UInt64 = 0; private var state: PageRealtimeState; private var metrics = RoutingMetrics()
+    private var cachedEndpointEdges: (access: [Edge], egress: [Edge])?
     fileprivate struct BuiltJourney {
         let journey: Journey
         let firstBoard: Date
@@ -177,14 +178,26 @@ public actor JourneyPlanningSession {
         let totalTransferSlack: Int
     }
     fileprivate init(snapshot: RoutingSnapshot, query: RouteQuery, walking: (any WalkingRoutingProvider)?, realtime: (any RealtimeRoutingProvider)?) throws { self.snapshot = snapshot; self.query = query; self.walking = walking; self.realtimeProvider = realtime; self.state = query.realtimePolicy == .disabled ? .disabled : .unavailable }
-    public func initial(count: Int = 5) async throws -> JourneyPage { if all.isEmpty { all = try await generate(anchor: query.departureTime); visibleStart = 0 }; visibleEnd = min(all.count, max(0, count)); return page() }
+    public func initial(count: Int = 5) async throws -> JourneyPage { if all.isEmpty { all = try await generate(anchor: query.departureTime, searchHorizon: Raptor.fullProfileHorizon); visibleStart = 0 }; visibleEnd = min(all.count, max(0, count)); return page() }
+    public func initial(count: Int = 5, searchHorizon: TimeInterval) async throws -> JourneyPage { all = try await generate(anchor: query.departureTime, searchHorizon: max(0, searchHorizon)); visibleStart = 0; visibleEnd = min(all.count, max(0, count)); revision &+= 1; return page() }
+    public func expanded(count: Int = 5) async throws -> JourneyPage { all = try await generate(anchor: query.departureTime, searchHorizon: Raptor.fullProfileHorizon); visibleStart = 0; visibleEnd = min(all.count, max(0, count)); revision &+= 1; return page() }
     public func later(count: Int = 3) async throws -> JourneyPage { if all.isEmpty { _ = try await initial() }; visibleEnd = min(all.count, visibleEnd + max(0, count)); return page() }
     public func earlier(count: Int = 3) async throws -> JourneyPage { visibleStart = max(0, visibleStart - max(0, count)); return page() }
-    public func refreshRealtime() async throws -> JourneyPage { all = try await generate(anchor: query.departureTime, forceRealtime: true); visibleStart = 0; visibleEnd = min(max(visibleEnd, 5), all.count); revision &+= 1; return page() }
+    public func refreshRealtime() async throws -> JourneyPage { all = try await generate(anchor: query.departureTime, searchHorizon: Raptor.fullProfileHorizon, forceRealtime: true); visibleStart = 0; visibleEnd = min(max(visibleEnd, 5), all.count); revision &+= 1; return page() }
     private func page() -> JourneyPage { .init(journeys: Array(all[visibleStart..<visibleEnd]), hasEarlier: visibleStart > 0, hasLater: visibleEnd < all.count, realtimeState: state, revision: revision, metrics: metrics) }
-    private func generate(anchor: Date, forceRealtime: Bool = false) async throws -> [Journey] {
+    private func generate(anchor: Date, searchHorizon: TimeInterval, forceRealtime: Bool = false) async throws -> [Journey] {
         let started = Date()
-        let access = try await endpointEdges(query.origin, anchor: anchor); let egress = try await endpointEdges(query.destination, anchor: anchor)
+        let edges: (access: [Edge], egress: [Edge])
+        if let cachedEndpointEdges {
+            edges = cachedEndpointEdges
+        } else {
+            edges = (
+                try await endpointEdges(query.origin, anchor: anchor),
+                try await endpointEdges(query.destination, anchor: anchor)
+            )
+            cachedEndpointEdges = edges
+        }
+        let access = edges.access; let egress = edges.egress
         var patches: [RealtimeTripPatch] = []
         if case let .bestEffort(configuration) = query.realtimePolicy, let realtimeProvider {
             // Bootstrap with every access stop and the bounded, timetable
@@ -195,7 +208,7 @@ public actor JourneyPlanningSession {
             do { metrics.hafasRequests += 1; patches = try await realtimeProvider.patches(for: ids, from: anchor.addingTimeInterval(-TimeInterval(configuration.scheduledLookbackSeconds)), through: anchor.addingTimeInterval(TimeInterval(configuration.minimumForwardHorizonSeconds))); metrics.delayedPastBoardingsInjected += patches.reduce(0) { partial, patch in partial + patch.events.filter { ($0.scheduledDeparture ?? .distantFuture) < anchor && ($0.effectiveDeparture ?? .distantPast) >= anchor }.count }; metrics.realtimeOverlayRevisions += 1; state = .live } catch { state = .unavailable }
         }
         metrics.pointRaptorScans += 1
-        let candidates = Raptor.search(snapshot: snapshot, query: query, access: access, egress: egress, patches: patches)
+        let candidates = Raptor.search(snapshot: snapshot, query: query, access: access, egress: egress, patches: patches, profileHorizon: searchHorizon)
         var representatives: [String: BuiltJourney] = [:]
         for candidate in candidates {
             guard let journey = buildJourney(candidate, access: access, egress: egress) else { continue }
@@ -296,7 +309,7 @@ private enum Raptor {
     // Retain enough non-dominated prefixes to fill a five-result page while
     // keeping regional, full-feed searches bounded.
     private static let profileWidth = 8
-    private static let profileHorizon: TimeInterval = 86_400
+    static let fullProfileHorizon: TimeInterval = 86_400
     fileprivate struct TripInstance: Hashable { let trip: Int; let day: GTFSDate }
     struct TransitLeg { let trip: Int; let board: Int; let alight: Int; let boardPos: Int; let alightPos: Int; let day: GTFSDate; let scheduledBoard: Date; let scheduledAlight: Date; let boardTime: Date; let alightTime: Date }
     struct PathwayLeg { let from: Int; let to: Int; let seconds: Int; let distance: Double; let departure: Date; let arrival: Date }
@@ -314,7 +327,7 @@ private enum Raptor {
         let lastTransit: TransitLeg?; let transferSlacks: [Int]; let pathwaySeconds: Int; let pathwayDistance: Double
         let tripKey: [TripInstance]
     }
-    static func search(snapshot: RoutingSnapshot, query: RouteQuery, access: [JourneyPlanningSession.Edge], egress: [JourneyPlanningSession.Edge], patches: [RealtimeTripPatch]) -> [Candidate] {
+    static func search(snapshot: RoutingSnapshot, query: RouteQuery, access: [JourneyPlanningSession.Edge], egress: [JourneyPlanningSession.Edge], patches: [RealtimeTripPatch], profileHorizon: TimeInterval) -> [Candidate] {
         guard !access.isEmpty, !egress.isEmpty else { return [] }
         let maxRounds = (query.preferences.maxTransfers ?? max(1, snapshot.trips.count)) + 1
         let relevantServiceDays = snapshot.active.indices.compactMap { dayOffset -> (offset: Int, date: GTFSDate, start: Date)? in
@@ -351,7 +364,13 @@ private enum Raptor {
                       snapshot.trips[representative].times.contains(where: { labels[$0.stop] != nil })
                 else { continue }
                 for tripIndex in family { let trip = snapshot.trips[tripIndex]; guard query.preferences.allowedModes.contains(routeType: snapshot.routes[trip.route].type) else { continue }
-                for serviceDay in relevantServiceDays where snapshot.active[serviceDay.offset].contains(trip.service) { let day = serviceDay.date; let patch = patches.first { $0.tripID == trip.id && $0.serviceDate == day }; guard patch?.status != .cancelled && patch?.status != .unreachable else { continue }
+                for serviceDay in relevantServiceDays where snapshot.active[serviceDay.offset].contains(trip.service) {
+                    guard let firstServiceTime = trip.times.lazy.compactMap({ $0.departure ?? $0.arrival }).first,
+                          let lastServiceTime = trip.times.lazy.reversed().compactMap({ $0.departure ?? $0.arrival }).first,
+                          serviceDay.start.addingTimeInterval(TimeInterval(firstServiceTime)) <= query.departureTime.addingTimeInterval(profileHorizon),
+                          serviceDay.start.addingTimeInterval(TimeInterval(lastServiceTime)) >= query.departureTime
+                    else { continue }
+                    let day = serviceDay.date; let patch = patches.first { $0.tripID == trip.id && $0.serviceDate == day }; guard patch?.status != .cancelled && patch?.status != .unreachable else { continue }
                     for boardPos in trip.times.indices { let bt = trip.times[boardPos]; guard let depart = bt.departure, bt.pickup == 0, let sources = labels[bt.stop] else { continue }; let scheduled = serviceDay.start.addingTimeInterval(TimeInterval(depart)); let effective = patchTime(patch, stop: snapshot.stops[bt.stop].id, departure: true) ?? scheduled
                         for source in sources {
                             guard let transfer = transferDecision(snapshot: snapshot, incoming: source.lastTransit, at: bt.stop, outgoing: tripIndex, preferences: query.preferences), effective >= source.time.addingTimeInterval(TimeInterval(source.lastTransit == nil ? 0 : transfer)) else { continue }
