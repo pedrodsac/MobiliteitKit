@@ -446,13 +446,18 @@ public actor GTFSStore {
         guard safeLimit > 0, lowerBound <= upperBound else { return [] }
         let timeColumn = departure ? "departure_sec" : "arrival_sec"
         let restrictionColumn = departure ? "pickup_type" : "dropoff_type"
+        let onwardStopRequirement = departure
+            ? "AND EXISTS (SELECT 1 FROM stop_time onward WHERE onward.trip_id=st.trip_id AND onward.sequence>st.sequence)"
+            : ""
         let statement = try database.prepare("""
             SELECT t.gtfs_id,r.gtfs_id,a.gtfs_id,r.short_name,r.long_name,r.route_type,r.color,r.text_color,r.route_description,
-                   a.name,a.url,a.timezone,a.language,a.phone,t.headsign,t.direction_id,st.arrival_sec,st.departure_sec,st.pickup_type,st.dropoff_type
-            FROM stop_time st JOIN trip t ON t.id=st.trip_id JOIN route r ON r.id=t.route_id
+                   a.name,a.url,a.timezone,a.language,a.phone,t.headsign,t.direction_id,st.arrival_sec,st.departure_sec,st.pickup_type,st.dropoff_type,
+                   s.platform_code
+            FROM stop_time st JOIN stop s ON s.id=st.stop_id JOIN trip t ON t.id=st.trip_id JOIN route r ON r.id=t.route_id
             JOIN service_date sd ON sd.service_id=t.service_id LEFT JOIN agency a ON a.id=r.agency_id
             WHERE st.stop_id=(SELECT id FROM stop WHERE gtfs_id=?) AND sd.day_index=?
               AND st.\(timeColumn) BETWEEN ? AND ? AND st.\(restrictionColumn) != 1
+              \(onwardStopRequirement)
             ORDER BY st.\(timeColumn), t.gtfs_id LIMIT ?
         """)
         try statement.bind(stopID, at: 1); try statement.bind(day.index, at: 2)
@@ -467,7 +472,7 @@ public actor GTFSStore {
                 Agency(id: id, name: statement.text(9)!, url: statement.text(10), timeZone: statement.text(11)!, language: statement.text(12), phone: statement.text(13))
             }
             result.append(ScheduledDeparture(
-                tripID: statement.text(0)!, stopID: stopID, route: route, agency: agency,
+                tripID: statement.text(0)!, stopID: stopID, platformCode: statement.text(20), route: route, agency: agency,
                 headsign: statement.text(14), directionID: statement.isNull(15) ? nil : statement.int(15),
                 arrival: statement.isNull(16) ? nil : ServiceTime(rawValue: statement.int32(16)),
                 departure: statement.isNull(17) ? nil : ServiceTime(rawValue: statement.int32(17)),

@@ -107,58 +107,71 @@ public enum GTFSArchiveInstaller {
         }
         debugLog("Archive extracted: \(files.keys.sorted().joined(separator: ", "))")
 
-        let database = try SQLiteDatabase(path: temporaryDatabaseURL.path)
-        try database.execute("PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF; PRAGMA temp_store = MEMORY;")
-        try createSchema(in: database)
-        try database.execute("BEGIN IMMEDIATE")
-
+        let info: FeedInfo
         do {
-            debugLog("Importing agencies, stops, routes, and calendars")
-            try importAgencies(from: files["agency.txt"]!, into: database)
-            try importStops(from: files["stops.txt"]!, into: database)
-            try importRoutes(from: files["routes.txt"]!, into: database)
-            guard files["calendar.txt"] != nil || files["calendar_dates.txt"] != nil else {
-                throw GTFSArchiveError.missingRequiredFile("calendar.txt or calendar_dates.txt")
-            }
-            let calendarState = try importCalendars(
-                calendarURL: files["calendar.txt"],
-                dateExceptionsURL: files["calendar_dates.txt"],
-                into: database
-            )
-            if let shapes = files["shapes.txt"] { try importShapes(from: shapes, into: database) }
+            // Keep the write connection in this scope. Publishing an open
+            // SQLite vnode with move/replace trips SQLite's integrity checks
+            // on Apple platforms and can invalidate concurrent readers.
+            let database = try SQLiteDatabase(path: temporaryDatabaseURL.path)
+            try database.execute("PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF; PRAGMA temp_store = MEMORY;")
+            try createSchema(in: database)
+            try database.execute("BEGIN IMMEDIATE")
 
-            var ids = try IdentifierMaps.load(from: database)
-            debugLog("Importing trips")
-            try importTrips(from: files["trips.txt"]!, ids: ids, into: database)
-            ids.trip = try IdentifierMaps.ids(table: "trip", in: database)
-            debugLog("Importing stop times (this is usually the longest stage)")
-            try importStopTimes(from: files["stop_times.txt"]!, ids: ids, into: database)
-            if let frequencyURL = files["frequencies.txt"] {
-                try importFrequencies(from: frequencyURL, ids: ids, into: database)
-            }
-            if let transfersURL = files["transfers.txt"] {
-                try importTransfers(from: transfersURL, ids: ids, into: database)
-            }
-            if let pathwaysURL = files["pathways.txt"] {
-                try importPathways(from: pathwaysURL, ids: ids, into: database)
-            }
+            do {
+                debugLog("Importing agencies, stops, routes, and calendars")
+                try importAgencies(from: files["agency.txt"]!, into: database)
+                try importStops(from: files["stops.txt"]!, into: database)
+                try importRoutes(from: files["routes.txt"]!, into: database)
+                guard files["calendar.txt"] != nil || files["calendar_dates.txt"] != nil else {
+                    throw GTFSArchiveError.missingRequiredFile("calendar.txt or calendar_dates.txt")
+                }
+                let calendarState = try importCalendars(
+                    calendarURL: files["calendar.txt"],
+                    dateExceptionsURL: files["calendar_dates.txt"],
+                    into: database
+                )
+                if let shapes = files["shapes.txt"] { try importShapes(from: shapes, into: database) }
 
-            debugLog("Materializing service dates and indexes")
-            let info = try materializeServiceDates(calendarState, ids: ids, generation: generation, into: database)
-            try createIndexes(in: database)
-            try database.execute("COMMIT; PRAGMA optimize;")
+                var ids = try IdentifierMaps.load(from: database)
+                debugLog("Importing trips")
+                try importTrips(from: files["trips.txt"]!, ids: ids, into: database)
+                ids.trip = try IdentifierMaps.ids(table: "trip", in: database)
+                debugLog("Importing stop times (this is usually the longest stage)")
+                try importStopTimes(from: files["stop_times.txt"]!, ids: ids, into: database)
+                if let frequencyURL = files["frequencies.txt"] {
+                    try importFrequencies(from: frequencyURL, ids: ids, into: database)
+                }
+                if let transfersURL = files["transfers.txt"] {
+                    try importTransfers(from: transfersURL, ids: ids, into: database)
+                }
+                if let pathwaysURL = files["pathways.txt"] {
+                    try importPathways(from: pathwaysURL, ids: ids, into: database)
+                }
 
-            if manager.fileExists(atPath: databaseURL.path) {
-                _ = try manager.replaceItemAt(databaseURL, withItemAt: temporaryDatabaseURL)
-            } else {
-                try manager.moveItem(at: temporaryDatabaseURL, to: databaseURL)
+                debugLog("Materializing service dates and indexes")
+                info = try materializeServiceDates(
+                    calendarState,
+                    ids: ids,
+                    generation: generation,
+                    into: database
+                )
+                try createIndexes(in: database)
+                try database.execute("COMMIT; PRAGMA optimize;")
+            } catch {
+                try? database.execute("ROLLBACK")
+                throw error
             }
-            debugLog("GTFS import complete: service \(info.firstServiceDate) through \(info.lastServiceDate)")
-            return info
-        } catch {
-            try? database.execute("ROLLBACK")
-            throw error
         }
+
+        // The writer and every prepared statement are closed before the
+        // completed database becomes visible at its immutable generation URL.
+        if manager.fileExists(atPath: databaseURL.path) {
+            _ = try manager.replaceItemAt(databaseURL, withItemAt: temporaryDatabaseURL)
+        } else {
+            try manager.moveItem(at: temporaryDatabaseURL, to: databaseURL)
+        }
+        debugLog("GTFS import complete: service \(info.firstServiceDate) through \(info.lastServiceDate)")
+        return info
     }
 
     private static func debugLog(_ message: String) {

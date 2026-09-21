@@ -49,7 +49,11 @@ final class SQLiteDatabase: @unchecked Sendable {
 }
 
 final class SQLiteStatement {
-    private unowned let database: SQLiteDatabase
+    // A prepared statement must keep its connection alive until finalize.
+    // `unowned` allowed the optimizer to release SQLiteDatabase first, making
+    // sqlite3_close fail with outstanding statements and sqlite3_finalize hit
+    // CoreSimulator's database-tracking assertion afterward.
+    private let database: SQLiteDatabase
     private let statement: OpaquePointer
 
     init(database: SQLiteDatabase, statement: OpaquePointer) {

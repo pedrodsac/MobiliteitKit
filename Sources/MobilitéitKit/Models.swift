@@ -260,6 +260,8 @@ public struct TransferRule: Hashable, Sendable, Codable {
 public struct ScheduledDeparture: Hashable, Sendable, Codable {
     public let tripID: String
     public let stopID: String
+    /// GTFS `platform_code` for the stop where this trip departs.
+    public let platformCode: String?
     public let route: TransitRoute
     public let agency: Agency?
     public let headsign: String?
