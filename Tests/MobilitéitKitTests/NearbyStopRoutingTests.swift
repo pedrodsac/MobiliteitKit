@@ -93,6 +93,90 @@ import ZIPFoundation
     #expect(accessWalk.duration == 60)
 }
 
+@Test func selectedDestinationCanUseANearbyAlightingStopWhenWalkingIsFaster() async throws {
+    let folder = FileManager.default.temporaryDirectory
+        .appendingPathComponent("NearbyEgressRoutingTests-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+
+    let archiveURL = folder.appendingPathComponent("fixture.zip")
+    let databaseURL = folder.appendingPathComponent("transit.sqlite")
+    try writeEgressWalkingFixture(to: archiveURL)
+    _ = try await GTFSArchiveInstaller.install(archiveAt: archiveURL, databaseAt: databaseURL)
+
+    let nearbyAlightingStop = Coordinate(latitude: 49.609000, longitude: 6.100000)
+    let destination = Coordinate(latitude: 49.610000, longitude: 6.100000)
+    let router = try await TransitRouter(
+        databaseURL: databaseURL,
+        walkingProvider: FixtureWalkingProvider(routes: [
+            .init(from: nearbyAlightingStop, to: destination, seconds: 120),
+        ])
+    )
+    let session = try await router.makeSession(for: .init(
+        origin: .stop(id: "origin"),
+        destination: .stop(id: "destination"),
+        departureTime: routeTestDate(hour: 8)
+    ))
+
+    let journey = try #require(try await session.initial().journeys.first)
+    let transit = try #require(journey.legs.compactMap { leg in
+        if case let .transit(transit) = leg { return transit }
+        return nil
+    }.first)
+    let finalWalk = try #require(journey.legs.last.flatMap { leg -> WalkingLeg? in
+        if case let .walk(walk) = leg { return walk }
+        return nil
+    })
+
+    #expect(transit.tripID == "fast-egress-run")
+    #expect(transit.alight.stop.id == "nearby-egress")
+    #expect(finalWalk.from.stop?.id == "nearby-egress")
+    #expect(finalWalk.to.stop?.id == "destination")
+    #expect(finalWalk.duration == 120)
+}
+
+@Test func nearbyStopsCanBeConnectedByAWalkingTransfer() async throws {
+    let folder = FileManager.default.temporaryDirectory
+        .appendingPathComponent("WalkingTransferRoutingTests-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+
+    let archiveURL = folder.appendingPathComponent("fixture.zip")
+    let databaseURL = folder.appendingPathComponent("transit.sqlite")
+    try writeWalkingTransferFixture(to: archiveURL)
+    _ = try await GTFSArchiveInstaller.install(archiveAt: archiveURL, databaseAt: databaseURL)
+
+    let transferA = Coordinate(latitude: 49.601000, longitude: 6.100000)
+    let transferB = Coordinate(latitude: 49.602000, longitude: 6.100000)
+    let router = try await TransitRouter(
+        databaseURL: databaseURL,
+        walkingProvider: FixtureWalkingProvider(routes: [
+            .init(from: transferA, to: transferB, seconds: 120),
+        ])
+    )
+    let session = try await router.makeSession(for: .init(
+        origin: .stop(id: "origin"),
+        destination: .stop(id: "destination"),
+        departureTime: routeTestDate(hour: 8),
+        preferences: .init(maxTransfers: 1, minimumTransferSeconds: 120)
+    ))
+
+    let journey = try #require(try await session.initial().journeys.first)
+    let tripIDs = journey.legs.compactMap { leg -> String? in
+        if case let .transit(transit) = leg { return transit.tripID }
+        return nil
+    }
+    let transferWalk = try #require(journey.legs.compactMap { leg -> WalkingLeg? in
+        if case let .walk(walk) = leg, walk.source == .provider { return walk }
+        return nil
+    }.first)
+
+    #expect(tripIDs == ["inbound", "outbound"])
+    #expect(transferWalk.from.stop?.id == "transfer-a")
+    #expect(transferWalk.to.stop?.id == "transfer-b")
+    #expect(transferWalk.duration == 120)
+}
+
 @Test func scheduledDepartureBoardsExcludeATripsFinalStop() async throws {
     let folder = FileManager.default.temporaryDirectory
         .appendingPathComponent("TerminalDepartureTests-\(UUID().uuidString)", isDirectory: true)
@@ -221,5 +305,41 @@ private func writeCrowdedAccessFixture(to url: URL) throws {
                 data.subdata(in: Int(position)..<(Int(position) + size))
             }
         )
+    }
+}
+
+private func writeEgressWalkingFixture(to url: URL) throws {
+    let files: [String: String] = [
+        "agency.txt": "agency_id,agency_name,agency_url,agency_timezone\noperator,Operator,https://example.com,Europe/Luxembourg\n",
+        "calendar_dates.txt": "service_id,date,exception_type\nservice,20260904,1\n",
+        "routes.txt": "route_id,agency_id,route_short_name,route_long_name,route_type\nslow,operator,SLOW,Slow route,3\nfast,operator,FAST,Fast route,3\n",
+        "stops.txt": "stop_id,stop_name,stop_lat,stop_lon\norigin,Origin,49.600000,6.100000\nnearby-egress,Nearby egress,49.609000,6.100000\ndestination,Destination,49.610000,6.100000\n",
+        "trips.txt": "route_id,service_id,trip_id\nslow,service,slow-egress-run\nfast,service,fast-egress-run\n",
+        "stop_times.txt": "trip_id,arrival_time,departure_time,stop_id,stop_sequence\nslow-egress-run,08:05:00,08:05:00,origin,1\nslow-egress-run,08:40:00,08:40:00,destination,2\nfast-egress-run,08:05:00,08:05:00,origin,1\nfast-egress-run,08:20:00,08:20:00,nearby-egress,2\n",
+    ]
+    let archive = try Archive(url: url, accessMode: .create)
+    for (path, content) in files {
+        let data = Data(content.utf8)
+        try archive.addEntry(with: path, type: .file, uncompressedSize: Int64(data.count), compressionMethod: .deflate, provider: { position, size in
+            data.subdata(in: Int(position)..<(Int(position) + size))
+        })
+    }
+}
+
+private func writeWalkingTransferFixture(to url: URL) throws {
+    let files: [String: String] = [
+        "agency.txt": "agency_id,agency_name,agency_url,agency_timezone\noperator,Operator,https://example.com,Europe/Luxembourg\n",
+        "calendar_dates.txt": "service_id,date,exception_type\nservice,20260904,1\n",
+        "routes.txt": "route_id,agency_id,route_short_name,route_long_name,route_type\nin,operator,IN,Inbound,3\nout,operator,OUT,Outbound,3\n",
+        "stops.txt": "stop_id,stop_name,stop_lat,stop_lon\norigin,Origin,49.600000,6.100000\ntransfer-a,Transfer A,49.601000,6.100000\ntransfer-b,Transfer B,49.602000,6.100000\ndestination,Destination,49.610000,6.100000\n",
+        "trips.txt": "route_id,service_id,trip_id\nin,service,inbound\nout,service,outbound\n",
+        "stop_times.txt": "trip_id,arrival_time,departure_time,stop_id,stop_sequence\ninbound,08:05:00,08:05:00,origin,1\ninbound,08:10:00,08:10:00,transfer-a,2\noutbound,08:14:00,08:14:00,transfer-b,1\noutbound,08:25:00,08:25:00,destination,2\n",
+    ]
+    let archive = try Archive(url: url, accessMode: .create)
+    for (path, content) in files {
+        let data = Data(content.utf8)
+        try archive.addEntry(with: path, type: .file, uncompressedSize: Int64(data.count), compressionMethod: .deflate, provider: { position, size in
+            data.subdata(in: Int(position)..<(Int(position) + size))
+        })
     }
 }
