@@ -15,6 +15,11 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
         let board: HafasDepartureBoard?
     }
 
+    private enum BoardFetchEvent: Sendable {
+        case result(BoardResult)
+        case deadlineReached
+    }
+
     private struct Candidate {
         let departure: ScheduledDeparture
         let serviceDate: GTFSDate
@@ -152,14 +157,14 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
             }
         }
 
-        let fetched = (try? await Self.fetchBoards(
+        let fetched = await Self.fetchBoards(
             client: client,
             stopIDs: pending,
             from: from,
             through: through,
             maximumConcurrentRequests: maximumConcurrentBoardRequests,
             timeout: requestTimeout
-        )) ?? [:]
+        )
         for (stopID, board) in fetched {
             result[stopID] = board
             boardsByStopID[stopID] = CachedBoard(
@@ -179,56 +184,58 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
         through: Date,
         maximumConcurrentRequests: Int,
         timeout: Duration
-    ) async throws -> [String: HafasDepartureBoard] {
-        guard !stopIDs.isEmpty else { return [:] }
-        return try await withThrowingTaskGroup(of: [String: HafasDepartureBoard].self) { group in
-            group.addTask {
-                await fetchBoardsWithLimitedConcurrency(
-                    client: client,
-                    stopIDs: stopIDs,
-                    from: from,
-                    through: through,
-                    maximumConcurrentRequests: maximumConcurrentRequests
-                )
-            }
-            group.addTask {
-                try await Task.sleep(for: timeout)
-                throw HafasRealtimeRoutingError.timedOut
-            }
-            guard let first = try await group.next() else {
-                throw HafasRealtimeRoutingError.unavailable
-            }
-            group.cancelAll()
-            return first
+    ) async -> [String: HafasDepartureBoard] {
+        await fetchBoardsWithLimitedConcurrency(
+            stopIDs: stopIDs,
+            maximumConcurrentRequests: maximumConcurrentRequests,
+            timeout: timeout
+        ) { stopID in
+            await boardResult(client: client, stopID: stopID, from: from, through: through).board
         }
     }
 
-    private nonisolated static func fetchBoardsWithLimitedConcurrency(
-        client: MobiliteitAPIClient,
+    nonisolated static func fetchBoardsWithLimitedConcurrency(
         stopIDs: [String],
-        from: Date,
-        through: Date,
-        maximumConcurrentRequests: Int
+        maximumConcurrentRequests: Int,
+        timeout: Duration,
+        fetch: @escaping @Sendable (String) async -> HafasDepartureBoard?
     ) async -> [String: HafasDepartureBoard] {
-        await withTaskGroup(of: BoardResult.self) { group in
+        guard !stopIDs.isEmpty else { return [:] }
+        return await withTaskGroup(of: BoardFetchEvent.self) { group in
             var nextIndex = 0
-            let initialCount = min(maximumConcurrentRequests, stopIDs.count)
+            var completedCount = 0
+            let initialCount = min(max(1, maximumConcurrentRequests), stopIDs.count)
             for _ in 0..<initialCount {
                 let stopID = stopIDs[nextIndex]
                 nextIndex += 1
                 group.addTask {
-                    await boardResult(client: client, stopID: stopID, from: from, through: through)
+                    .result(BoardResult(stopID: stopID, board: await fetch(stopID)))
                 }
+            }
+            group.addTask {
+                try? await Task.sleep(for: timeout)
+                return .deadlineReached
             }
 
             var result: [String: HafasDepartureBoard] = [:]
-            while let value = await group.next() {
-                if let board = value.board { result[value.stopID] = board }
-                guard !Task.isCancelled, nextIndex < stopIDs.count else { continue }
-                let stopID = stopIDs[nextIndex]
-                nextIndex += 1
-                group.addTask {
-                    await boardResult(client: client, stopID: stopID, from: from, through: through)
+            while let event = await group.next() {
+                switch event {
+                case .deadlineReached:
+                    group.cancelAll()
+                    return result
+                case let .result(value):
+                    completedCount += 1
+                    if let board = value.board { result[value.stopID] = board }
+                    if completedCount == stopIDs.count {
+                        group.cancelAll()
+                        return result
+                    }
+                    guard !Task.isCancelled, nextIndex < stopIDs.count else { continue }
+                    let stopID = stopIDs[nextIndex]
+                    nextIndex += 1
+                    group.addTask {
+                        .result(BoardResult(stopID: stopID, board: await fetch(stopID)))
+                    }
                 }
             }
             return result

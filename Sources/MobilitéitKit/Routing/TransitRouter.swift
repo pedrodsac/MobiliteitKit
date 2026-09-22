@@ -474,11 +474,12 @@ public actor JourneyPlanningSession {
         return journeys
     }
     private func realtimeFrontier(access: [Edge], anchor: Date, lookback: Int) -> [String] {
-        var result = Set(access.map { $0.stop })
+        let accessStops = Set(access.map { $0.stop })
+        var result = accessStops
         // This is intentionally bounded and purely static. It finds transfer
         // stops before the live overlay exists, without network work in RAPTOR.
         for trip in snapshot.trips {
-            for time in trip.times where access.contains(where: { $0.stop == time.stop }) {
+            for time in trip.times where accessStops.contains(time.stop) {
                 guard let departure = time.departure else { continue }
                 let activeDays = snapshot.serviceDays.filter { $0.activeServices.contains(trip.service) }
                 if activeDays.contains(where: { $0.start.addingTimeInterval(TimeInterval(departure)) >= anchor.addingTimeInterval(-TimeInterval(lookback)) }) {
@@ -487,7 +488,10 @@ public actor JourneyPlanningSession {
             }
             if result.count >= 64 { break }
         }
-        return result.sorted().prefix(64).map { snapshot.stops[$0].id }
+        // Fetch access boards first. Under the provider's bounded deadline they
+        // carry the most useful patches for journeys the rider can board now.
+        let ordered = accessStops.sorted() + result.subtracting(accessStops).sorted()
+        return ordered.prefix(64).map { snapshot.stops[$0].id }
     }
     fileprivate struct Edge { let stop: Int; let seconds: Int; let distance: Double; let walk: WalkingRoute? }
     private enum EndpointEdgePurpose: Equatable { case access, egress }
