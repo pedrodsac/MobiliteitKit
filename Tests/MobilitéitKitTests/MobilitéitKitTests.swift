@@ -334,6 +334,105 @@ import ZIPFoundation
     #expect(journey.scheduledDeparture < anchor)
 }
 
+@Test func realtimeDelayCanCreateAnOtherwiseImpossibleTransfer() async throws {
+    let folder = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let archiveURL = folder.appendingPathComponent("fixture.zip")
+    let databaseURL = folder.appendingPathComponent("transit.sqlite")
+    try writeArchive(to: archiveURL, files: liveTransferFixtureFiles())
+    _ = try await GTFSArchiveInstaller.install(archiveAt: archiveURL, databaseAt: databaseURL)
+
+    let serviceDate = try GTFSDate(parsing: "20260904")
+    let live = FixtureRealtime(patches: [.init(
+        tripID: "outgoing",
+        serviceDate: serviceDate,
+        events: [
+            .init(
+                stopID: "transfer",
+                scheduledDeparture: date(hour: 8, minute: 5),
+                effectiveDeparture: date(hour: 8, minute: 15),
+                departureSource: .reported
+            ),
+            .init(
+                stopID: "destination",
+                scheduledArrival: date(hour: 8, minute: 20),
+                effectiveArrival: date(hour: 8, minute: 30),
+                arrivalSource: .estimated
+            ),
+        ]
+    )])
+    let router = try await TransitRouter(databaseURL: databaseURL, realtimeProvider: live)
+    let session = try await router.makeSession(for: .init(
+        origin: .stop(id: "origin"),
+        destination: .stop(id: "destination"),
+        departureTime: date(hour: 7, minute: 55),
+        preferences: .init(maxTransfers: 1, minimumTransferSeconds: 120),
+        realtimePolicy: .bestEffort()
+    ))
+
+    let journey = try #require(try await session.initial().journeys.first)
+    #expect(transitTripInstanceSequence(journey) == ["incoming", "outgoing"])
+    let transit = journey.legs.compactMap { if case let .transit(value) = $0 { value } else { nil } }
+    #expect(transit[0].effectiveArrival == date(hour: 8, minute: 10))
+    #expect(transit[1].effectiveDeparture == date(hour: 8, minute: 15))
+    #expect(transit[1].board.timingSource == .reported)
+    #expect(transit[1].alight.timingSource == .estimated)
+}
+
+@Test func realtimeDelayMakesABusCatchableAfterWalkingToTheStop() async throws {
+    let folder = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let archiveURL = folder.appendingPathComponent("fixture.zip")
+    let databaseURL = folder.appendingPathComponent("transit.sqlite")
+    let files = scenarioFiles(
+        routes: "route,operator,10,Bus,3\n",
+        stops: scenarioStops([("origin", "Origin", 49.600100), ("destination", "Destination", 49.610000)]),
+        trips: "route,service,bus-run,Destination,,,\n",
+        stopTimes: "bus-run,08:05:00,08:05:00,origin,1\nbus-run,08:20:00,08:20:00,destination,2\n"
+    )
+    try writeArchive(to: archiveURL, files: files)
+    _ = try await GTFSArchiveInstaller.install(archiveAt: archiveURL, databaseAt: databaseURL)
+
+    let home = Coordinate(latitude: 49.600000, longitude: 6.100000)
+    let walking = FixtureWalkingProvider(routes: [
+        .init(from: home, to: Coordinate(latitude: 49.600100, longitude: 6.100000), seconds: 600),
+    ])
+    let live = FixtureRealtime(patches: [.init(
+        tripID: "bus-run",
+        serviceDate: try GTFSDate(parsing: "20260904"),
+        events: [
+            .init(
+                stopID: "origin",
+                scheduledDeparture: date(hour: 8, minute: 5),
+                effectiveDeparture: date(hour: 8, minute: 15),
+                departureSource: .reported
+            ),
+            .init(
+                stopID: "destination",
+                scheduledArrival: date(hour: 8, minute: 20),
+                effectiveArrival: date(hour: 8, minute: 30),
+                arrivalSource: .estimated
+            ),
+        ]
+    )])
+    let router = try await TransitRouter(
+        databaseURL: databaseURL,
+        walkingProvider: walking,
+        realtimeProvider: live
+    )
+    let session = try await router.makeSession(for: .init(
+        origin: .coordinate(home, label: "Home"),
+        destination: .stop(id: "destination"),
+        departureTime: date(hour: 8),
+        realtimePolicy: .bestEffort()
+    ))
+
+    let journey = try #require(try await session.initial().journeys.first)
+    #expect(transitTripInstanceSequence(journey) == ["bus-run"])
+    #expect(journey.effectiveDeparture == date(hour: 8, minute: 5))
+    #expect(journey.legs.first?.walkingDestinationStopID == "origin")
+}
+
 private func temporaryDirectory() throws -> URL {
     let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
     try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
@@ -342,7 +441,18 @@ private func temporaryDirectory() throws -> URL {
 
 private struct FixtureRealtime: RealtimeRoutingProvider {
     let patches: [RealtimeTripPatch]
-    func patches(for stopIDs: [String], from: Date, through: Date) async throws -> [RealtimeTripPatch] { patches }
+    func patches(
+        for stopIDs: [String],
+        from: Date,
+        through: Date,
+        refreshPolicy: RealtimeRefreshPolicy
+    ) async throws -> RealtimePatchBatch {
+        RealtimePatchBatch(
+            patches: patches,
+            requestedStopIDs: Set(stopIDs),
+            coveredStopIDs: Set(stopIDs)
+        )
+    }
 }
 
 private struct RealisticWalkingProvider: WalkingRoutingProvider {
@@ -481,6 +591,22 @@ private func sameLineFixtureFiles() -> [String: String] {
         stops: scenarioStops([("origin", "Origin", 49.600000), ("destination", "Destination", 49.610000)]),
         trips: "route-10,service,line-10-run-1,,,,\nroute-10,service,line-10-run-2,,,,\n",
         stopTimes: "line-10-run-1,08:05:00,08:05:00,origin,1\nline-10-run-1,08:30:00,08:30:00,destination,2\nline-10-run-2,08:10:00,08:10:00,origin,1\nline-10-run-2,08:35:00,08:35:00,destination,2\n"
+    )
+}
+
+private func liveTransferFixtureFiles() -> [String: String] {
+    scenarioFiles(
+        routes: "in,operator,IN,Incoming,3\nout,operator,OUT,Outgoing,3\n",
+        stops: scenarioStops([
+            ("origin", "Origin", 49.600000),
+            ("transfer", "Transfer", 49.601000),
+            ("destination", "Destination", 49.610000),
+        ]),
+        trips: "in,service,incoming,Transfer,,,\nout,service,outgoing,Destination,,,\n",
+        stopTimes: "incoming,08:00:00,08:00:00,origin,1\n"
+            + "incoming,08:10:00,08:10:00,transfer,2\n"
+            + "outgoing,08:05:00,08:05:00,transfer,1\n"
+            + "outgoing,08:20:00,08:20:00,destination,2\n"
     )
 }
 

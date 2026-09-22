@@ -86,6 +86,13 @@ HAFAS stop IDs are opaque and are not assumed to equal GTFS stop IDs. Live
 board results should be displayed as an overlay alongside—not a mutation of—the
 offline schedule.
 
+For route calculation, `HafasRealtimeRoutingProvider` turns uniquely matched
+HAFAS journeys into a query-time overlay on the immutable GTFS timetable.
+RAPTOR then uses effective times for walking access, boarding, transfers,
+dominance, and ordering. Live failures and ambiguous matches fall back to the
+scheduled timetable. See the `RealtimeRouting` DocC article for setup and
+refresh/cache behavior.
+
 The host app can expose the API endpoint as a setting. This also supports a
 relay service with a path prefix:
 

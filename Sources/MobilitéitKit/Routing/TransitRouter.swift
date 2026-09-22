@@ -44,7 +44,14 @@ public struct RealtimeConfiguration: Hashable, Sendable, Codable {
     }
     public static let `default` = RealtimeConfiguration()
 }
-public enum RealtimePolicy: Hashable, Sendable, Codable { case disabled, bestEffort(RealtimeConfiguration = .default) }
+public enum RealtimeRefreshPolicy: String, Hashable, Sendable, Codable { case useCache, forceRefresh }
+public enum RealtimePolicy: Hashable, Sendable, Codable {
+    case disabled
+    case bestEffort(
+        configuration: RealtimeConfiguration = .default,
+        refresh: RealtimeRefreshPolicy = .useCache
+    )
+}
 
 public struct RouteQuery: Hashable, Sendable {
     public let origin: JourneyEndpoint; public let destination: JourneyEndpoint; public let departureTime: Date
@@ -61,16 +68,86 @@ public struct WalkingRoute: Hashable, Sendable { public let durationSeconds: Int
 public protocol WalkingRoutingProvider: Sendable { func estimate(_ request: WalkingRequest) async throws -> WalkingEstimate; func route(_ request: WalkingRequest) async throws -> WalkingRoute }
 
 public enum RealtimeTripStatus: String, Hashable, Sendable, Codable { case active, cancelled, unreachable }
-public struct RealtimeStopEventPatch: Hashable, Sendable { public let stopID: String; public let scheduledDeparture: Date?; public let effectiveDeparture: Date?; public let scheduledArrival: Date?; public let effectiveArrival: Date?; public init(stopID: String, scheduledDeparture: Date? = nil, effectiveDeparture: Date? = nil, scheduledArrival: Date? = nil, effectiveArrival: Date? = nil) { self.stopID = stopID; self.scheduledDeparture = scheduledDeparture; self.effectiveDeparture = effectiveDeparture; self.scheduledArrival = scheduledArrival; self.effectiveArrival = effectiveArrival } }
+public enum RealtimeTimingSource: String, Hashable, Sendable, Codable { case scheduled, reported, estimated }
+public struct RealtimeStopEventPatch: Hashable, Sendable {
+    public let stopID: String
+    public let scheduledDeparture: Date?
+    public let effectiveDeparture: Date?
+    public let departureSource: RealtimeTimingSource
+    public let scheduledArrival: Date?
+    public let effectiveArrival: Date?
+    public let arrivalSource: RealtimeTimingSource
+    public let platform: String?
+    public init(
+        stopID: String,
+        scheduledDeparture: Date? = nil,
+        effectiveDeparture: Date? = nil,
+        departureSource: RealtimeTimingSource = .scheduled,
+        scheduledArrival: Date? = nil,
+        effectiveArrival: Date? = nil,
+        arrivalSource: RealtimeTimingSource = .scheduled,
+        platform: String? = nil
+    ) {
+        self.stopID = stopID
+        self.scheduledDeparture = scheduledDeparture
+        self.effectiveDeparture = effectiveDeparture
+        self.departureSource = departureSource
+        self.scheduledArrival = scheduledArrival
+        self.effectiveArrival = effectiveArrival
+        self.arrivalSource = arrivalSource
+        self.platform = platform
+    }
+}
 /// A high-confidence, already matched GTFS trip-instance update. The mapping
 /// layer belongs outside RAPTOR; this compact value is its immutable hand-off.
 public struct RealtimeTripPatch: Hashable, Sendable { public let tripID: String; public let serviceDate: GTFSDate; public let status: RealtimeTripStatus; public let events: [RealtimeStopEventPatch]; public init(tripID: String, serviceDate: GTFSDate, status: RealtimeTripStatus = .active, events: [RealtimeStopEventPatch]) { self.tripID = tripID; self.serviceDate = serviceDate; self.status = status; self.events = events } }
-public protocol RealtimeRoutingProvider: Sendable { func patches(for stopIDs: [String], from: Date, through: Date) async throws -> [RealtimeTripPatch] }
+public struct RealtimePatchBatch: Hashable, Sendable {
+    public let patches: [RealtimeTripPatch]
+    public let requestedStopIDs: Set<String>
+    public let coveredStopIDs: Set<String>
+    public init(patches: [RealtimeTripPatch], requestedStopIDs: Set<String>, coveredStopIDs: Set<String>) {
+        self.patches = patches
+        self.requestedStopIDs = requestedStopIDs
+        self.coveredStopIDs = coveredStopIDs
+    }
+}
+public protocol RealtimeRoutingProvider: Sendable {
+    func patches(
+        for stopIDs: [String],
+        from: Date,
+        through: Date,
+        refreshPolicy: RealtimeRefreshPolicy
+    ) async throws -> RealtimePatchBatch
+}
+
+private struct RealtimePatchKey: Hashable, Sendable {
+    let tripID: String
+    let serviceDate: GTFSDate
+}
 
 public enum WalkingSource: String, Hashable, Sendable, Codable { case provider, pathway }
 public struct JourneyLocation: Hashable, Sendable { public let stop: TransitStop?; public let coordinate: Coordinate; public let label: String?; public init(stop: TransitStop? = nil, coordinate: Coordinate, label: String? = nil) { self.stop = stop; self.coordinate = coordinate; self.label = label } }
 public struct WalkingLeg: Hashable, Sendable { public let from: JourneyLocation; public let to: JourneyLocation; public let departure: Date; public let arrival: Date; public let duration: TimeInterval; public let distanceMeters: Double; public let polyline: [Coordinate]; public let steps: [WalkingStep]; public let source: WalkingSource }
-public struct JourneyStopEvent: Hashable, Sendable { public let stop: TransitStop; public let scheduledTime: Date; public let effectiveTime: Date; public let platform: String?; public init(stop: TransitStop, scheduledTime: Date, effectiveTime: Date, platform: String? = nil) { self.stop = stop; self.scheduledTime = scheduledTime; self.effectiveTime = effectiveTime; self.platform = platform } }
+public struct JourneyStopEvent: Hashable, Sendable {
+    public let stop: TransitStop
+    public let scheduledTime: Date
+    public let effectiveTime: Date
+    public let timingSource: RealtimeTimingSource
+    public let platform: String?
+    public init(
+        stop: TransitStop,
+        scheduledTime: Date,
+        effectiveTime: Date,
+        timingSource: RealtimeTimingSource = .scheduled,
+        platform: String? = nil
+    ) {
+        self.stop = stop
+        self.scheduledTime = scheduledTime
+        self.effectiveTime = effectiveTime
+        self.timingSource = timingSource
+        self.platform = platform
+    }
+}
 public struct TransitLeg: Hashable, Sendable { public let tripID: String; public let route: TransitRoute; public let headsign: String?; public let board: JourneyStopEvent; public let alight: JourneyStopEvent; public let intermediateStops: [JourneyStopEvent]; public let scheduledDeparture: Date; public let scheduledArrival: Date; public let effectiveDeparture: Date; public let effectiveArrival: Date }
 public struct InSeatContinuationLeg: Hashable, Sendable { public let fromTripID: String; public let toTripID: String }
 public enum JourneyLeg: Hashable, Sendable { case walk(WalkingLeg), transit(TransitLeg), inSeatContinuation(InSeatContinuationLeg) }
@@ -295,6 +372,8 @@ public actor JourneyPlanningSession {
     private let snapshot: RoutingSnapshot; private let query: RouteQuery; private let walking: (any WalkingRoutingProvider)?; private let realtimeProvider: (any RealtimeRoutingProvider)?
     private var all: [Journey] = []; private var visibleStart = 0; private var visibleEnd = 0; private var revision: UInt64 = 0; private var state: PageRealtimeState; private var metrics = RoutingMetrics()
     private var cachedEndpointEdges: (access: [Edge], egress: [Edge])?
+    private var cachedRealtimeBatch: RealtimePatchBatch?
+    private var latestPatchesByInstance: [RealtimePatchKey: RealtimeTripPatch] = [:]
     fileprivate struct BuiltJourney {
         let journey: Journey
         let firstBoard: Date
@@ -324,13 +403,52 @@ public actor JourneyPlanningSession {
         }
         let access = edges.access; let egress = edges.egress
         var patches: [RealtimeTripPatch] = []
-        if case let .bestEffort(configuration) = query.realtimePolicy, let realtimeProvider {
+        if case let .bestEffort(configuration, requestedRefresh) = query.realtimePolicy,
+           let realtimeProvider {
             // Bootstrap with every access stop and the bounded, timetable
             // derived interchange frontier reachable from those first boards.
             // The backwards start is crucial: a 17:50 scheduled departure can
             // be returned and injected when its effective time is 18:05.
-            let ids = realtimeFrontier(access: access, anchor: anchor, lookback: configuration.scheduledLookbackSeconds); metrics.realtimeFrontierSize = ids.count
-            do { metrics.hafasRequests += 1; patches = try await realtimeProvider.patches(for: ids, from: anchor.addingTimeInterval(-TimeInterval(configuration.scheduledLookbackSeconds)), through: anchor.addingTimeInterval(TimeInterval(configuration.minimumForwardHorizonSeconds))); metrics.delayedPastBoardingsInjected += patches.reduce(0) { partial, patch in partial + patch.events.filter { ($0.scheduledDeparture ?? .distantFuture) < anchor && ($0.effectiveDeparture ?? .distantPast) >= anchor }.count }; metrics.realtimeOverlayRevisions += 1; state = .live } catch { state = .unavailable }
+            let ids = realtimeFrontier(access: access, anchor: anchor, lookback: configuration.scheduledLookbackSeconds)
+            metrics.realtimeFrontierSize = ids.count
+            do {
+                let batch: RealtimePatchBatch
+                if !forceRealtime, let cachedRealtimeBatch {
+                    batch = cachedRealtimeBatch
+                    metrics.hafasCacheHits += 1
+                } else {
+                    metrics.hafasRequests += 1
+                    batch = try await realtimeProvider.patches(
+                        for: ids,
+                        from: anchor.addingTimeInterval(-TimeInterval(configuration.scheduledLookbackSeconds)),
+                        through: anchor.addingTimeInterval(TimeInterval(configuration.minimumForwardHorizonSeconds)),
+                        refreshPolicy: forceRealtime ? .forceRefresh : requestedRefresh
+                    )
+                    cachedRealtimeBatch = batch
+                }
+                patches = batch.patches
+                latestPatchesByInstance = Dictionary(
+                    patches.map { (RealtimePatchKey(tripID: $0.tripID, serviceDate: $0.serviceDate), $0) },
+                    uniquingKeysWith: { _, latest in latest }
+                )
+                metrics.delayedPastBoardingsInjected += patches.reduce(0) { partial, patch in
+                    partial + patch.events.filter {
+                        ($0.scheduledDeparture ?? .distantFuture) < anchor
+                            && ($0.effectiveDeparture ?? .distantPast) >= anchor
+                    }.count
+                }
+                metrics.realtimeOverlayRevisions += 1
+                if batch.coveredStopIDs.isEmpty {
+                    state = .unavailable
+                } else if batch.coveredStopIDs == batch.requestedStopIDs, !patches.isEmpty {
+                    state = .live
+                } else {
+                    state = .partial
+                }
+            } catch {
+                state = .unavailable
+                latestPatchesByInstance = [:]
+            }
         }
         metrics.pointRaptorScans += 1
         let raptorStarted = Date()
@@ -441,9 +559,44 @@ public actor JourneyPlanningSession {
                 let trip = snapshot.trips[item.trip]
                 let board = snapshot.stops[item.board].model
                 let alight = snapshot.stops[item.alight].model
-                let b = JourneyStopEvent(stop: board, scheduledTime: item.scheduledBoard, effectiveTime: item.boardTime)
-                let x = JourneyStopEvent(stop: alight, scheduledTime: item.scheduledAlight, effectiveTime: item.alightTime)
-                let middle = trip.times[(item.boardPos + 1)..<item.alightPos].map { JourneyStopEvent(stop: snapshot.stops[$0.stop].model, scheduledTime: snapshot.converter.date(serviceDate: item.day, serviceSeconds: $0.arrival ?? $0.departure ?? 0), effectiveTime: snapshot.converter.date(serviceDate: item.day, serviceSeconds: $0.arrival ?? $0.departure ?? 0)) }
+                let patch = latestPatchesByInstance[
+                    RealtimePatchKey(tripID: trip.id, serviceDate: item.day)
+                ]
+                let boardPatch = patch?.events.first { $0.stopID == board.id }
+                let alightPatch = patch?.events.first { $0.stopID == alight.id }
+                let b = JourneyStopEvent(
+                    stop: board,
+                    scheduledTime: item.scheduledBoard,
+                    effectiveTime: item.boardTime,
+                    timingSource: boardPatch?.departureSource ?? .scheduled,
+                    platform: boardPatch?.platform ?? board.platformCode
+                )
+                let x = JourneyStopEvent(
+                    stop: alight,
+                    scheduledTime: item.scheduledAlight,
+                    effectiveTime: item.alightTime,
+                    timingSource: alightPatch?.arrivalSource ?? .scheduled,
+                    platform: alightPatch?.platform ?? alight.platformCode
+                )
+                let middle = trip.times[(item.boardPos + 1)..<item.alightPos].map { time in
+                    let stop = snapshot.stops[time.stop].model
+                    let eventPatch = patch?.events.first { $0.stopID == stop.id }
+                    let scheduled = snapshot.converter.date(
+                        serviceDate: item.day,
+                        serviceSeconds: time.arrival ?? time.departure ?? 0
+                    )
+                    return JourneyStopEvent(
+                        stop: stop,
+                        scheduledTime: scheduled,
+                        effectiveTime: eventPatch?.effectiveArrival
+                            ?? eventPatch?.effectiveDeparture
+                            ?? scheduled,
+                        timingSource: eventPatch?.arrivalSource
+                            ?? eventPatch?.departureSource
+                            ?? .scheduled,
+                        platform: eventPatch?.platform ?? stop.platformCode
+                    )
+                }
                 legs.append(.transit(.init(tripID: trip.id, route: snapshot.routes[trip.route], headsign: trip.headsign, board: b, alight: x, intermediateStops: Array(middle), scheduledDeparture: item.scheduledBoard, scheduledArrival: item.scheduledAlight, effectiveDeparture: item.boardTime, effectiveArrival: item.alightTime)))
             case let .pathway(item):
                 let fromStop = snapshot.stops[item.from].model
@@ -533,9 +686,15 @@ private enum Raptor {
     static func search(snapshot: RoutingSnapshot, query: RouteQuery, access: [JourneyPlanningSession.Edge], egress: [JourneyPlanningSession.Edge], patches: [RealtimeTripPatch], walking: (any WalkingRoutingProvider)?, profileHorizon: TimeInterval) async throws -> SearchResult {
         guard !access.isEmpty, !egress.isEmpty else { return .init(candidates: [], scannedPatterns: 0, scannedTripInstances: 0) }
         let maxRounds = (query.preferences.maxTransfers ?? max(1, snapshot.trips.count)) + 1
+        let scheduledLowerBound: Date = switch query.realtimePolicy {
+        case .disabled:
+            query.departureTime
+        case let .bestEffort(configuration, _):
+            query.departureTime.addingTimeInterval(-TimeInterval(configuration.scheduledLookbackSeconds))
+        }
         let relevantServiceDays = snapshot.serviceDays.filter { serviceDay in
             guard serviceDay.start <= query.departureTime.addingTimeInterval(profileHorizon),
-                  serviceDay.start.addingTimeInterval(TimeInterval(snapshot.info.maximumServiceTime.rawValue)) >= query.departureTime
+                  serviceDay.start.addingTimeInterval(TimeInterval(snapshot.info.maximumServiceTime.rawValue)) >= scheduledLowerBound
             else { return false }
             return true
         }
@@ -575,7 +734,7 @@ private enum Raptor {
                 for tripIndex in family { let trip = snapshot.trips[tripIndex]; guard query.preferences.allowedModes.contains(routeType: snapshot.routes[trip.route].type) else { continue }
                 for serviceDay in relevantServiceDays where serviceDay.activeServices.contains(trip.service) {
                     guard serviceDay.start.addingTimeInterval(TimeInterval(trip.firstServiceTime)) <= query.departureTime.addingTimeInterval(profileHorizon),
-                          serviceDay.start.addingTimeInterval(TimeInterval(trip.lastServiceTime)) >= query.departureTime
+                          serviceDay.start.addingTimeInterval(TimeInterval(trip.lastServiceTime)) >= scheduledLowerBound
                     else { continue }
                     scannedTripInstances += 1
                     let day = serviceDay.date; let patch = patchesByInstance[.init(tripID: trip.id, serviceDate: day)]; guard patch?.status != .cancelled && patch?.status != .unreachable else { continue }
