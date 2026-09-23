@@ -226,6 +226,7 @@ import ZIPFoundation
     ))
 
     let page = try await session.initial()
+    print("Routing timings (ms): endpoint=\(page.metrics.endpointPreparationMilliseconds), live=\(page.metrics.realtimePreparationMilliseconds), RAPTOR=\(page.metrics.raptorSearchMilliseconds), RAPTOR CPU=\(page.metrics.raptorCPUMilliseconds), transfer walks=\(page.metrics.walkingTransferMilliseconds), candidates=\(page.metrics.candidateBuildingMilliseconds)")
     #expect(page.journeys.count == 5)
     #expect(page.journeys.allSatisfy { $0.transferCount >= 1 })
     #expect(page.journeys.allSatisfy { journey in journey.legs.contains { if case let .walk(walk) = $0 { return walk.source == .pathway && walk.duration == 90 }; return false } })
@@ -530,7 +531,7 @@ private struct RealisticWalkingProvider: WalkingRoutingProvider {
         if isNear(request.source, home) && isNear(request.destination, gromscheedStop) {
             return .init(durationSeconds: 240, distanceMeters: 300, polyline: [request.source, request.destination])
         }
-        if isNear(request.source, hamilius) && isNear(request.destination, hamiliusStop) {
+        if isNear(request.source, hamiliusStop) && isNear(request.destination, hamilius) {
             return .init(durationSeconds: 60, distanceMeters: 85, polyline: [request.source, request.destination])
         }
         throw WalkingProviderError.noRoute

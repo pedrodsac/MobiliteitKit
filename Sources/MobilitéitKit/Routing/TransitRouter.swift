@@ -250,7 +250,7 @@ private struct PatternOccurrence: Sendable { let pattern: Int; let position: Int
 private struct SnapshotServiceDay: Sendable { let offset: Int; let date: GTFSDate; let start: Date; let activeServices: Set<Int> }
 private struct StopGridCell: Hashable { let latitude: Int; let longitude: Int }
 private struct RoutingSnapshot: Sendable {
-    let info: FeedInfo; let converter: ServiceInstantConverter; let stops: [SnapshotStop]; let stopByID: [String: Int]; let routes: [TransitRoute]; let trips: [SnapshotTrip]; let tripByID: [String: Int]; let boardableStops: Set<Int>; let alightableStops: Set<Int>; let serviceDays: [SnapshotServiceDay]; let rulesByGroup: [RuleGroupKey: [SnapshotRule]]; let stationGroupByStop: [Int]; let pathsByFrom: [[SnapshotPath]]; let pathsByTo: [[SnapshotPath]]; let nearbyTransferStopsByStop: [[Int]]
+    let info: FeedInfo; let converter: ServiceInstantConverter; let stops: [SnapshotStop]; let stopByID: [String: Int]; let routes: [TransitRoute]; let trips: [SnapshotTrip]; let tripByID: [String: Int]; let tripIndicesByDepartureStop: [[Int]]; let boardableStops: Set<Int>; let alightableStops: Set<Int>; let serviceDays: [SnapshotServiceDay]; let lastActiveDayStartByService: [Date?]; let rulesByGroup: [RuleGroupKey: [SnapshotRule]]; let stationGroupByStop: [Int]; let pathsByFrom: [[SnapshotPath]]; let pathsByTo: [[SnapshotPath]]; let nearbyTransferStopsByStop: [[Int]]
     let patterns: [SnapshotPattern]; let patternOccurrencesByStop: [[PatternOccurrence]]; let loadMilliseconds: Int
 }
 
@@ -319,6 +319,12 @@ private enum SnapshotBuilder {
             }
         }
         let tripByID = Dictionary(uniqueKeysWithValues: trips.enumerated().map { ($0.element.id, $0.offset) })
+        var tripIndicesByDepartureStop = Array(repeating: [Int](), count: stops.count)
+        for (tripIndex, trip) in trips.enumerated() {
+            for stop in Set(trip.times.compactMap { $0.departure == nil ? nil : $0.stop }) {
+                tripIndicesByDepartureStop[stop].append(tripIndex)
+            }
+        }
         let boardableStops = Set(trips.flatMap { trip in
             trip.times.compactMap { time in
                 time.pickup == 0 && time.departure != nil ? time.stop : nil
@@ -368,7 +374,13 @@ private enum SnapshotBuilder {
             let date = info.firstServiceDate.adding(days: offset)
             return SnapshotServiceDay(offset: offset, date: date, start: converter.date(serviceDate: date, serviceSeconds: 0), activeServices: active[offset])
         }
-        return .init(info: info, converter: converter, stops: stops, stopByID: stopByID, routes: routes, trips: trips, tripByID: tripByID, boardableStops: boardableStops, alightableStops: alightableStops, serviceDays: serviceDays, rulesByGroup: rulesByGroup, stationGroupByStop: stationGroupByStop, pathsByFrom: pathsByFrom, pathsByTo: pathsByTo, nearbyTransferStopsByStop: nearbyTransferStopsByStop, patterns: patterns, patternOccurrencesByStop: patternOccurrencesByStop, loadMilliseconds: Int(Date().timeIntervalSince(loadStarted) * 1_000))
+        var lastActiveDayStartByService = Array<Date?>(repeating: nil, count: serviceIndex.count)
+        for day in serviceDays {
+            for service in day.activeServices {
+                lastActiveDayStartByService[service] = day.start
+            }
+        }
+        return .init(info: info, converter: converter, stops: stops, stopByID: stopByID, routes: routes, trips: trips, tripByID: tripByID, tripIndicesByDepartureStop: tripIndicesByDepartureStop, boardableStops: boardableStops, alightableStops: alightableStops, serviceDays: serviceDays, lastActiveDayStartByService: lastActiveDayStartByService, rulesByGroup: rulesByGroup, stationGroupByStop: stationGroupByStop, pathsByFrom: pathsByFrom, pathsByTo: pathsByTo, nearbyTransferStopsByStop: nearbyTransferStopsByStop, patterns: patterns, patternOccurrencesByStop: patternOccurrencesByStop, loadMilliseconds: Int(Date().timeIntervalSince(loadStarted) * 1_000))
     }
 
     /// Precomputes a small geographic interchange frontier for every stop.
@@ -550,13 +562,16 @@ public actor JourneyPlanningSession {
     private func realtimeFrontier(access: [Edge], anchor: Date, lookback: Int) -> [String] {
         let accessStops = Set(access.map { $0.stop })
         var result = accessStops
+        let lowerBound = anchor.addingTimeInterval(-TimeInterval(lookback))
+        let candidateTrips = Set(accessStops.flatMap { snapshot.tripIndicesByDepartureStop[$0] }).sorted()
         // This is intentionally bounded and purely static. It finds transfer
         // stops before the live overlay exists, without network work in RAPTOR.
-        for trip in snapshot.trips {
+        for tripIndex in candidateTrips {
+            let trip = snapshot.trips[tripIndex]
+            guard let lastActiveDay = snapshot.lastActiveDayStartByService[trip.service] else { continue }
             for time in trip.times where accessStops.contains(time.stop) {
                 guard let departure = time.departure else { continue }
-                let activeDays = snapshot.serviceDays.filter { $0.activeServices.contains(trip.service) }
-                if activeDays.contains(where: { $0.start.addingTimeInterval(TimeInterval(departure)) >= anchor.addingTimeInterval(-TimeInterval(lookback)) }) {
+                if lastActiveDay.addingTimeInterval(TimeInterval(departure)) >= lowerBound {
                     result.formUnion(trip.times.map(\.stop))
                 }
             }
