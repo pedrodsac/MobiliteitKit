@@ -308,6 +308,66 @@ import ZIPFoundation
     #expect(page.journeys.map(transitTripInstanceSequence) == [["line-10-run-1"], ["line-10-run-2"]])
 }
 
+@Test func parallelPatternScanningIsDeterministic() async throws {
+    let routeCount = 40
+    let routes = (0..<routeCount).map { "route-\($0),operator,R\($0),Route \($0),3" }.joined(separator: "\n") + "\n"
+    let trips = (0..<routeCount).map { "route-\($0),service,run-\($0),,,," }.joined(separator: "\n") + "\n"
+    let stopTimes = (0..<routeCount).map { index in
+        let departureMinute = index
+        let arrivalMinute = index + 20
+        let departure = String(format: "08:%02d:00", departureMinute)
+        let arrivalHour = 8 + arrivalMinute / 60
+        let arrival = String(format: "%02d:%02d:00", arrivalHour, arrivalMinute % 60)
+        return "run-\(index),\(departure),\(departure),origin,1\nrun-\(index),\(arrival),\(arrival),destination,2"
+    }.joined(separator: "\n") + "\n"
+    let fixture = try await installedRouter(
+        using: scenarioFiles(
+            routes: routes,
+            stops: scenarioStops([("origin", "Origin", 49.600000), ("destination", "Destination", 49.610000)]),
+            trips: trips,
+            stopTimes: stopTimes
+        ),
+        walking: FixtureWalkingProvider(routes: [])
+    )
+    defer { try? FileManager.default.removeItem(at: fixture.folder) }
+
+    var expected: [[String]]?
+    for _ in 0..<5 {
+        let session = try await fixture.router.makeSession(for: .init(
+            origin: .stop(id: "origin"),
+            destination: .stop(id: "destination"),
+            departureTime: date(hour: 8)
+        ))
+        let page = try await session.initial()
+        let sequences = page.journeys.map(transitTripInstanceSequence)
+        if let expected { #expect(sequences == expected) }
+        else { expected = sequences }
+        #expect(page.metrics.raptorWorkerCount == min(4, ProcessInfo.processInfo.activeProcessorCount))
+    }
+}
+
+@Test func walkingRoutesAreCachedAcrossSessions() async throws {
+    let provider = CountingWalkingProvider()
+    let fixture = try await installedRouter(using: walkingChoiceFixtureFiles(), walking: provider)
+    defer { try? FileManager.default.removeItem(at: fixture.folder) }
+    let origin = Coordinate(latitude: 49.600000, longitude: 6.100000)
+
+    func page() async throws -> JourneyPage {
+        let session = try await fixture.router.makeSession(for: .init(
+            origin: .coordinate(origin, label: "Home"),
+            destination: .stop(id: "destination"),
+            departureTime: date(hour: 8)
+        ))
+        return try await session.initial()
+    }
+
+    _ = try await page()
+    let firstRequestCount = await provider.requestCount
+    let cachedPage = try await page()
+    #expect(await provider.requestCount == firstRequestCount)
+    #expect(cachedPage.metrics.walkingCacheHits > 0)
+}
+
 @Test func realtimeOverlayInjectsDelayedPastBoarding() async throws {
     let folder = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: folder) }
@@ -504,6 +564,24 @@ private struct FixtureWalkingProvider: WalkingRoutingProvider {
             throw WalkingProviderError.noRoute
         }
         return .init(durationSeconds: match.seconds, distanceMeters: Double(match.seconds), polyline: [match.from, match.to])
+    }
+}
+
+private actor CountingWalkingProvider: WalkingRoutingProvider {
+    private(set) var requestCount = 0
+
+    func estimate(_ request: WalkingRequest) async throws -> WalkingEstimate {
+        requestCount += 1
+        return .init(durationSeconds: 60, distanceMeters: 75)
+    }
+
+    func route(_ request: WalkingRequest) async throws -> WalkingRoute {
+        requestCount += 1
+        return .init(
+            durationSeconds: 60,
+            distanceMeters: 75,
+            polyline: [request.source, request.destination]
+        )
     }
 }
 
