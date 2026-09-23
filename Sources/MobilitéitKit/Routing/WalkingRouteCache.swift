@@ -47,6 +47,17 @@ actor WalkingRouteCache: WalkingRoutingProvider {
         .init(requests: requestCount, hits: hitCount)
     }
 
+    func correct(_ request: WalkingRequest, with route: WalkingRoute) {
+        let key = key(for: request)
+        routeTasks[key]?.cancel()
+        estimateTasks[key]?.cancel()
+        routeTasks[key] = nil
+        estimateTasks[key] = nil
+        storeRoute(route, for: key)
+        storeEstimate(.init(durationSeconds: route.durationSeconds,
+                            distanceMeters: route.distanceMeters), for: key)
+    }
+
     func estimate(_ request: WalkingRequest) async throws -> WalkingEstimate {
         let key = key(for: request)
         requestCount += 1

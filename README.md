@@ -56,6 +56,28 @@ coordinates, calendar rules/exceptions, frequency rows, transfers, local
 search, nearby stops, scheduled arrivals, and scheduled departures—the full
 set of tables in the audited archive.
 
+## Journey planning
+
+`TransitRouter` searches offline timetables with up to three transfers by
+default. `RouteQuery.direction` accepts a departure instant (`.departAfter`)
+or an arrival deadline (`.arriveBy`). Arrival planning evaluates a bounded
+24-hour forward profile and recommends the latest feasible door-to-door
+departure it found. Pages can use both departure time and `JourneySignature`
+as a stable cursor when multiple journeys depart together. The profile uses
+bounded candidate and label budgets, so it does not claim exhaustive coverage
+of every possible journey in a regional feed.
+
+`JourneyQualityPolicy` keeps useful time, walking, and transfer tradeoffs.
+The default ranking adds 300 seconds per transfer and one additional second
+per walking second; walking remains part of elapsed time as well. These are
+ranking weights, never feasibility allowances. `preferredMode` and
+`preferWheelchairAccessible` are soft preferences. `allowedModes` and
+wheelchair `.required` are hard constraints. Accessibility is assessed as
+verified, unknown, or inaccessible. Ordinary pedestrian and estimated walking
+routes do not establish wheelchair accessibility. Automatic interchanges use
+verified pedestrian routes within 15 minutes and 1.5 km; the geographic
+shortlist expands from 450 m to 900 m when nearby station groups are sparse.
+
 The complete API reference and workflow guides are maintained in the DocC
 catalog at `Documentation/MobilitéitKit.docc`. Generate a static documentation
 archive with:

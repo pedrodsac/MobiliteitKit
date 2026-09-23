@@ -369,6 +369,313 @@ import ZIPFoundation
     #expect(cachedPage.metrics.walkingCacheHits > 0)
 }
 
+@Test func timeOnlyDominanceDoesNotEraseDirectAlternative() async throws {
+    let files = scenarioFiles(
+        routes: "direct,operator,D,Direct,3\nfirst,operator,F,First,3\nsecond,operator,S,Second,3\n",
+        stops: scenarioStops([("origin", "Origin", 49.600000), ("transfer", "Transfer", 49.605000), ("destination", "Destination", 49.610000)]),
+        trips: "direct,service,direct-run,,,,\nfirst,service,first-run,,,,\nsecond,service,second-run,,,,\n",
+        stopTimes: "direct-run,08:00:00,08:00:00,origin,1\ndirect-run,08:30:00,08:30:00,destination,2\n"
+            + "first-run,08:01:00,08:01:00,origin,1\nfirst-run,08:10:00,08:10:00,transfer,2\n"
+            + "second-run,08:13:00,08:13:00,transfer,1\nsecond-run,08:29:00,08:29:00,destination,2\n"
+    )
+    let page = try await routePage(using: files)
+    let direct = try #require(page.journeys.first { transitTripInstanceSequence($0) == ["direct-run"] })
+    #expect(page.journeys.contains { transitTripInstanceSequence($0) == ["first-run", "second-run"] })
+    #expect(page.recommendedJourneyID == direct.id)
+}
+
+@Test func arrivalDeadlineKeepsLatestDepartureBeyondEightEarlyTrips() async throws {
+    let departures = stride(from: 0, through: 56, by: 4).map { minute in
+        let id = "run-\(minute)"
+        let departure = String(format: "08:%02d:00", minute)
+        let arrivalMinute = minute + 20
+        let arrival = String(format: "%02d:%02d:00", 8 + arrivalMinute / 60, arrivalMinute % 60)
+        return (id, departure, arrival)
+    }
+    let files = scenarioFiles(
+        routes: "bus,operator,B,Bus,3\n",
+        stops: scenarioStops([("origin", "Origin", 49.600000), ("destination", "Destination", 49.610000)]),
+        trips: departures.map { "bus,service,\($0.0),,,," }.joined(separator: "\n") + "\n",
+        stopTimes: departures.map {
+            "\($0.0),\($0.1),\($0.1),origin,1\n\($0.0),\($0.2),\($0.2),destination,2"
+        }.joined(separator: "\n") + "\n"
+    )
+    let fixture = try await installedRouter(using: files, walking: FixtureWalkingProvider(routes: []))
+    defer { try? FileManager.default.removeItem(at: fixture.folder) }
+    let session = try await fixture.router.makeSession(for: .init(
+        origin: .stop(id: "origin"), destination: .stop(id: "destination"),
+        departureTime: date(hour: 9), direction: .arriveBy
+    ))
+    let page = try await session.expanded()
+    #expect(page.journeys.allSatisfy { $0.effectiveArrival <= date(hour: 9) })
+    #expect(page.journeys.contains { firstTransitTripID($0) == "run-40" })
+    #expect(page.recommendedJourneyID == page.journeys.first { firstTransitTripID($0) == "run-40" }?.id)
+}
+
+@Test func defaultTransferDepthFindsThreeVehicleJourney() async throws {
+    let files = scenarioFiles(
+        routes: "bus-a,operator,A,Bus A,3\ntrain,operator,T,Train,2\nbus-b,operator,B,Bus B,3\n",
+        stops: scenarioStops([("origin", "Origin", 49.600000), ("first", "First", 49.603000), ("second", "Second", 49.607000), ("destination", "Destination", 49.610000)]),
+        trips: "bus-a,service,run-a,,,,\ntrain,service,run-t,,,,\nbus-b,service,run-b,,,,\n",
+        stopTimes: "run-a,08:00:00,08:00:00,origin,1\nrun-a,08:10:00,08:10:00,first,2\n"
+            + "run-t,08:13:00,08:13:00,first,1\nrun-t,08:25:00,08:25:00,second,2\n"
+            + "run-b,08:28:00,08:28:00,second,1\nrun-b,08:35:00,08:35:00,destination,2\n"
+    )
+    let fixture = try await installedRouter(using: files, walking: FixtureWalkingProvider(routes: []))
+    defer { try? FileManager.default.removeItem(at: fixture.folder) }
+    func journeys(maxTransfers: Int) async throws -> [Journey] {
+        let session = try await fixture.router.makeSession(for: .init(
+            origin: .stop(id: "origin"), destination: .stop(id: "destination"),
+            departureTime: date(hour: 8), preferences: .init(maxTransfers: maxTransfers)
+        ))
+        return try await session.initial().journeys
+    }
+    #expect(try await journeys(maxTransfers: 3).contains { transitTripInstanceSequence($0) == ["run-a", "run-t", "run-b"] })
+    #expect(try await journeys(maxTransfers: 1).isEmpty)
+}
+
+@Test func usefulInterchangeBeyondOldRadiusUsesVerifiedWalkingBudget() async throws {
+    let from = Coordinate(latitude: 49.605000, longitude: 6.100000)
+    let to = Coordinate(latitude: 49.611000, longitude: 6.100000)
+    let files = scenarioFiles(
+        routes: "in,operator,I,Inbound,3\nout,operator,O,Outbound,3\n",
+        stops: scenarioStops([("origin", "Origin", 49.600000),
+                              ("transfer-a", "Transfer A", 49.605000),
+                              ("transfer-b", "Transfer B", 49.611000),
+                              ("destination", "Destination", 49.616000)]),
+        trips: "in,service,incoming,,,,\nout,service,outgoing,,,,\n",
+        stopTimes: "incoming,08:00:00,08:00:00,origin,1\nincoming,08:10:00,08:10:00,transfer-a,2\n"
+            + "outgoing,08:23:00,08:23:00,transfer-b,1\noutgoing,08:35:00,08:35:00,destination,2\n"
+    )
+    let fixture = try await installedRouter(using: files, walking: FixtureWalkingProvider(routes: [
+        .init(from: from, to: to, seconds: 600),
+    ]))
+    defer { try? FileManager.default.removeItem(at: fixture.folder) }
+    let session = try await fixture.router.makeSession(for: .init(
+        origin: .stop(id: "origin"), destination: .stop(id: "destination"),
+        departureTime: date(hour: 8)
+    ))
+    #expect(try await session.initial().journeys.contains {
+        transitTripInstanceSequence($0) == ["incoming", "outgoing"]
+    })
+    let estimated = try await installedRouter(using: files, walking: FixtureWalkingProvider(routes: [
+        .init(from: from, to: to, seconds: 600, evidence: .estimate),
+    ]))
+    defer { try? FileManager.default.removeItem(at: estimated.folder) }
+    let estimatedSession = try await estimated.router.makeSession(for: .init(
+        origin: .stop(id: "origin"), destination: .stop(id: "destination"),
+        departureTime: date(hour: 8)
+    ))
+    #expect(try await estimatedSession.initial().journeys.isEmpty)
+}
+
+@Test func preferredExtendedTramSurvivesFiveEarlierBuses() async throws {
+    let mask = TransitModeMask(rawValue: 1 << 0)
+    #expect(mask.contains(routeType: 900))
+    #expect(!mask.contains(routeType: 700))
+    #expect(!TransitModeMask(rawValue: 1 << 2).contains(routeType: 200))
+    #expect(TransitModeMask(rawValue: 1 << 3).contains(routeType: 200))
+    #expect(TransitModeMask(rawValue: 1 << 1).contains(routeType: 401))
+    #expect(!TransitModeMask(rawValue: 1 << 2).contains(routeType: 401))
+    let buses = (0..<6).map { minute in ("bus-\(minute)", String(format: "08:%02d:00", minute * 5), String(format: "08:%02d:00", minute * 5 + 20)) }
+    let files = scenarioFiles(
+        routes: "bus,operator,B,Bus,3\ntram,operator,T,Tram,900\n",
+        stops: scenarioStops([("origin", "Origin", 49.600000), ("destination", "Destination", 49.610000)]),
+        trips: buses.map { "bus,service,\($0.0),,,," }.joined(separator: "\n") + "\ntram,service,tram-run,,,,\n",
+        stopTimes: buses.map { "\($0.0),\($0.1),\($0.1),origin,1\n\($0.0),\($0.2),\($0.2),destination,2" }.joined(separator: "\n")
+            + "\ntram-run,08:30:00,08:30:00,origin,1\ntram-run,08:50:00,08:50:00,destination,2\n"
+    )
+    let fixture = try await installedRouter(using: files, walking: FixtureWalkingProvider(routes: []))
+    defer { try? FileManager.default.removeItem(at: fixture.folder) }
+    let session = try await fixture.router.makeSession(for: .init(
+        origin: .stop(id: "origin"), destination: .stop(id: "destination"),
+        departureTime: date(hour: 8), preferences: .init(preferredMode: mask)
+    ))
+    let page = try await session.initial()
+    #expect(page.journeys.count == 5)
+    #expect(page.journeys.contains { firstTransitTripID($0) == "tram-run" })
+    #expect(page.recommendedJourneyID == page.journeys.first { firstTransitTripID($0) == "tram-run" }?.id)
+}
+
+@Test func sameDeparturePagingUsesStableJourneyCursor() async throws {
+    let files = scenarioFiles(
+        routes: "bus,operator,B,Bus,3\ntram,operator,T,Tram,900\n",
+        stops: scenarioStops([("origin", "Origin", 49.600000), ("destination", "Destination", 49.610000)]),
+        trips: "bus,service,bus-run,,,,\ntram,service,tram-run,,,,\n",
+        stopTimes: "bus-run,08:00:00,08:00:00,origin,1\nbus-run,08:20:00,08:20:00,destination,2\n"
+            + "tram-run,08:00:00,08:00:00,origin,1\ntram-run,08:20:00,08:20:00,destination,2\n"
+    )
+    let fixture = try await installedRouter(using: files, walking: FixtureWalkingProvider(routes: []))
+    defer { try? FileManager.default.removeItem(at: fixture.folder) }
+    let session = try await fixture.router.makeSession(for: .init(
+        origin: .stop(id: "origin"), destination: .stop(id: "destination"),
+        departureTime: date(hour: 8),
+        preferences: .init(preferredMode: .init(rawValue: 1 << 0))
+    ))
+    let first = try await session.boundedPage(count: 1)
+    let firstJourney = try #require(first.journeys.first)
+    let next = try await session.boundedPage(after: firstJourney.effectiveDeparture,
+                                             afterID: firstJourney.id, count: 1)
+    #expect(next.journeys.count == 1)
+    #expect(next.journeys.first?.effectiveDeparture == firstJourney.effectiveDeparture)
+    #expect(next.journeys.first?.id != firstJourney.id)
+}
+
+@Test func olderEncodedPreferencesReceiveNewSoftPreferenceDefaults() throws {
+    let legacy = """
+    {"maxTransfers":1,"minimumTransferSeconds":120,"allowedModes":8,
+     "wheelchair":"noPreference","bike":"noPreference","routePreference":"fastest",
+     "frequencyPolicy":"conservative"}
+    """.data(using: .utf8)!
+    let preferences = try JSONDecoder().decode(RoutingPreferences.self, from: legacy)
+    #expect(preferences.maxTransfers == 1)
+    #expect(preferences.preferredMode == nil)
+    #expect(!preferences.preferWheelchairAccessible)
+    #expect(preferences.allowedModes.contains(routeType: 3))
+}
+
+@Test func requiredWheelchairEvidenceRejectsUnknownOrInaccessibleVehicles() async throws {
+    var files = scenarioFiles(
+        routes: "bus,operator,B,Bus,3\n",
+        stops: scenarioStops([("origin", "Origin", 49.600000), ("destination", "Destination", 49.610000)]),
+        trips: "bus,service,accessible,,,,,1\nbus,service,inaccessible,,,,,2\nbus,service,unknown,,,,,0\n",
+        stopTimes: "accessible,08:10:00,08:10:00,origin,1\naccessible,08:30:00,08:30:00,destination,2\n"
+            + "inaccessible,08:00:00,08:00:00,origin,1\ninaccessible,08:20:00,08:20:00,destination,2\n"
+            + "unknown,08:05:00,08:05:00,origin,1\nunknown,08:25:00,08:25:00,destination,2\n"
+    )
+    files["stops.txt"] = "stop_id,stop_name,stop_lat,stop_lon,wheelchair_boarding\norigin,Origin,49.600000,6.100000,1\ndestination,Destination,49.610000,6.100000,1\n"
+    files["trips.txt"] = "route_id,service_id,trip_id,trip_headsign,trip_short_name,direction_id,block_id,wheelchair_accessible\n"
+        + (files["trips.txt"] ?? "")
+    // Replace the duplicated basic header from scenarioFiles.
+    files["trips.txt"] = files["trips.txt"]?.replacingOccurrences(
+        of: "\nroute_id,service_id,trip_id,trip_headsign,trip_short_name,direction_id,block_id\n", with: "\n")
+    let fixture = try await installedRouter(using: files, walking: FixtureWalkingProvider(routes: []))
+    defer { try? FileManager.default.removeItem(at: fixture.folder) }
+    let session = try await fixture.router.makeSession(for: .init(
+        origin: .stop(id: "origin"), destination: .stop(id: "destination"),
+        departureTime: date(hour: 8), preferences: .init(wheelchair: .required)
+    ))
+    let page = try await session.initial()
+    #expect(page.journeys.map(firstTransitTripID) == ["accessible"])
+    #expect(page.journeys.first?.accessibility == .verified)
+    let softSession = try await fixture.router.makeSession(for: .init(
+        origin: .stop(id: "origin"), destination: .stop(id: "destination"),
+        departureTime: date(hour: 8),
+        preferences: .init(preferWheelchairAccessible: true)
+    ))
+    let softPage = try await softSession.initial()
+    #expect(softPage.recommendedJourneyID == softPage.journeys.first {
+        firstTransitTripID($0) == "accessible"
+    }?.id)
+}
+
+@Test func fasterDirectWalkRemainsAComparisonBesideFiveTransitTrips() async throws {
+    let trips = (0..<6).map { "run-\($0)" }
+    let departures = (0..<6).map { String(format: "08:%02d:00", 5 + $0 * 5) }
+    let arrivals = (0..<6).map { String(format: "08:%02d:00", 25 + $0 * 5) }
+    let files = scenarioFiles(
+        routes: "bus,operator,B,Bus,3\n",
+        stops: scenarioStops([("origin-stop", "Origin stop", 49.600100), ("destination-stop", "Destination stop", 49.610100)]),
+        trips: trips.map { "bus,service,\($0),,,," }.joined(separator: "\n") + "\n",
+        stopTimes: trips.indices.map { index in
+            "\(trips[index]),\(departures[index]),\(departures[index]),origin-stop,1\n"
+                + "\(trips[index]),\(arrivals[index]),\(arrivals[index]),destination-stop,2"
+        }.joined(separator: "\n") + "\n"
+    )
+    let origin = Coordinate(latitude: 49.600000, longitude: 6.100000)
+    let destination = Coordinate(latitude: 49.610000, longitude: 6.100000)
+    let fixture = try await installedRouter(using: files, walking: FixtureWalkingProvider(routes: [
+        .init(from: origin, to: Coordinate(latitude: 49.600100, longitude: 6.100000), seconds: 60),
+        .init(from: Coordinate(latitude: 49.610100, longitude: 6.100000), to: destination, seconds: 60),
+        .init(from: origin, to: destination, seconds: 600),
+    ]))
+    defer { try? FileManager.default.removeItem(at: fixture.folder) }
+    let session = try await fixture.router.makeSession(for: .init(
+        origin: .coordinate(origin, label: "Home"),
+        destination: .coordinate(destination, label: "Work"),
+        departureTime: date(hour: 8)
+    ))
+    let page = try await session.initial()
+    #expect(page.journeys.filter { !$0.legs.allSatisfy { if case .walk = $0 { return true }; return false } }.count == 5)
+    #expect(page.journeys.contains { $0.legs.allSatisfy { if case .walk = $0 { return true }; return false } })
+}
+
+@Test func usefulStopBeyondTwentyFourRedundantPlatformsIsMeasured() async throws {
+    let placeholders = (1...25).map { index in
+        ("placeholder-\(index)", "Placeholder \(index)", 49.600000 + Double(index) / 1_000_000)
+    }
+    let stops = placeholders + [("useful", "Useful", 49.600100), ("dummy", "Dummy", 49.605000), ("destination", "Destination", 49.610000)]
+    let files = scenarioFiles(
+        routes: "short,operator,S,Short,3\nuseful-route,operator,U,Useful,3\n",
+        stops: scenarioStops(stops),
+        trips: placeholders.map { "short,service,trip-\($0.0),,,," }.joined(separator: "\n")
+            + "\nuseful-route,service,useful-run,,,,\n",
+        stopTimes: placeholders.map {
+            "trip-\($0.0),08:10:00,08:10:00,\($0.0),1\ntrip-\($0.0),08:15:00,08:15:00,dummy,2"
+        }.joined(separator: "\n")
+            + "\nuseful-run,08:05:00,08:05:00,useful,1\nuseful-run,08:25:00,08:25:00,destination,2\n"
+    )
+    let origin = Coordinate(latitude: 49.600000, longitude: 6.100000)
+    let useful = Coordinate(latitude: 49.600100, longitude: 6.100000)
+    let fixture = try await installedRouter(using: files, walking: FixtureWalkingProvider(routes: [
+        .init(from: origin, to: useful, seconds: 60),
+    ]))
+    defer { try? FileManager.default.removeItem(at: fixture.folder) }
+    let session = try await fixture.router.makeSession(for: .init(
+        origin: .coordinate(origin, label: "Home"), destination: .stop(id: "destination"),
+        departureTime: date(hour: 8)
+    ))
+    let page = try await session.initial()
+    let journey = try #require(page.journeys.first)
+    #expect(firstTransitTripID(journey) == "useful-run")
+    #expect(page.metrics.endpointAccessCandidates <= 40)
+    #expect(page.metrics.walkingRequests <= 80)
+    #expect(page.metrics.candidatesGenerated >= page.metrics.alternativesRetained)
+}
+
+@Test func stairsOnlyStationConnectionFailsRequiredWheelchairQuery() async throws {
+    var files = scenarioFiles(
+        routes: "in,operator,I,Inbound,3\nout,operator,O,Outbound,3\n",
+        stops: "origin,Origin,49.600000,6.100000\nplatform-a,Platform A,49.605000,6.100000\nplatform-b,Platform B,49.605100,6.100000\ndestination,Destination,49.610000,6.100000\n",
+        trips: "in,service,incoming,,,,,1\nout,service,outgoing,,,,,1\n",
+        stopTimes: "incoming,08:00:00,08:00:00,origin,1\nincoming,08:10:00,08:10:00,platform-a,2\n"
+            + "outgoing,08:15:00,08:15:00,platform-b,1\noutgoing,08:25:00,08:25:00,destination,2\n"
+    )
+    files["stops.txt"] = "stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station,wheelchair_boarding\n"
+        + "origin,Origin,49.600000,6.100000,0,,1\n"
+        + "station,Station,49.605000,6.100000,1,,1\n"
+        + "platform-a,Platform A,49.605000,6.100000,0,station,1\n"
+        + "platform-b,Platform B,49.605100,6.100000,0,station,1\n"
+        + "destination,Destination,49.610000,6.100000,0,,1\n"
+    files["trips.txt"] = "route_id,service_id,trip_id,trip_headsign,trip_short_name,direction_id,block_id,wheelchair_accessible\n"
+        + "in,service,incoming,,,,,1\nout,service,outgoing,,,,,1\n"
+    files["pathways.txt"] = "pathway_id,from_stop_id,to_stop_id,pathway_mode,is_bidirectional,length,traversal_time,stair_count,max_slope,min_width,signposted_as,reversed_signposted_as\n"
+        + "stairs,platform-a,platform-b,2,1,100,120,12,0,1.2,,\n"
+    let fixture = try await installedRouter(using: files, walking: FixtureWalkingProvider(routes: []))
+    defer { try? FileManager.default.removeItem(at: fixture.folder) }
+    func page(wheelchair: WheelchairPreference) async throws -> JourneyPage {
+        let session = try await fixture.router.makeSession(for: .init(
+            origin: .stop(id: "origin"), destination: .stop(id: "destination"),
+            departureTime: date(hour: 8), preferences: .init(wheelchair: wheelchair)
+        ))
+        return try await session.initial()
+    }
+    let unrestricted = try await page(wheelchair: .noPreference)
+    #expect(unrestricted.journeys.first?.accessibility == .inaccessible)
+    #expect(try await page(wheelchair: .required).journeys.isEmpty)
+
+    files["pathways.txt"] = files["pathways.txt"]?.replacingOccurrences(
+        of: "stairs,platform-a,platform-b,2,1,100,120,12,0,1.2,,",
+        with: "lift,platform-a,platform-b,5,1,100,120,0,0,1.2,,")
+    let liftFixture = try await installedRouter(using: files, walking: FixtureWalkingProvider(routes: []))
+    defer { try? FileManager.default.removeItem(at: liftFixture.folder) }
+    let liftSession = try await liftFixture.router.makeSession(for: .init(
+        origin: .stop(id: "origin"), destination: .stop(id: "destination"),
+        departureTime: date(hour: 8), preferences: .init(wheelchair: .required)
+    ))
+    #expect(try await liftSession.initial().journeys.first?.accessibility == .verified)
+}
+
 @Test func realtimeOverlayInjectsDelayedPastBoarding() async throws {
     let folder = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: folder) }
@@ -550,6 +857,11 @@ private struct FixtureWalk: Hashable {
     let from: Coordinate
     let to: Coordinate
     let seconds: Int
+    let evidence: WalkingEvidence
+    init(from: Coordinate, to: Coordinate, seconds: Int,
+         evidence: WalkingEvidence = .routedPedestrian) {
+        self.from = from; self.to = to; self.seconds = seconds; self.evidence = evidence
+    }
 }
 
 private struct FixtureWalkingProvider: WalkingRoutingProvider {
@@ -564,7 +876,8 @@ private struct FixtureWalkingProvider: WalkingRoutingProvider {
         guard let match = routes.first(where: { $0.from == request.source && $0.to == request.destination }) else {
             throw WalkingProviderError.noRoute
         }
-        return .init(durationSeconds: match.seconds, distanceMeters: Double(match.seconds), polyline: [match.from, match.to])
+        return .init(durationSeconds: match.seconds, distanceMeters: Double(match.seconds),
+                     polyline: [match.from, match.to], evidence: match.evidence)
     }
 }
 
