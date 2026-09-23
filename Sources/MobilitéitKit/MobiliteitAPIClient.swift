@@ -148,6 +148,7 @@ public struct HafasDepartureBoardRequest: Hashable, Sendable {
 public struct MobiliteitAPIClient: Sendable {
     /// The default Mobilitéit HAFAS API endpoint.
     public static let defaultBaseURL = URL(string: "https://cdt.hafas.de/opendata/apiserver")!
+    private static let departureBoardCache = DepartureBoardCache()
 
     /// The HAFAS access key used for requests.
     public let apiKey: String
@@ -235,6 +236,8 @@ public struct MobiliteitAPIClient: Sendable {
     }
 
     /// Fetches a departure board for an opaque HAFAS station identifier.
+    /// Identical requests share a 60-second cache across all client instances,
+    /// including callers in departure views and journey planning.
     ///
     /// - Throws: ``MobiliteitAPIError/invalidRequest(_:)`` when the station or
     ///   duration is invalid, or a transport, HTTP, or decoding error.
@@ -263,8 +266,11 @@ public struct MobiliteitAPIClient: Sendable {
             .init(name: "rtMode", value: request.realtimeMode?.rawValue),
             .init(name: "passlist", value: request.includePasslist ? "1" : nil),
         ].filter { $0.value != nil }
-        let response: HafasDepartureBoardEnvelope = try await fetch(path: "departureBoard", queryItems: items)
-        return response.departureBoard
+        let requestURL = try url(path: "departureBoard", queryItems: items)
+        return try await Self.departureBoardCache.value(for: requestURL.absoluteString) {
+            let response: HafasDepartureBoardEnvelope = try await fetch(requestURL: requestURL)
+            return response.departureBoard
+        }
     }
 
     private func baseItems() -> [URLQueryItem] {
@@ -272,12 +278,20 @@ public struct MobiliteitAPIClient: Sendable {
     }
 
     private func fetch<Response: Decodable>(path: String, queryItems: [URLQueryItem]) async throws -> Response {
+        try await fetch(requestURL: url(path: path, queryItems: queryItems))
+    }
+
+    private func url(path: String, queryItems: [URLQueryItem]) throws -> URL {
         let url = baseURL.appendingPathComponent(path)
         guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
             throw MobiliteitAPIError.invalidRequest("invalid endpoint")
         }
         components.queryItems = queryItems
         guard let requestURL = components.url else { throw MobiliteitAPIError.invalidRequest("invalid query") }
+        return requestURL
+    }
+
+    private func fetch<Response: Decodable>(requestURL: URL) async throws -> Response {
         var request = URLRequest(url: requestURL)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         let (data, response) = try await session.data(for: request)

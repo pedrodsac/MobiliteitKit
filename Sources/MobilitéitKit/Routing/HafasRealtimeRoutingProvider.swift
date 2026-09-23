@@ -70,7 +70,7 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
         for stopIDs: [String],
         from: Date,
         through: Date,
-        refreshPolicy: RealtimeRefreshPolicy
+        refreshPolicy _: RealtimeRefreshPolicy
     ) async throws -> RealtimePatchBatch {
         let requested = Set(stopIDs.filter { !$0.isEmpty })
         guard !requested.isEmpty, through >= from else {
@@ -84,8 +84,7 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
         let fetched = await boards(
             for: requested.sorted(),
             from: from,
-            through: through,
-            refreshPolicy: refreshPolicy
+            through: through
         )
         guard !fetched.isEmpty else { throw HafasRealtimeRoutingError.unavailable }
 
@@ -138,19 +137,17 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
     private func boards(
         for stopIDs: [String],
         from: Date,
-        through: Date,
-        refreshPolicy: RealtimeRefreshPolicy
+        through: Date
     ) async -> [String: HafasDepartureBoard] {
         var result: [String: HafasDepartureBoard] = [:]
         var pending: [String] = []
         let currentDate = now()
 
         for stopID in stopIDs {
-            if refreshPolicy == .useCache,
-               let cached = boardsByStopID[stopID],
+            if let cached = boardsByStopID[stopID],
                currentDate.timeIntervalSince(cached.fetchedAt) <= cacheLifetime,
-               cached.from <= from,
-               cached.through >= through {
+               abs(cached.from.timeIntervalSince(from)) <= cacheLifetime,
+               abs(cached.through.timeIntervalSince(through)) <= cacheLifetime {
                 result[stopID] = cached.board
             } else {
                 pending.append(stopID)
