@@ -45,6 +45,9 @@ public enum BikePreference: String, Hashable, Sendable, Codable { case noPrefere
 public struct RoutingPreferences: Hashable, Sendable, Codable {
     public var maxTransfers: Int?
     public var minimumTransferSeconds: Int
+    /// Maximum shortfall allowed for a generic, same-stop type-2 transfer.
+    /// The published minimum remains attached to the journey for risk display.
+    public var sameStopTransferShortfallSeconds: Int
     public var allowedModes: TransitModeMask
     public var preferredMode: TransitModeMask?
     public var wheelchair: WheelchairPreference
@@ -52,13 +55,13 @@ public struct RoutingPreferences: Hashable, Sendable, Codable {
     public var bike: BikePreference
     public var routePreference: JourneyPreference
     public var frequencyPolicy: FrequencyRoutingPolicy
-    public init(maxTransfers: Int? = 3, minimumTransferSeconds: Int = 120, allowedModes: TransitModeMask = .all, preferredMode: TransitModeMask? = nil, wheelchair: WheelchairPreference = .noPreference, preferWheelchairAccessible: Bool = false, bike: BikePreference = .noPreference, routePreference: JourneyPreference = .fastest, frequencyPolicy: FrequencyRoutingPolicy = .conservative) {
-        self.maxTransfers = maxTransfers; self.minimumTransferSeconds = minimumTransferSeconds; self.allowedModes = allowedModes
+    public init(maxTransfers: Int? = 3, minimumTransferSeconds: Int = 120, sameStopTransferShortfallSeconds: Int = 0, allowedModes: TransitModeMask = .all, preferredMode: TransitModeMask? = nil, wheelchair: WheelchairPreference = .noPreference, preferWheelchairAccessible: Bool = false, bike: BikePreference = .noPreference, routePreference: JourneyPreference = .fastest, frequencyPolicy: FrequencyRoutingPolicy = .conservative) {
+        self.maxTransfers = maxTransfers; self.minimumTransferSeconds = minimumTransferSeconds; self.sameStopTransferShortfallSeconds = max(0, sameStopTransferShortfallSeconds); self.allowedModes = allowedModes
         self.preferredMode = preferredMode; self.wheelchair = wheelchair; self.preferWheelchairAccessible = preferWheelchairAccessible
         self.bike = bike; self.routePreference = routePreference; self.frequencyPolicy = frequencyPolicy
     }
     private enum CodingKeys: String, CodingKey {
-        case maxTransfers, minimumTransferSeconds, allowedModes, preferredMode
+        case maxTransfers, minimumTransferSeconds, sameStopTransferShortfallSeconds, allowedModes, preferredMode
         case wheelchair, preferWheelchairAccessible, bike, routePreference, frequencyPolicy
     }
     public init(from decoder: Decoder) throws {
@@ -66,6 +69,7 @@ public struct RoutingPreferences: Hashable, Sendable, Codable {
         maxTransfers = values.contains(.maxTransfers)
             ? try values.decodeIfPresent(Int.self, forKey: .maxTransfers) : 3
         minimumTransferSeconds = try values.decodeIfPresent(Int.self, forKey: .minimumTransferSeconds) ?? 120
+        sameStopTransferShortfallSeconds = max(0, try values.decodeIfPresent(Int.self, forKey: .sameStopTransferShortfallSeconds) ?? 0)
         allowedModes = try values.decodeIfPresent(TransitModeMask.self, forKey: .allowedModes) ?? .all
         preferredMode = try values.decodeIfPresent(TransitModeMask.self, forKey: .preferredMode)
         wheelchair = try values.decodeIfPresent(WheelchairPreference.self, forKey: .wheelchair) ?? .noPreference
@@ -1082,11 +1086,15 @@ private enum Raptor {
         let stop: Int
         let outgoingTrip: Int
     }
+    private struct TransferAllowance: Sendable {
+        let requiredSeconds: Int
+        let allowedShortfallSeconds: Int
+    }
     private enum CachedTransferDecision: Sendable {
-        case allowed(Int)
+        case allowed(TransferAllowance)
         case forbidden
 
-        var seconds: Int? {
+        var allowance: TransferAllowance? {
             switch self {
             case let .allowed(value): value
             case .forbidden: nil
@@ -1316,9 +1324,11 @@ private enum Raptor {
                             ) else { continue }
                             let additionalTransferSeconds = source.lastTransit == nil
                                 ? 0
-                                : max(0, transfer - source.transferWalkSeconds)
+                                : max(0, transfer.requiredSeconds - source.transferWalkSeconds)
+                            let allowedShortfall = source.transferWalkSeconds == 0
+                                ? transfer.allowedShortfallSeconds : 0
                             guard effective >= source.time.addingTimeInterval(
-                                TimeInterval(additionalTransferSeconds)
+                                TimeInterval(additionalTransferSeconds - allowedShortfall)
                             ) else { continue }
                             let slack = Int(effective.timeIntervalSince(source.time))
                                 - additionalTransferSeconds
@@ -1425,14 +1435,14 @@ private enum Raptor {
         outgoing: Int,
         preferences: RoutingPreferences,
         cache: inout [TransferDecisionKey: CachedTransferDecision]
-    ) -> Int? {
-        guard let incoming else { return 0 }
+    ) -> TransferAllowance? {
+        guard let incoming else { return .init(requiredSeconds: 0, allowedShortfallSeconds: 0) }
         let key = TransferDecisionKey(
             incomingTrip: incoming.trip,
             stop: stop,
             outgoingTrip: outgoing
         )
-        if let cached = cache[key] { return cached.seconds }
+        if let cached = cache[key] { return cached.allowance }
         let value = transferDecision(
             snapshot: snapshot,
             incoming: incoming,
@@ -1768,8 +1778,8 @@ private enum Raptor {
     /// Resolves the single maximally-specific GTFS transfer rule. Returning nil
     /// means type 3 forbids the operation. This is intentionally centralised so
     /// numerical scan code cannot accidentally apply several conflicting rules.
-    private static func transferDecision(snapshot: RoutingSnapshot, incoming: TransitLeg?, at stop: Int, outgoing: Int, preferences: RoutingPreferences) -> Int? {
-        guard let incoming else { return 0 }
+    private static func transferDecision(snapshot: RoutingSnapshot, incoming: TransitLeg?, at stop: Int, outgoing: Int, preferences: RoutingPreferences) -> TransferAllowance? {
+        guard let incoming else { return .init(requiredSeconds: 0, allowedShortfallSeconds: 0) }
         let inTrip = snapshot.trips[incoming.trip], outTrip = snapshot.trips[outgoing]
         func applies(_ rule: SnapshotRule) -> Bool {
             guard rule.fromTrip == nil || rule.fromTrip == incoming.trip, rule.toTrip == nil || rule.toTrip == outgoing else { return false }
@@ -1785,8 +1795,24 @@ private enum Raptor {
             RuleGroupKey(from: nil, to: nil),
         ]
         let candidates = keys.flatMap { snapshot.rulesByGroup[$0] ?? [] }.sorted { $0.order < $1.order }
-        guard let rule = candidates.filter(applies).max(by: { score($0) < score($1) }) else { return preferences.minimumTransferSeconds }
-        switch rule.type { case 3: return nil; case 1, 4: return 0; case 2: return max(preferences.minimumTransferSeconds, rule.minimum ?? 0); default: return preferences.minimumTransferSeconds }
+        guard let rule = candidates.filter(applies).max(by: { score($0) < score($1) }) else {
+            return .init(requiredSeconds: preferences.minimumTransferSeconds, allowedShortfallSeconds: 0)
+        }
+        switch rule.type {
+        case 3: return nil
+        case 1, 4: return .init(requiredSeconds: 0, allowedShortfallSeconds: 0)
+        case 2:
+            let required = max(preferences.minimumTransferSeconds, rule.minimum ?? 0)
+            // A broad stop-wide rule can be conservative for two buses serving
+            // the exact same platform. Keep trip/route-specific rules strict.
+            let genericSameStop = incoming.alight == stop
+                && rule.fromTrip == nil && rule.toTrip == nil
+                && rule.fromRoute == nil && rule.toRoute == nil
+            return .init(requiredSeconds: required,
+                         allowedShortfallSeconds: genericSameStop
+                            ? min(required, preferences.sameStopTransferShortfallSeconds) : 0)
+        default: return .init(requiredSeconds: preferences.minimumTransferSeconds, allowedShortfallSeconds: 0)
+        }
     }
 }
 

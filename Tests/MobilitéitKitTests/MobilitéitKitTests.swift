@@ -282,6 +282,89 @@ import ZIPFoundation
     }
 }
 
+@Test func installedFeedBreedewuesRegressionWhenConfigured() async throws {
+    guard let path = ProcessInfo.processInfo.environment["ROUTING_BENCHMARK_DATABASE"] else { return }
+    let router = try await TransitRouter(
+        databaseURL: URL(fileURLWithPath: path),
+        walkingProvider: BenchmarkWalkingProvider()
+    )
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(identifier: "Europe/Luxembourg")!
+    let anchor = try #require(calendar.date(from: DateComponents(
+        year: 2026, month: 9, day: 24, hour: 20, minute: 8
+    )))
+    let origins: [JourneyEndpoint] = [
+        .stop(id: "000200508002"),
+        .coordinate(.init(latitude: 49.655126, longitude: 6.224556), label: "Breedewues")
+    ]
+    for origin in origins {
+        let query = RouteQuery(
+            origin: origin,
+            destination: .stop(id: "000200417019"),
+            departureTime: anchor,
+            preferences: .init(maxTransfers: 3, minimumTransferSeconds: 120,
+                               sameStopTransferShortfallSeconds: 60)
+        )
+        let session = try await router.makeSession(for: query)
+        let page = try await session.initial(count: 20, searchHorizon: 3 * 60 * 60)
+        print("Breedewues \(origin): \(page.journeys.map { "\($0.id.value) transfers=\($0.transferCount) \(transitTripInstanceSequence($0))" })")
+        print("Breedewues metrics: \(page.metrics)")
+        print("Breedewues recommended: \(String(describing: page.recommendedJourneyID?.value))")
+        print("Breedewues first options: \(page.journeys.prefix(4).map { "\(transitTripInstanceSequence($0)) dep=\($0.effectiveDeparture) arr=\($0.effectiveArrival) walk=\($0.walkingDuration)" })")
+        let direct = try #require(page.journeys.first {
+            transitTripInstanceSequence($0) == ["24261864", "24365017"]
+        })
+        #expect(page.recommendedJourneyID == direct.id)
+        let rides: [TransitLeg] = direct.legs.compactMap { leg in
+            if case let .transit(ride) = leg { return ride }
+            return nil
+        }
+        #expect(rides[1].requiredTransferSecondsAfterWalking == 450)
+        #expect(rides[1].effectiveDeparture.timeIntervalSince(rides[0].effectiveArrival) == 405)
+    }
+}
+
+@Test func genericSameStopTransferCanBeOfferedAsAnExplicitTightAlternative() async throws {
+    func run(rule: String, shortfall: Int) async throws -> [Journey] {
+        let folder = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let archiveURL = folder.appendingPathComponent("fixture.zip")
+        let databaseURL = folder.appendingPathComponent("transit.sqlite")
+        var files = scenarioFiles(
+            routes: "in,operator,IN,Incoming,3\nout,operator,OUT,Outgoing,3\n",
+            stops: scenarioStops([("origin", "Origin", 49.600000), ("transfer", "Transfer", 49.601000), ("destination", "Destination", 49.610000)]),
+            trips: "in,service,incoming,,,,\nout,service,outgoing,,,,\n",
+            stopTimes: "incoming,08:00:00,08:00:00,origin,1\nincoming,08:10:00,08:10:00,transfer,2\noutgoing,08:16:45,08:16:45,transfer,1\noutgoing,08:25:00,08:25:00,destination,2\n"
+        )
+        files["transfers.txt"] = "from_stop_id,to_stop_id,transfer_type,min_transfer_time,from_route_id,to_route_id\n" + rule
+        try writeArchive(to: archiveURL, files: files)
+        _ = try await GTFSArchiveInstaller.install(archiveAt: archiveURL, databaseAt: databaseURL)
+        let router = try await TransitRouter(databaseURL: databaseURL)
+        let session = try await router.makeSession(for: .init(
+            origin: .stop(id: "origin"), destination: .stop(id: "destination"),
+            departureTime: date(hour: 8),
+            preferences: .init(maxTransfers: 1, minimumTransferSeconds: 120,
+                               sameStopTransferShortfallSeconds: shortfall)
+        ))
+        return try await session.initial().journeys
+    }
+
+    let generic = "transfer,transfer,2,450,,\n"
+    #expect(try await run(rule: generic, shortfall: 0).isEmpty)
+    #expect(try await run(rule: generic, shortfall: 44).isEmpty)
+    let offered = try await run(rule: generic, shortfall: 60)
+    let journey = try #require(offered.first)
+    #expect(transitTripInstanceSequence(journey) == ["incoming", "outgoing"])
+    let rides: [TransitLeg] = journey.legs.compactMap { leg in
+        if case let .transit(ride) = leg { return ride }
+        return nil
+    }
+    #expect(rides[1].requiredTransferSecondsAfterWalking == 450)
+    #expect(rides[1].effectiveDeparture.timeIntervalSince(rides[0].effectiveArrival) == 405)
+    #expect(try await run(rule: "transfer,transfer,2,450,in,out\n", shortfall: 60).isEmpty)
+    #expect(try await run(rule: "transfer,transfer,3,,,\n", shortfall: 60).isEmpty)
+}
+
 @Test func routePlannerReturnsFiveSequentialNonDominatedTripInstances() async throws {
     let page = try await routePage(using: profileFixtureFiles())
     #expect(page.journeys.count == 5)
