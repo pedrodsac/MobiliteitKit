@@ -257,6 +257,31 @@ import ZIPFoundation
     }
 }
 
+/// Run explicitly with ROUTING_BENCHMARK_DATABASE pointing to an installed,
+/// current GTFS database. CI fixtures stay deterministic and offline.
+@Test func installedFeedRouteBenchmarkWhenConfigured() async throws {
+    guard let path = ProcessInfo.processInfo.environment["ROUTING_BENCHMARK_DATABASE"] else { return }
+    let databaseURL = URL(fileURLWithPath: path)
+    let store = try GTFSStore(databaseAt: databaseURL)
+    let feed = await store.feedInfo()
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(identifier: "Europe/Luxembourg")!
+    let anchor = try #require(nextWeekday(at: 8, onOrAfter: feed.firstServiceDate, calendar: calendar))
+    let router = try await TransitRouter(databaseURL: databaseURL, walkingProvider: BenchmarkWalkingProvider())
+    let query = RouteQuery(
+        origin: .coordinate(.init(latitude: 49.6541071, longitude: 6.2296443), label: "Gromscheed"),
+        destination: .coordinate(.init(latitude: 49.629435, longitude: 6.156983), label: "Kirchberg"),
+        departureTime: anchor,
+        preferences: .init(maxTransfers: 3, minimumTransferSeconds: 120)
+    )
+    for run in 1...2 {
+        let session = try await router.makeSession(for: query)
+        let page = try await session.initial(count: 5, searchHorizon: 3 * 60 * 60)
+        print("Full-feed run \(run): profile=\(page.metrics.profileGenerationMilliseconds)ms endpoint=\(page.metrics.endpointPreparationMilliseconds)ms RAPTOR=\(page.metrics.raptorSearchMilliseconds)ms CPU=\(page.metrics.raptorCPUMilliseconds)ms walks=\(page.metrics.walkingTransferMilliseconds)ms pairs=\(page.metrics.walkingTransferPairs) requests=\(page.metrics.walkingRequests) hits=\(page.metrics.walkingCacheHits) journeys=\(page.journeys.map(\.id.value))")
+        #expect(!page.journeys.isEmpty)
+    }
+}
+
 @Test func routePlannerReturnsFiveSequentialNonDominatedTripInstances() async throws {
     let page = try await routePage(using: profileFixtureFiles())
     #expect(page.journeys.count == 5)
@@ -345,7 +370,7 @@ import ZIPFoundation
         let sequences = page.journeys.map(transitTripInstanceSequence)
         if let expected { #expect(sequences == expected) }
         else { expected = sequences }
-        #expect(page.metrics.raptorWorkerCount == min(4, ProcessInfo.processInfo.activeProcessorCount))
+        #expect(page.metrics.raptorWorkerCount == min(8, ProcessInfo.processInfo.activeProcessorCount))
     }
 }
 
@@ -872,6 +897,25 @@ private struct RealisticWalkingProvider: WalkingRoutingProvider {
 
     private func isNear(_ lhs: Coordinate, _ rhs: Coordinate) -> Bool {
         abs(lhs.latitude - rhs.latitude) < 0.00002 && abs(lhs.longitude - rhs.longitude) < 0.00002
+    }
+}
+
+/// A deterministic walking cost for stressing full-feed search on macOS.
+/// Real OSM walking is benchmarked in the hosted app.
+private struct BenchmarkWalkingProvider: WalkingRoutingProvider {
+    func estimate(_ request: WalkingRequest) async throws -> WalkingEstimate {
+        let route = try await route(request)
+        return .init(durationSeconds: route.durationSeconds, distanceMeters: route.distanceMeters)
+    }
+
+    func route(_ request: WalkingRequest) async throws -> WalkingRoute {
+        let north = (request.source.latitude - request.destination.latitude) * 111_000
+        let east = (request.source.longitude - request.destination.longitude) * 72_000
+        let meters = hypot(north, east) * 1.25
+        guard meters <= 3_500 else { throw WalkingProviderError.noRoute }
+        return .init(durationSeconds: max(1, Int((meters / 1.25).rounded())),
+                     distanceMeters: meters,
+                     polyline: [request.source, request.destination])
     }
 }
 
