@@ -72,7 +72,9 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
         through: Date,
         refreshPolicy _: RealtimeRefreshPolicy
     ) async throws -> RealtimePatchBatch {
-        let requested = Set(stopIDs.filter { !$0.isEmpty })
+        var seenStopIDs: Set<String> = []
+        let orderedStopIDs = stopIDs.filter { !$0.isEmpty && seenStopIDs.insert($0).inserted }
+        let requested = Set(orderedStopIDs)
         guard !requested.isEmpty, through >= from else {
             return RealtimePatchBatch(
                 patches: [],
@@ -82,7 +84,7 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
         }
 
         let fetched = await boards(
-            for: requested.sorted(),
+            for: orderedStopIDs,
             from: from,
             through: through
         )
@@ -90,7 +92,7 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
 
         var patchesByInstance: [String: RealtimeTripPatch] = [:]
         var seenJourneys: Set<String> = []
-        for stopID in fetched.keys.sorted() {
+        for stopID in orderedStopIDs where fetched[stopID] != nil {
             guard let board = fetched[stopID] else { continue }
             let scheduled = (try? await store.nextScheduledDepartures(
                 fromStopID: stopID,
@@ -108,7 +110,7 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
 
                 let journeyKey = departure.journeyReference?.reference
                     ?? Self.syntheticJourneyKey(departure, stopID: stopID)
-                guard seenJourneys.insert(journeyKey).inserted else { continue }
+                guard !seenJourneys.contains(journeyKey) else { continue }
                 guard let candidate = await uniqueCandidate(
                     for: departure,
                     planned: planned,
@@ -121,6 +123,7 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
                     candidate: candidate,
                     boardingStopID: stopID
                 ) else { continue }
+                seenJourneys.insert(journeyKey)
                 patchesByInstance[key] = Self.merging(patchesByInstance[key], patch)
             }
         }

@@ -723,9 +723,13 @@ public actor JourneyPlanningSession {
             }
             if result.count >= 64 { break }
         }
-        // Fetch access boards first. Under the provider's bounded deadline they
-        // carry the most useful patches for journeys the rider can board now.
-        let ordered = accessStops.sorted() + result.subtracting(accessStops).sorted()
+        // The deadline may expire before every board is fetched. Prioritize
+        // stops the rider can reach soonest, rather than snapshot/GTFS ID order.
+        let orderedAccess = access.sorted {
+            if $0.seconds != $1.seconds { return $0.seconds < $1.seconds }
+            return snapshot.stops[$0.stop].id < snapshot.stops[$1.stop].id
+        }.map(\.stop)
+        let ordered = orderedAccess + result.subtracting(accessStops).sorted()
         return ordered.prefix(64).map { snapshot.stops[$0].id }
     }
     fileprivate struct Edge: Sendable { let stop: Int; let seconds: Int; let distance: Double; let walk: WalkingRoute? }

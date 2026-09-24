@@ -702,6 +702,30 @@ import ZIPFoundation
     #expect(journey.scheduledDeparture < anchor)
 }
 
+@Test func cancelledRealtimeTripIsNotOfferedAsAJourney() async throws {
+    let folder = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let archiveURL = folder.appendingPathComponent("fixture.zip")
+    let databaseURL = folder.appendingPathComponent("transit.sqlite")
+    try writeArchive(to: archiveURL, files: profileFixtureFiles())
+    _ = try await GTFSArchiveInstaller.install(archiveAt: archiveURL, databaseAt: databaseURL)
+
+    let live = FixtureRealtime(patches: [.init(
+        tripID: "run-1",
+        serviceDate: try GTFSDate(parsing: "20260904"),
+        status: .cancelled,
+        events: []
+    )])
+    let router = try await TransitRouter(databaseURL: databaseURL, realtimeProvider: live)
+    let session = try await router.makeSession(for: .init(
+        origin: .stop(id: "origin"), destination: .stop(id: "destination"),
+        departureTime: date(hour: 8), realtimePolicy: .bestEffort()
+    ))
+    let page = try await session.initial()
+    #expect(!page.journeys.isEmpty)
+    #expect(page.journeys.allSatisfy { !transitTripInstanceSequence($0).contains("run-1") })
+}
+
 @Test func realtimeDelayCanCreateAnOtherwiseImpossibleTransfer() async throws {
     let folder = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: folder) }
