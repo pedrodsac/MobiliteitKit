@@ -370,7 +370,7 @@ import ZIPFoundation
         let sequences = page.journeys.map(transitTripInstanceSequence)
         if let expected { #expect(sequences == expected) }
         else { expected = sequences }
-        #expect(page.metrics.raptorWorkerCount == min(8, ProcessInfo.processInfo.activeProcessorCount))
+        #expect(page.metrics.raptorWorkerCount == min(10, ProcessInfo.processInfo.activeProcessorCount))
     }
 }
 

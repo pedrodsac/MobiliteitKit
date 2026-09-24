@@ -1016,7 +1016,7 @@ private enum Raptor {
     // never turns into one directions request for every alighting stop.
     private static let maximumWalkingTransferRequestsPerRound = 96
     private static let minimumPatternsForParallelScan = 32
-    private static let maximumPatternWorkers = 8
+    private static let maximumPatternWorkers = 10
     #if DEBUG
     private static let verifyProfile = ProcessInfo.processInfo.environment["ROUTING_VERIFY_PROFILE"] == "1"
     #endif
