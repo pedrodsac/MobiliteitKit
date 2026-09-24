@@ -129,26 +129,27 @@ public extension WalkingRoutingProvider {
         maximumConcurrency: Int = 4
     ) async -> [WalkingRoute?] {
         guard !requests.isEmpty else { return [] }
+        guard !Task.isCancelled else { return Array(repeating: nil, count: requests.count) }
         let limit = min(max(1, maximumConcurrency), requests.count)
         return await withTaskGroup(of: (Int, WalkingRoute?).self) { group in
             var nextIndex = 0
             var results = Array<WalkingRoute?>(repeating: nil, count: requests.count)
 
-            func add(_ index: Int) {
+            func add(_ index: Int) -> Bool {
                 let request = requests[index]
-                group.addTask {
+                return group.addTaskUnlessCancelled {
                     (index, try? await route(request))
                 }
             }
 
             for _ in 0..<limit {
-                add(nextIndex)
+                guard add(nextIndex) else { break }
                 nextIndex += 1
             }
             while let (index, result) = await group.next() {
                 results[index] = result
-                if nextIndex < requests.count {
-                    add(nextIndex)
+                if nextIndex < requests.count, !Task.isCancelled {
+                    guard add(nextIndex) else { break }
                     nextIndex += 1
                 }
             }

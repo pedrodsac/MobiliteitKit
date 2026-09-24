@@ -144,11 +144,11 @@ actor WalkingRouteCache: WalkingRoutingProvider {
             }
         }
 
-        if !missingRequests.isEmpty, !Task.isCancelled {
-            let provider = self.provider
-            let batchTask = Task {
-                await provider.routes(missingRequests, maximumConcurrency: maximumConcurrency)
-            }
+        let provider = self.provider
+        let batchTask: Task<[WalkingRoute?], Never>? = !missingRequests.isEmpty && !Task.isCancelled
+            ? Task { await provider.routes(missingRequests, maximumConcurrency: maximumConcurrency) }
+            : nil
+        if let batchTask {
             for (batchIndex, key) in missingKeys.enumerated() {
                 let task = Task<WalkingRoute, Error> {
                     let values = await batchTask.value
@@ -162,18 +162,26 @@ actor WalkingRouteCache: WalkingRoutingProvider {
             }
         }
 
-        for index in requests.indices where results[index] == nil {
-            guard !Task.isCancelled else { break }
-            guard let task = tasks[index] else { continue }
-            let key = key(for: requests[index])
-            do {
-                let value = try await task.value
-                results[index] = value
-                routeTasks[key] = nil
-                storeRoute(value, for: key)
-            } catch {
-                routeTasks[key] = nil
+        await withTaskCancellationHandler {
+            for index in requests.indices where results[index] == nil {
+                guard !Task.isCancelled else { break }
+                guard let task = tasks[index] else { continue }
+                let key = key(for: requests[index])
+                do {
+                    let value = try await task.value
+                    guard !Task.isCancelled else { break }
+                    results[index] = value
+                    routeTasks[key] = nil
+                    storeRoute(value, for: key)
+                } catch {
+                    routeTasks[key] = nil
+                }
             }
+        } onCancel: {
+            batchTask?.cancel()
+        }
+        if Task.isCancelled {
+            for key in missingKeys { routeTasks[key] = nil }
         }
         return results
     }

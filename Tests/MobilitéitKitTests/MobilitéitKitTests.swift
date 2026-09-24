@@ -396,6 +396,25 @@ import ZIPFoundation
     #expect(cachedPage.metrics.walkingCacheHits > 0)
 }
 
+@Test func cancelledWalkingBatchDoesNotDelayTheNextRequest() async throws {
+    let provider = CancellationProbeWalkingProvider()
+    let cache = WalkingRouteCache(provider: provider)
+    let request = WalkingRequest(
+        source: .init(latitude: 49.6, longitude: 6.1),
+        destination: .init(latitude: 49.61, longitude: 6.11)
+    )
+    let first = Task { await cache.routes([request], maximumConcurrency: 1) }
+    await provider.waitForFirstBatch()
+    first.cancel()
+    _ = await first.value
+    await provider.waitForFirstBatchCompletion()
+    #expect(await provider.cancellationCount == 1)
+
+    let retry = await cache.routes([request], maximumConcurrency: 1)
+    #expect(retry.first??.durationSeconds == 60)
+    #expect(await provider.batchCount == 2)
+}
+
 @Test func timeOnlyDominanceDoesNotEraseDirectAlternative() async throws {
     let files = scenarioFiles(
         routes: "direct,operator,D,Direct,3\nfirst,operator,F,First,3\nsecond,operator,S,Second,3\n",
@@ -916,6 +935,53 @@ private struct BenchmarkWalkingProvider: WalkingRoutingProvider {
         return .init(durationSeconds: max(1, Int((meters / 1.25).rounded())),
                      distanceMeters: meters,
                      polyline: [request.source, request.destination])
+    }
+}
+
+private actor CancellationProbeWalkingProvider: WalkingRoutingProvider {
+    private var firstBatchStarted: CheckedContinuation<Void, Never>?
+    private var firstBatchCompleted: CheckedContinuation<Void, Never>?
+    private var didCompleteFirstBatch = false
+    private(set) var batchCount = 0
+    private(set) var cancellationCount = 0
+
+    func waitForFirstBatch() async {
+        if batchCount > 0 { return }
+        await withCheckedContinuation { firstBatchStarted = $0 }
+    }
+
+    func waitForFirstBatchCompletion() async {
+        if didCompleteFirstBatch { return }
+        await withCheckedContinuation { firstBatchCompleted = $0 }
+    }
+
+    func estimate(_ request: WalkingRequest) async throws -> WalkingEstimate {
+        .init(durationSeconds: 60, distanceMeters: 80)
+    }
+
+    func route(_ request: WalkingRequest) async throws -> WalkingRoute {
+        .init(durationSeconds: 60, distanceMeters: 80)
+    }
+
+    func routes(_ requests: [WalkingRequest], maximumConcurrency: Int) async -> [WalkingRoute?] {
+        batchCount += 1
+        if batchCount == 1 {
+            firstBatchStarted?.resume()
+            firstBatchStarted = nil
+            do {
+                try await Task.sleep(for: .seconds(5))
+            } catch {
+                cancellationCount += 1
+                didCompleteFirstBatch = true
+                firstBatchCompleted?.resume()
+                firstBatchCompleted = nil
+                return Array(repeating: nil, count: requests.count)
+            }
+            didCompleteFirstBatch = true
+            firstBatchCompleted?.resume()
+            firstBatchCompleted = nil
+        }
+        return requests.map { _ in .init(durationSeconds: 60, distanceMeters: 80) }
     }
 }
 
