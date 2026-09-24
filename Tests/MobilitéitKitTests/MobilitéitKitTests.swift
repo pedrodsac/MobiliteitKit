@@ -69,6 +69,8 @@ import ZIPFoundation
     let shape = try await store.shape(id: "shape-1")
     #expect(shape?.coordinates.count == 3)
     #expect(shape?.coordinates[1] == Coordinate(latitude: 49.611, longitude: 6.132))
+    let batchedShapes = try await store.shapes(forTripIDs: ["trip-1", "trip-1", "missing"])
+    #expect(batchedShapes == ["trip-1": shape?.coordinates ?? []])
 
     let rules = try await store.transferRules(fromStopID: "stop-a")
     #expect(rules == [TransferRule(fromStopID: "stop-a", toStopID: "stop-b", transferType: 2, minimumTransferSeconds: 180, fromRouteID: "route-1", toRouteID: nil, fromTripID: nil, toTripID: nil)])

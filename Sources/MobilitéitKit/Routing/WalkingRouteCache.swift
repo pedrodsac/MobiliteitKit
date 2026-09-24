@@ -117,6 +117,7 @@ actor WalkingRouteCache: WalkingRoutingProvider {
         maximumConcurrency: Int
     ) async -> [WalkingRoute?] {
         guard !requests.isEmpty else { return [] }
+        guard !Task.isCancelled else { return Array(repeating: nil, count: requests.count) }
         var results = Array<WalkingRoute?>(repeating: nil, count: requests.count)
         var tasks = Array<Task<WalkingRoute, Error>?>(repeating: nil, count: requests.count)
         var missingRequests: [WalkingRequest] = []
@@ -143,7 +144,7 @@ actor WalkingRouteCache: WalkingRoutingProvider {
             }
         }
 
-        if !missingRequests.isEmpty {
+        if !missingRequests.isEmpty, !Task.isCancelled {
             let provider = self.provider
             let batchTask = Task {
                 await provider.routes(missingRequests, maximumConcurrency: maximumConcurrency)
@@ -162,6 +163,7 @@ actor WalkingRouteCache: WalkingRoutingProvider {
         }
 
         for index in requests.indices where results[index] == nil {
+            guard !Task.isCancelled else { break }
             guard let task = tasks[index] else { continue }
             let key = key(for: requests[index])
             do {

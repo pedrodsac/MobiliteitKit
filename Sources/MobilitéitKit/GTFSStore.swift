@@ -298,6 +298,38 @@ public actor GTFSStore {
         return Shape(id: statement.text(0)!, coordinates: try ShapeCodec.decode(blob))
     }
 
+    /// Returns shapes for the small set of trips selected by journey planning.
+    /// Shared GTFS shapes are decoded once even when several trips use them.
+    public func shapes(forTripIDs tripIDs: [String]) throws -> [String: [Coordinate]] {
+        let identifiers = Array(Set(tripIDs.filter { !$0.isEmpty })).sorted()
+        guard !identifiers.isEmpty else { return [:] }
+        var shapesByTrip: [String: [Coordinate]] = [:]
+        var decodedByShapeID: [Int: [Coordinate]] = [:]
+        for start in stride(from: 0, to: identifiers.count, by: 500) {
+            let batch = Array(identifiers[start..<min(start + 500, identifiers.count)])
+            let placeholders = Array(repeating: "?", count: batch.count).joined(separator: ",")
+            let statement = try database.prepare("""
+                SELECT t.gtfs_id,sh.id,sh.encoded FROM trip t
+                JOIN shape sh ON sh.id=t.shape_id
+                WHERE t.gtfs_id IN (\(placeholders))
+            """)
+            for (offset, id) in batch.enumerated() {
+                try statement.bind(id, at: Int32(offset + 1))
+            }
+            while try statement.step() {
+                guard let tripID = statement.text(0) else { continue }
+                let shapeID = statement.int(1)
+                if let decoded = decodedByShapeID[shapeID] {
+                    shapesByTrip[tripID] = decoded
+                } else if let blob = statement.blob(2), let decoded = try? ShapeCodec.decode(blob) {
+                    decodedByShapeID[shapeID] = decoded
+                    shapesByTrip[tripID] = decoded
+                }
+            }
+        }
+        return shapesByTrip
+    }
+
     /// Returns source transfer rules whose origin is the supplied stop.
     public func transferRules(fromStopID stopID: String) throws -> [TransferRule] {
         let statement = try database.prepare("""

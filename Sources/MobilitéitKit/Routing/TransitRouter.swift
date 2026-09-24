@@ -255,6 +255,7 @@ public struct RoutingMetrics: Hashable, Sendable {
     public var endpointAccessCandidates = 0; public var endpointEgressCandidates = 0
     public var candidatesGenerated = 0; public var alternativesRetained = 0
     public var walkingRequests = 0; public var walkingCacheHits = 0
+    public var walkingTransferPairs = 0
     public var hafasRequests = 0; public var hafasCacheHits = 0
     public var realtimeFrontierSize = 0; public var delayedPastBoardingsInjected = 0
     public var realtimeOverlayRevisions = 0; public var raptorReruns = 0
@@ -303,8 +304,13 @@ private struct PatternOccurrence: Sendable { let pattern: Int; let position: Int
 private struct SnapshotServiceDay: Sendable { let offset: Int; let date: GTFSDate; let start: Date; let activeServices: Set<Int> }
 private struct StopGridCell: Hashable { let latitude: Int; let longitude: Int }
 private struct RoutingSnapshot: Sendable {
-    let info: FeedInfo; let converter: ServiceInstantConverter; let stops: [SnapshotStop]; let stopByID: [String: Int]; let routes: [TransitRoute]; let trips: [SnapshotTrip]; let tripByID: [String: Int]; let tripIndicesByDepartureStop: [[Int]]; let boardableStops: Set<Int>; let alightableStops: Set<Int>; let serviceDays: [SnapshotServiceDay]; let lastActiveDayStartByService: [Date?]; let rulesByGroup: [RuleGroupKey: [SnapshotRule]]; let stationGroupByStop: [Int]; let pathsByFrom: [[SnapshotPath]]; let pathsByTo: [[SnapshotPath]]; let nearbyTransferStopsByStop: [[Int]]
+    let info: FeedInfo; let converter: ServiceInstantConverter; let stops: [SnapshotStop]; let stopByID: [String: Int]; let routes: [TransitRoute]; let trips: [SnapshotTrip]; let tripByID: [String: Int]; let tripIndicesByDepartureStop: [[Int]]; let serviceRoutesByStop: [[ServiceRoute]]; let boardableStops: Set<Int>; let alightableStops: Set<Int>; let serviceDays: [SnapshotServiceDay]; let lastActiveDayStartByService: [Date?]; let rulesByGroup: [RuleGroupKey: [SnapshotRule]]; let stationGroupByStop: [Int]; let pathsByFrom: [[SnapshotPath]]; let pathsByTo: [[SnapshotPath]]; let nearbyTransferStopsByStop: [[Int]]
     let patterns: [SnapshotPattern]; let patternOccurrencesByStop: [[PatternOccurrence]]; let loadMilliseconds: Int
+}
+
+private struct ServiceRoute: Hashable, Sendable {
+    let service: Int
+    let route: Int
 }
 
 private enum SnapshotBuilder {
@@ -373,7 +379,12 @@ private enum SnapshotBuilder {
         }
         let tripByID = Dictionary(uniqueKeysWithValues: trips.enumerated().map { ($0.element.id, $0.offset) })
         var tripIndicesByDepartureStop = Array(repeating: [Int](), count: stops.count)
+        var serviceRoutesByStop = Array(repeating: Set<ServiceRoute>(), count: stops.count)
         for (tripIndex, trip) in trips.enumerated() {
+            let serviceRoute = ServiceRoute(service: trip.service, route: trip.route)
+            for time in trip.times {
+                serviceRoutesByStop[time.stop].insert(serviceRoute)
+            }
             for stop in Set(trip.times.compactMap { $0.departure == nil ? nil : $0.stop }) {
                 tripIndicesByDepartureStop[stop].append(tripIndex)
             }
@@ -433,7 +444,7 @@ private enum SnapshotBuilder {
                 lastActiveDayStartByService[service] = day.start
             }
         }
-        return .init(info: info, converter: converter, stops: stops, stopByID: stopByID, routes: routes, trips: trips, tripByID: tripByID, tripIndicesByDepartureStop: tripIndicesByDepartureStop, boardableStops: boardableStops, alightableStops: alightableStops, serviceDays: serviceDays, lastActiveDayStartByService: lastActiveDayStartByService, rulesByGroup: rulesByGroup, stationGroupByStop: stationGroupByStop, pathsByFrom: pathsByFrom, pathsByTo: pathsByTo, nearbyTransferStopsByStop: nearbyTransferStopsByStop, patterns: patterns, patternOccurrencesByStop: patternOccurrencesByStop, loadMilliseconds: Int(Date().timeIntervalSince(loadStarted) * 1_000))
+        return .init(info: info, converter: converter, stops: stops, stopByID: stopByID, routes: routes, trips: trips, tripByID: tripByID, tripIndicesByDepartureStop: tripIndicesByDepartureStop, serviceRoutesByStop: serviceRoutesByStop.map(Array.init), boardableStops: boardableStops, alightableStops: alightableStops, serviceDays: serviceDays, lastActiveDayStartByService: lastActiveDayStartByService, rulesByGroup: rulesByGroup, stationGroupByStop: stationGroupByStop, pathsByFrom: pathsByFrom, pathsByTo: pathsByTo, nearbyTransferStopsByStop: nearbyTransferStopsByStop, patterns: patterns, patternOccurrencesByStop: patternOccurrencesByStop, loadMilliseconds: Int(Date().timeIntervalSince(loadStarted) * 1_000))
     }
 
     /// Precomputes a small geographic interchange frontier for every stop.
@@ -679,6 +690,7 @@ public actor JourneyPlanningSession {
         metrics.raptorSearchMilliseconds = Int(Date().timeIntervalSince(raptorStarted) * 1_000)
         metrics.raptorCPUMilliseconds = searchResult.cpuMilliseconds
         metrics.walkingTransferMilliseconds = searchResult.walkingTransferMilliseconds
+        metrics.walkingTransferPairs = searchResult.walkingTransferPairs
         metrics.raptorWorkerCount = searchResult.maximumWorkerCount
         metrics.scannedPatterns = searchResult.scannedPatterns
         metrics.scannedTripInstances = searchResult.scannedTripInstances
@@ -771,18 +783,14 @@ public actor JourneyPlanningSession {
         let activeServices = Set(snapshot.serviceDays.filter {
             abs($0.start.timeIntervalSince(anchor)) <= 2 * 86_400
         }.flatMap(\.activeServices))
-        let serviceRoutesByStop: [Set<Int>] = {
-            var values = Array(repeating: Set<Int>(), count: snapshot.stops.count)
-            for trip in snapshot.trips where activeServices.contains(trip.service) {
-                for time in trip.times { values[time.stop].insert(trip.route) }
-            }
-            return values
-        }()
         let candidates = snapshot.stops.enumerated().compactMap { index, stop -> (index: Int, stop: SnapshotStop, distance: Double, routes: Set<Int>)? in
             guard eligibleStops.contains(index), index != endpointStop else { return nil }
             let direct = distance(coordinate, stop.model.coordinate)
             guard direct <= 3_000 else { return nil }
-            return (index: index, stop: stop, distance: direct, routes: serviceRoutesByStop[index])
+            let routes = Set(snapshot.serviceRoutesByStop[index].lazy
+                .filter { activeServices.contains($0.service) }
+                .map(\.route))
+            return (index: index, stop: stop, distance: direct, routes: routes)
         }.sorted {
             if $0.routes.isEmpty != $1.routes.isEmpty { return !$0.routes.isEmpty }
             if $0.distance != $1.distance { return $0.distance < $1.distance }
@@ -1030,6 +1038,7 @@ private enum Raptor {
         let scannedTripInstances: Int
         let cpuMilliseconds: Int
         let walkingTransferMilliseconds: Int
+        let walkingTransferPairs: Int
         let maximumWorkerCount: Int
     }
     private struct PatchKey: Hashable, Sendable { let trip: Int; let serviceDate: GTFSDate }
@@ -1072,7 +1081,7 @@ private enum Raptor {
         }
     }
     static func search(snapshot: RoutingSnapshot, query: RouteQuery, access: [JourneyPlanningSession.Edge], egress: [JourneyPlanningSession.Edge], patches: [RealtimeTripPatch], walking: WalkingRouteCache?, profileHorizon: TimeInterval) async throws -> SearchResult {
-        guard !access.isEmpty, !egress.isEmpty else { return .init(candidates: [], scannedPatterns: 0, scannedTripInstances: 0, cpuMilliseconds: 0, walkingTransferMilliseconds: 0, maximumWorkerCount: 1) }
+        guard !access.isEmpty, !egress.isEmpty else { return .init(candidates: [], scannedPatterns: 0, scannedTripInstances: 0, cpuMilliseconds: 0, walkingTransferMilliseconds: 0, walkingTransferPairs: 0, maximumWorkerCount: 1) }
         let maxRounds = (query.preferences.maxTransfers ?? max(1, snapshot.trips.count)) + 1
         let searchStart = query.direction == .arriveBy
             ? query.departureTime.addingTimeInterval(-profileHorizon) : query.departureTime
@@ -1118,6 +1127,7 @@ private enum Raptor {
         var scannedTripInstances = 0
         var cpuSeconds: TimeInterval = 0
         var walkingTransferSeconds: TimeInterval = 0
+        var walkingTransferPairs = 0
         var maximumWorkerCount = 1
         let egressStops = Set(egress.map(\.stop))
         var finalRoundAlightStops = egressStops
@@ -1214,12 +1224,12 @@ private enum Raptor {
             relaxPathways(snapshot: snapshot, labels: &next, nextLabelID: &nextLabelID)
             cpuSeconds += Date().timeIntervalSince(cpuStarted)
             let walkingStarted = Date()
-            try await relaxWalkingTransfers(snapshot: snapshot, labels: &next, nextLabelID: &nextLabelID, walking: walking)
+            walkingTransferPairs += try await relaxWalkingTransfers(snapshot: snapshot, labels: &next, nextLabelID: &nextLabelID, walking: walking)
             walkingTransferSeconds += Date().timeIntervalSince(walkingStarted)
             for e in egress { for label in next[e.stop] ?? [] where label.firstDeparture != nil { destination.append(.init(legs: label.legs, firstStop: label.firstStop, lastStop: e.stop, firstDeparture: label.firstDeparture!, lastArrival: label.time, minimumTransferSlack: label.minimumSlack, totalTransferSlack: label.totalSlack, pathwaySeconds: label.pathwaySeconds, pathwayDistance: label.pathwayDistance)) } }
             labels = next; if labels.isEmpty { break }
         }
-        return .init(candidates: destination, scannedPatterns: scannedPatterns, scannedTripInstances: scannedTripInstances, cpuMilliseconds: Int(cpuSeconds * 1_000), walkingTransferMilliseconds: Int(walkingTransferSeconds * 1_000), maximumWorkerCount: maximumWorkerCount)
+        return .init(candidates: destination, scannedPatterns: scannedPatterns, scannedTripInstances: scannedTripInstances, cpuMilliseconds: Int(cpuSeconds * 1_000), walkingTransferMilliseconds: Int(walkingTransferSeconds * 1_000), walkingTransferPairs: walkingTransferPairs, maximumWorkerCount: maximumWorkerCount)
     }
 
     private static func scanPatterns(
@@ -1246,24 +1256,37 @@ private enum Raptor {
             let instances = activeInstancesByPattern[patternID] ?? []
             scannedTripInstances += instances.count
             for instance in instances {
+                try Task.checkCancellation()
                 let tripIndex = instance.tripIndex
                 let trip = snapshot.trips[tripIndex]
                 let serviceDay = instance.serviceDay
                 let day = serviceDay.date
                 let patch = instance.patch
+                // A trip can be considered by many labels and boarding stops.
+                // Resolve its immutable event times once per scan.
+                let scheduledDepartures = trip.times.map { time in
+                    time.departure.map { serviceDay.start.addingTimeInterval(TimeInterval($0)) }
+                }
+                let scheduledArrivals = trip.times.map { time in
+                    time.arrival.map { serviceDay.start.addingTimeInterval(TimeInterval($0)) }
+                }
+                let effectiveDepartures = trip.times.indices.map { position in
+                    patchTime(patch, stop: trip.times[position].stop, departure: true)
+                        ?? scheduledDepartures[position]
+                }
+                let effectiveArrivals = trip.times.indices.map { position in
+                    patchTime(patch, stop: trip.times[position].stop, departure: false)
+                        ?? scheduledArrivals[position]
+                }
 
                 for boardPos in startPosition..<trip.times.count {
+                        try Task.checkCancellation()
                         let boardTime = trip.times[boardPos]
-                        guard let departure = boardTime.departure,
+                        guard let scheduled = scheduledDepartures[boardPos],
+                              let effective = effectiveDepartures[boardPos],
                               boardTime.pickup == 0,
                               let sources = previousLabels[boardTime.stop]
                         else { continue }
-                        let scheduled = serviceDay.start.addingTimeInterval(TimeInterval(departure))
-                        let effective = patchTime(
-                            patch,
-                            stop: boardTime.stop,
-                            departure: true
-                        ) ?? scheduled
 
                         for source in sources {
                             guard !source.tripKey.contains(.init(trip: tripIndex, day: day)) else { continue }
@@ -1293,17 +1316,10 @@ private enum Raptor {
                             for alightPos in (boardPos + 1)..<trip.times.count {
                                 let alightTime = trip.times[alightPos]
                                 guard alightTime.dropoff == 0,
-                                      let arrival = alightTime.arrival,
+                                      let scheduledArrival = scheduledArrivals[alightPos],
+                                      let effectiveArrival = effectiveArrivals[alightPos],
                                       round + 1 < maxRounds || finalRoundAlightStops.contains(alightTime.stop)
                                 else { continue }
-                                let scheduledArrival = serviceDay.start.addingTimeInterval(
-                                    TimeInterval(arrival)
-                                )
-                                let effectiveArrival = patchTime(
-                                    patch,
-                                    stop: alightTime.stop,
-                                    departure: false
-                                ) ?? scheduledArrival
                                 let leg = TransitLeg(
                                     trip: tripIndex,
                                     board: boardTime.stop,
@@ -1432,10 +1448,13 @@ private enum Raptor {
         labels: inout [Int: [Label]],
         nextLabelID: inout Int,
         walking: WalkingRouteCache?
-    ) async throws {
-        guard let walking else { return }
-        var requests: [(from: Int, to: Int, source: Label, request: WalkingRequest)] = []
+    ) async throws -> Int {
+        guard let walking else { return 0 }
+        struct Pair: Hashable { let from: Int; let to: Int }
+        var requests: [(from: Int, to: Int, source: Label, routeIndex: Int)] = []
         requests.reserveCapacity(maximumWalkingTransferRequestsPerRound * 3)
+        var uniqueRequests: [WalkingRequest] = []
+        var routeIndexByPair: [Pair: Int] = [:]
         var distinctPairs = 0
         let sourceStops = labels.keys.sorted { lhs, rhs in
             let a = labels[lhs]?.map(\.time).min() ?? .distantFuture
@@ -1459,20 +1478,31 @@ private enum Raptor {
                 for index in representativeIndices.sorted() {
                     let source = eligible[index]
                     guard !source.walkingStopsVisited.contains(to) else { continue }
-                    requests.append((from, to, source, .init(
-                        source: fromCoordinate,
-                        destination: toCoordinate,
-                        departure: source.time
-                    )))
+                    let pair = Pair(from: from, to: to)
+                    let routeIndex: Int
+                    if let existing = routeIndexByPair[pair] {
+                        routeIndex = existing
+                    } else {
+                        routeIndex = uniqueRequests.count
+                        routeIndexByPair[pair] = routeIndex
+                        uniqueRequests.append(.init(
+                            source: fromCoordinate,
+                            destination: toCoordinate,
+                            departure: source.time
+                        ))
+                    }
+                    requests.append((from, to, source, routeIndex))
                 }
             }
             if distinctPairs == maximumWalkingTransferRequestsPerRound { break }
         }
-        let routes = await walking.routes(requests.map(\.request), maximumConcurrency: 4)
-        for (item, route) in zip(requests, routes) {
+        try Task.checkCancellation()
+        let routes = await walking.routes(uniqueRequests, maximumConcurrency: 4)
+        try Task.checkCancellation()
+        for item in requests {
             // A straight-line or unverified fallback cannot prove that a
             // connection between two boarding points is physically catchable.
-            guard let route, route.evidence == .routedPedestrian,
+            guard let route = routes[item.routeIndex], route.evidence == .routedPedestrian,
                   route.durationSeconds <= 15 * 60,
                   route.distanceMeters <= 1_500 else { continue }
             let arrival = item.source.time.addingTimeInterval(TimeInterval(route.durationSeconds))
@@ -1504,18 +1534,28 @@ private enum Raptor {
             nextLabelID += 1
             _ = insert(label, at: item.to, into: &labels)
         }
+        return uniqueRequests.count
     }
 
     private static func insert(_ candidate: Label, at stop: Int, into labels: inout [Int: [Label]]) -> Bool {
         var profile = labels[stop] ?? []
         if profile.contains(where: { dominates($0, candidate) }) { return false }
         profile.removeAll { dominates(candidate, $0) }
-        profile.append(candidate)
+        // Profiles are kept in labelOrder. Binary insertion avoids sorting the
+        // whole bounded profile after every accepted label.
+        var lower = 0
+        var upper = profile.count
+        while lower < upper {
+            let middle = lower + (upper - lower) / 2
+            if labelOrder(profile[middle], candidate) { lower = middle + 1 }
+            else { upper = middle }
+        }
+        profile.insert(candidate, at: lower)
         if profile.count > profileWidth {
             // Preserve both ends of the temporal profile and low-walk choices.
             // This is a resource limit, distinct from exact dominance.
-            let earliest = profile.sorted { labelOrder($0, $1) }
-            let latest = profile.sorted { labelOrder($1, $0) }
+            let earliest = profile
+            let latest = Array(profile.reversed())
             let lowWalk = profile.sorted {
                 let a = $0.accessSeconds + $0.pathwaySeconds
                 let b = $1.accessSeconds + $1.pathwaySeconds
@@ -1534,9 +1574,8 @@ private enum Raptor {
             for label in earlyArrival where selected.count < profileWidth && seen.insert(label.id).inserted {
                 selected.append(label)
             }
-            profile = selected
+            profile = selected.sorted(by: labelOrder)
         }
-        profile.sort(by: labelOrder)
         labels[stop] = profile
         return profile.contains(where: { $0.id == candidate.id })
     }
