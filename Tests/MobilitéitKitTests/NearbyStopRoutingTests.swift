@@ -50,6 +50,48 @@ import ZIPFoundation
     #expect(accessWalk.duration == 120)
 }
 
+@Test func selectedOriginStopCanWalkToABetterBoardingStop() async throws {
+    let folder = FileManager.default.temporaryDirectory
+        .appendingPathComponent("WalkFromSelectedStopTests-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+
+    let archiveURL = folder.appendingPathComponent("fixture.zip")
+    let databaseURL = folder.appendingPathComponent("transit.sqlite")
+    try writeNearbyStopFixture(to: archiveURL)
+    _ = try await GTFSArchiveInstaller.install(archiveAt: archiveURL, databaseAt: databaseURL)
+
+    let selectedStop = Coordinate(latitude: 49.600100, longitude: 6.100000)
+    let fasterStop = Coordinate(latitude: 49.601000, longitude: 6.100000)
+    let router = try await TransitRouter(
+        databaseURL: databaseURL,
+        walkingProvider: FixtureWalkingProvider(routes: [
+            .init(from: selectedStop, to: fasterStop, seconds: 120)
+        ])
+    )
+    let session = try await router.makeSession(for: .init(
+        origin: .stop(id: "near-stop"),
+        destination: .stop(id: "destination"),
+        departureTime: routeTestDate(hour: 8)
+    ))
+
+    let page = try await session.initial()
+    let journey = try #require(page.journeys.first { journey in
+        journey.legs.contains { leg in
+            if case let .transit(ride) = leg { return ride.tripID == "fast-run" }
+            return false
+        }
+    })
+    let accessWalk = try #require(journey.legs.first.flatMap { leg -> WalkingLeg? in
+        if case let .walk(walk) = leg { return walk }
+        return nil
+    })
+    #expect(accessWalk.from.stop?.id == "near-stop")
+    #expect(accessWalk.to.stop?.id == "fast-stop")
+    #expect(accessWalk.duration == 120)
+    #expect(page.recommendedJourneyID == journey.id)
+}
+
 @Test func coordinateRoutingKeepsALaterBoardingStopWhenNearbyRecordsAreUnboardable() async throws {
     let folder = FileManager.default.temporaryDirectory
         .appendingPathComponent("LaterBoardingStopTests-\(UUID().uuidString)", isDirectory: true)

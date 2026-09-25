@@ -769,15 +769,14 @@ public actor JourneyPlanningSession {
         switch endpoint {
         case let .stop(id):
             guard let stop = snapshot.stopByID[id] else { throw JourneyPlannerError.endpointNotFound }
-            // An origin stop must remain exact. At the destination, preserve
-            // the exact stop as a zero-walk option but also allow a rider to
-            // alight at a nearby stop and walk the final stretch when faster.
-            guard purpose == .egress, let walking else {
+            // Preserve the selected platform as a zero-walk option while also
+            // allowing a faster service from another reachable stop. This is
+            // useful even when the rider selected a stop rather than an address.
+            guard walking != nil else {
                 return [.init(stop: stop, seconds: 0, distance: 0, walk: nil)]
             }
             endpointStop = stop
             coordinate = snapshot.stops[stop].model.coordinate
-            _ = walking
         case let .coordinate(value, _):
             guard walking != nil else { throw JourneyPlannerError.endpointNotFound }
             endpointStop = nil
@@ -1604,6 +1603,31 @@ private enum Raptor {
             profile.byWalk.removeAll { removed.contains($0.id) }
             profile.byArrival.removeAll { removed.contains($0.id) }
             profile.byIncomingTrip[incomingTrip]?.removeAll { removed.contains($0.id) }
+        }
+        if removed.isEmpty, profile.ordered.count == profileWidth {
+            let quota = profileWidth / 5
+            let lastArrival = profile.byArrival[profileWidth - 1]
+            let candidateIsLastArrival = lastArrival.time < candidate.time
+                || (lastArrival.time == candidate.time && labelOrder(lastArrival, candidate))
+            let candidateIsInOrderedMiddle = labelOrder(profile.ordered[quota - 1], candidate)
+                && labelOrder(candidate, profile.ordered[profileWidth - quota])
+            let walk = candidate.accessSeconds + candidate.pathwaySeconds
+            let walkBoundary = profile.byWalk[quota - 1]
+            let boundaryWalk = walkBoundary.accessSeconds + walkBoundary.pathwaySeconds
+            let candidateOutsideWalkQuota = boundaryWalk < walk
+                || (boundaryWalk == walk && labelOrder(walkBoundary, candidate))
+            let candidateOutsidePreferredQuota = !candidate.containsPreferredMode
+                || profile.byArrival.lazy.filter(\.containsPreferredMode).prefix(quota).count == quota
+            if candidateIsLastArrival, candidateIsInOrderedMiddle,
+               candidateOutsideWalkQuota, candidateOutsidePreferredQuota {
+                #if DEBUG
+                if let referenceInput {
+                    let expected = referenceInsert(candidate, into: referenceInput)
+                    precondition(expected.map(\.id) == profile.ordered.map(\.id), "profile mismatch")
+                }
+                #endif
+                return false
+            }
         }
         insertSorted(candidate, into: &profile.ordered, by: labelOrder)
         insertSorted(candidate, into: &profile.byWalk) { lhs, rhs in

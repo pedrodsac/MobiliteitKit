@@ -324,6 +324,70 @@ import ZIPFoundation
     }
 }
 
+@Test func installedFeedGromscheedToHamiliusWhenConfigured() async throws {
+    guard let path = ProcessInfo.processInfo.environment["ROUTING_BENCHMARK_DATABASE"] else { return }
+    let router = try await TransitRouter(
+        databaseURL: URL(fileURLWithPath: path), walkingProvider: BenchmarkWalkingProvider()
+    )
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(identifier: "Europe/Luxembourg")!
+    let anchor = try #require(calendar.date(from: DateComponents(
+        year: 2026, month: 9, day: 25, hour: 13, minute: 47
+    )))
+    let session = try await router.makeSession(for: .init(
+        origin: .stop(id: "000200508004"),
+        destination: .stop(id: "000200405020"),
+        departureTime: anchor,
+        preferences: .init(maxTransfers: 3, minimumTransferSeconds: 120,
+                           sameStopTransferShortfallSeconds: 60)
+    ))
+    let page = try await session.initial(count: 5, searchHorizon: 3 * 60 * 60)
+    print("Gromscheed → Hamilius: \(page.journeys.map { "\($0.id.value) transfers=\($0.transferCount) \(transitTripInstanceSequence($0))" })")
+    print("Gromscheed metrics: \(page.metrics)")
+    let first = try #require(page.journeys.first)
+    let firstRide = try #require(first.legs.compactMap { leg -> TransitLeg? in
+        if case let .transit(ride) = leg { return ride }
+        return nil
+    }.first)
+    #expect(firstRide.route.shortName == "29")
+    #expect(firstRide.board.stop.id == "000200508003")
+    #expect(first.transferCount == 1)
+    #expect(page.journeys.contains { journey in
+        journey.legs.contains { leg in
+            if case let .walk(walk) = leg {
+                return walk.from.stop?.id == "000200508004"
+                    && walk.to.stop?.id == "000200508003"
+            }
+            return false
+        }
+    })
+}
+
+@Test func installedFeedKonradAdenauerToGromscheedAddressWhenConfigured() async throws {
+    guard let path = ProcessInfo.processInfo.environment["ROUTING_BENCHMARK_DATABASE"] else { return }
+    let router = try await TransitRouter(
+        databaseURL: URL(fileURLWithPath: path), walkingProvider: BenchmarkWalkingProvider()
+    )
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(identifier: "Europe/Luxembourg")!
+    let anchor = try #require(calendar.date(from: DateComponents(
+        year: 2026, month: 9, day: 25, hour: 13, minute: 47
+    )))
+    let session = try await router.makeSession(for: .init(
+        origin: .stop(id: "000200417019"),
+        destination: .coordinate(.init(latitude: 49.6541071, longitude: 6.2296443),
+                                 label: "18A Gromscheed"),
+        departureTime: anchor,
+        preferences: .init(maxTransfers: 3, minimumTransferSeconds: 120,
+                           sameStopTransferShortfallSeconds: 60)
+    ))
+    let page = try await session.initial(count: 5, searchHorizon: 3 * 60 * 60)
+    print("Konrad Adenauer → Gromscheed address: \(page.journeys.map { "\($0.id.value) transfers=\($0.transferCount) \(transitTripInstanceSequence($0))" })")
+    print("Reverse address metrics: \(page.metrics)")
+    #expect(!page.journeys.isEmpty)
+    #expect(page.metrics.endpointEgressCandidates > 0)
+}
+
 @Test func genericSameStopTransferCanBeOfferedAsAnExplicitTightAlternative() async throws {
     func run(rule: String, shortfall: Int) async throws -> [Journey] {
         let folder = try temporaryDirectory()
