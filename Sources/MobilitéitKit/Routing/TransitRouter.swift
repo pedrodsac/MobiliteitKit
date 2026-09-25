@@ -1573,7 +1573,10 @@ private enum Raptor {
     }
 
     private static func insert(_ candidate: Label, at stop: Int, into labels: inout [Int: LabelProfile]) -> Bool {
-        var profile = labels[stop] ?? LabelProfile()
+        insert(candidate, into: &labels[stop, default: LabelProfile()])
+    }
+
+    private static func insert(_ candidate: Label, into profile: inout LabelProfile) -> Bool {
         #if DEBUG
         let referenceInput = verifyProfile ? profile.ordered : nil
         #endif
@@ -1598,34 +1601,37 @@ private enum Raptor {
         }
         profile.byIncomingTrip[incomingTrip, default: []].append(candidate)
         if profile.ordered.count > profileWidth {
-            // Same five quotas and arrival-order fill as the reference policy.
-            var selected: Set<Int> = []
-            var preferredCount = 0
+            // With 49 labels and 48 slots, the reference quotas plus
+            // arrival-order fill exclude the last arrival outside every quota.
+            // Find that one label without building a selection set each time.
+            let quota = profileWidth / 5
+            var preferredIDs: [Int] = []
             for label in profile.byArrival where label.containsPreferredMode {
-                if preferredCount == profileWidth / 5 { break }
-                selected.insert(label.id)
-                preferredCount += 1
+                if preferredIDs.count == quota { break }
+                preferredIDs.append(label.id)
             }
-            for label in profile.ordered.prefix(profileWidth / 5) { selected.insert(label.id) }
-            for label in profile.ordered.reversed().prefix(profileWidth / 5) { selected.insert(label.id) }
-            for label in profile.byWalk.prefix(profileWidth / 5) { selected.insert(label.id) }
-            for label in profile.byArrival.prefix(profileWidth / 5) { selected.insert(label.id) }
-            for label in profile.byArrival where selected.count < profileWidth {
-                selected.insert(label.id)
+            if let victim = profile.byArrival.reversed().first(where: { label in
+                let id = label.id
+                return !preferredIDs.contains(id)
+                    && !profile.ordered.prefix(quota).contains(where: { $0.id == id })
+                    && !profile.ordered.suffix(quota).contains(where: { $0.id == id })
+                    && !profile.byWalk.prefix(quota).contains(where: { $0.id == id })
+                    && !profile.byArrival.prefix(quota).contains(where: { $0.id == id })
+            }) {
+                profile.ordered.remove(at: profile.ordered.firstIndex { $0.id == victim.id }!)
+                profile.byWalk.remove(at: profile.byWalk.firstIndex { $0.id == victim.id }!)
+                profile.byArrival.remove(at: profile.byArrival.firstIndex { $0.id == victim.id }!)
+                let victimTrip = victim.lastTransit?.trip ?? -1
+                profile.byIncomingTrip[victimTrip]?.removeAll { $0.id == victim.id }
             }
-            profile.ordered.removeAll { !selected.contains($0.id) }
-            profile.byWalk.removeAll { !selected.contains($0.id) }
-            profile.byArrival.removeAll { !selected.contains($0.id) }
-            profile.byIncomingTrip = Dictionary(grouping: profile.ordered) { $0.lastTransit?.trip ?? -1 }
         }
         let retained = profile.ordered.contains { $0.id == candidate.id }
         #if DEBUG
         if let referenceInput {
             let expected = referenceInsert(candidate, into: referenceInput)
-            precondition(expected.map(\.id) == profile.ordered.map(\.id), "profile mismatch at stop \(stop)")
+            precondition(expected.map(\.id) == profile.ordered.map(\.id), "profile mismatch")
         }
         #endif
-        labels[stop] = profile
         return retained
     }
 
