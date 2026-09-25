@@ -1057,12 +1057,27 @@ private enum Raptor {
         let status: RealtimeTripStatus
         let eventsByStop: [Int: RealtimeStopEventPatch]
     }
-    fileprivate struct Label: Sendable {
+    fileprivate final class Label: Sendable {
         let id: Int; let time: Date; let legs: [Leg]; let firstStop: Int; let firstDeparture: Date?
         let lastTransit: TransitLeg?; let minimumSlack: Int; let totalSlack: Int; let accessSeconds: Int; let accessDistance: Double; let pathwaySeconds: Int; let pathwayDistance: Double; let transferWalkSeconds: Int
         let containsPreferredMode: Bool
         let walkingStopsVisited: Set<Int>
         let tripKey: [TripInstance]
+
+        init(id: Int, time: Date, legs: [Leg], firstStop: Int, firstDeparture: Date?,
+             lastTransit: TransitLeg?, minimumSlack: Int, totalSlack: Int,
+             accessSeconds: Int, accessDistance: Double, pathwaySeconds: Int,
+             pathwayDistance: Double, transferWalkSeconds: Int, containsPreferredMode: Bool,
+             walkingStopsVisited: Set<Int>, tripKey: [TripInstance]) {
+            self.id = id; self.time = time; self.legs = legs; self.firstStop = firstStop
+            self.firstDeparture = firstDeparture; self.lastTransit = lastTransit
+            self.minimumSlack = minimumSlack; self.totalSlack = totalSlack
+            self.accessSeconds = accessSeconds; self.accessDistance = accessDistance
+            self.pathwaySeconds = pathwaySeconds; self.pathwayDistance = pathwayDistance
+            self.transferWalkSeconds = transferWalkSeconds
+            self.containsPreferredMode = containsPreferredMode
+            self.walkingStopsVisited = walkingStopsVisited; self.tripKey = tripKey
+        }
     }
     private struct LabelProfile: Sendable {
         var ordered: [Label] = []
