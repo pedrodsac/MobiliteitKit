@@ -283,6 +283,18 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
                   let lineScore = Self.lineScore(live.product, route: value.route)
             else { continue }
 
+            // A cancelled board row has no realtime position to disambiguate
+            // opposite-direction trips on the same line. Never cancel a GTFS
+            // trip based on line and departure time alone.
+            if live.cancelled == true {
+                let directionMatches = live.direction.flatMap { direction in
+                    value.headsign.map { Self.normalized(direction) == Self.normalized($0) }
+                } == true
+                let stopTimes = (try? await store.stopTimes(forTripID: value.tripID)) ?? []
+                let passlistMatches = Self.alignmentCount(live.passlist.values, stopTimes: stopTimes)
+                guard directionMatches || passlistMatches >= 2 else { continue }
+            }
+
             var score = lineScore
             if let direction = live.direction,
                let headsign = value.headsign,

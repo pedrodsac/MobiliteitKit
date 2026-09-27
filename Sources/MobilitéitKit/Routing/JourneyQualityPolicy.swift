@@ -24,6 +24,24 @@ public enum JourneyQualityPolicy {
         return noWorse && better
     }
 
+    /// Keep the initial list useful when a nearby earlier departure is better
+    /// on arrival, transfers, and walking. Later paging still exposes the full
+    /// chronological profile for riders who cannot catch that departure.
+    static func clearlyInferiorInInitialProfile(_ candidate: Journey, among journeys: [Journey]) -> Bool {
+        journeys.contains { other in
+            guard other.id != candidate.id,
+                  !other.hasCancelledTransitLeg,
+                  other.accessibility == candidate.accessibility,
+                  other.matchesPreferredMode == candidate.matchesPreferredMode else { return false }
+            let departureGap = candidate.effectiveDeparture.timeIntervalSince(other.effectiveDeparture)
+            return departureGap >= 0 && departureGap <= 20 * 60
+                && candidate.effectiveArrival.timeIntervalSince(other.effectiveArrival) >= 10 * 60
+                && candidate.duration >= other.duration + 10 * 60
+                && candidate.transferCount >= other.transferCount
+                && candidate.walkingDuration >= other.walkingDuration
+        }
+    }
+
     public static func ranksBefore(_ a: Journey, _ b: Journey,
                                    anchor: Date, direction: RouteQueryDirection,
                                    preferences: RoutingPreferences) -> Bool {

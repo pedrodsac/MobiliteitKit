@@ -89,11 +89,26 @@ import ZIPFoundation
     #expect(batch.patches.count == 1)
     #expect(batch.patches.first?.tripID == "trip-322")
     #expect(batch.patches.first?.status == .cancelled)
+
+    let mismatchedClient = MobiliteitAPIClient(
+        apiKey: "test",
+        baseURL: URL(string: "https://mismatch-\(UUID().uuidString).invalid")!,
+        session: URLSession(configuration: configuration)
+    )
+    let mismatchedProvider = try HafasRealtimeRoutingProvider(
+        databaseURL: databaseURL, client: mismatchedClient
+    )
+    let mismatched = try await mismatchedProvider.patches(
+        for: ["b"], from: from, through: from.addingTimeInterval(20 * 60),
+        refreshPolicy: .forceRefresh
+    )
+    #expect(mismatched.patches.isEmpty)
 }
 
 private final class CancelledJourneyBoardProtocol: URLProtocol {
     override class func canInit(with request: URLRequest) -> Bool {
         request.url?.host()?.hasPrefix("cancelled-") == true
+            || request.url?.host()?.hasPrefix("mismatch-") == true
     }
 
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -101,8 +116,10 @@ private final class CancelledJourneyBoardProtocol: URLProtocol {
     override func startLoading() {
         let stopID = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?
             .queryItems?.first(where: { $0.name == "id" })?.value
+        let direction = request.url?.host()?.hasPrefix("mismatch-") == true
+            ? "Opposite direction" : "Destination"
         let body = """
-        {"Departure":[{"JourneyDetailRef":{"ref":"same-journey"},"Product":{"name":"Bus 322","line":"322","cls":"32"},"time":"09:20:00","date":"2026-09-24","cancelled":true}]}
+        {"Departure":[{"JourneyDetailRef":{"ref":"same-journey"},"Product":{"name":"Bus 322","line":"322","cls":"32"},"direction":"\(direction)","time":"09:20:00","date":"2026-09-24","cancelled":true}]}
         """
         let response = HTTPURLResponse(url: request.url!, statusCode: 200,
                                        httpVersion: "HTTP/1.1", headerFields: nil)!

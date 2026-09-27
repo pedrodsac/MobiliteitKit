@@ -436,6 +436,33 @@ import ZIPFoundation
     #expect(page.journeys.allSatisfy { $0.effectiveArrival < date(hour: 9) })
 }
 
+@Test func initialProfileOmitsClearlySlowerNearbyDepartures() async throws {
+    let files = scenarioFiles(
+        routes: "route,operator,10,Bus,3\n",
+        stops: scenarioStops([("origin", "Origin", 49.600000), ("destination", "Destination", 49.610000)]),
+        trips: ["fast", "slow-nearby", "slow-later", "useful-later"]
+            .map { "route,service,\($0),,,," }.joined(separator: "\n") + "\n",
+        stopTimes: [
+            ("fast", "08:05:00", "08:25:00"),
+            ("slow-nearby", "08:08:00", "08:42:00"),
+            ("slow-later", "08:23:00", "09:15:00"),
+            ("useful-later", "08:40:00", "09:00:00"),
+        ].map { "\($0.0),\($0.1),\($0.1),origin,1\n\($0.0),\($0.2),\($0.2),destination,2" }
+            .joined(separator: "\n") + "\n"
+    )
+    let fixture = try await installedRouter(using: files, walking: FixtureWalkingProvider(routes: []))
+    defer { try? FileManager.default.removeItem(at: fixture.folder) }
+    let session = try await fixture.router.makeSession(for: .init(
+        origin: .stop(id: "origin"), destination: .stop(id: "destination"),
+        departureTime: date(hour: 8)
+    ))
+
+    let initial = try await session.initial(count: 5)
+    #expect(initial.journeys.map(transitTripInstanceSequence) == [["fast"], ["useful-later"]])
+    let later = try await session.boundedPage(after: date(hour: 8, minute: 5), count: 5)
+    #expect(later.journeys.contains { transitTripInstanceSequence($0) == ["slow-nearby"] })
+}
+
 @Test func routePlannerCanExpandAStableInitialProfile() async throws {
     let fixture = try await installedRouter(
         using: profileFixtureFiles(),

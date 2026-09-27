@@ -600,7 +600,8 @@ public actor JourneyPlanningSession {
         func add(_ journey: Journey?) {
             if let journey, seen.insert(journey.id).inserted { selected.append(journey) }
         }
-        let ordered = all.sorted { JourneyQualityPolicy.ranksBefore(
+        let useful = all.filter { !JourneyQualityPolicy.clearlyInferiorInInitialProfile($0, among: all) }
+        let ordered = useful.sorted { JourneyQualityPolicy.ranksBefore(
             $0, $1, anchor: query.departureTime, direction: query.direction,
             preferences: query.preferences
         ) }
@@ -609,7 +610,7 @@ public actor JourneyPlanningSession {
         if query.preferences.preferWheelchairAccessible {
             add(ordered.first { $0.accessibility == .verified })
         }
-        for journey in all where selected.count < count { add(journey) }
+        for journey in useful where selected.count < count { add(journey) }
         return selected.prefix(count).sorted { a, b in
             if a.effectiveDeparture != b.effectiveDeparture { return a.effectiveDeparture < b.effectiveDeparture }
             return a.id < b.id
