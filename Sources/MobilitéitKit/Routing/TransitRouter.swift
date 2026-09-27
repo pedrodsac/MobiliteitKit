@@ -556,6 +556,7 @@ public actor JourneyPlanningSession {
         let journey: Journey
         let firstBoard: Date
         let tripInstanceKey: String
+        let equivalentTransferKey: String
         let minimumTransferSlack: Int
         let totalTransferSlack: Int
     }
@@ -714,7 +715,21 @@ public actor JourneyPlanningSession {
                 representatives[journey.tripInstanceKey] = journey
             }
         }
-        let journeys = strictEnvelope(Array(representatives.values)).sorted(by: journeyOrder).map(\.journey)
+        var transferRepresentatives: [BuiltJourney] = []
+        var indicesByVehicle: [String: [Int]] = [:]
+        for journey in representatives.values.sorted(by: journeyOrder) {
+            if let index = indicesByVehicle[journey.equivalentTransferKey]?.first(where: {
+                sameVehicleChoice(transferRepresentatives[$0], journey)
+            }) {
+                if prefersSaferTransfer(journey, over: transferRepresentatives[index]) {
+                    transferRepresentatives[index] = journey
+                }
+            } else {
+                indicesByVehicle[journey.equivalentTransferKey, default: []].append(transferRepresentatives.count)
+                transferRepresentatives.append(journey)
+            }
+        }
+        let journeys = strictEnvelope(transferRepresentatives).sorted(by: journeyOrder).map(\.journey)
         metrics.alternativesRetained = journeys.count
         metrics.candidateBuildingMilliseconds = Int(Date().timeIntervalSince(candidateStarted) * 1_000)
         let direct = await directJourney
@@ -953,7 +968,7 @@ public actor JourneyPlanningSession {
             candidate.transitLegs.contains { preferred.contains(routeType: snapshot.routes[snapshot.trips[$0.trip].route].type) }
         } ?? true
         let journey = Journey(id: .init(signature), origin: query.origin, destination: query.destination, scheduledDeparture: scheduledDepart, scheduledArrival: scheduledArrive, effectiveDeparture: depart, effectiveArrival: arrive, transferCount: max(0, candidate.transitLegs.count - 1), walkingDuration: walkingDuration, walkingDistance: a.distance + e.distance + candidate.pathwayDistance, waitingDuration: waiting, inVehicleDuration: inVehicle, legs: legs, feedGeneration: snapshot.info.generation, accessibility: accessibility, matchesPreferredMode: matchesPreferredMode)
-        return .init(journey: journey, firstBoard: candidate.firstDeparture, tripInstanceKey: signature, minimumTransferSlack: candidate.minimumTransferSlack, totalTransferSlack: candidate.totalTransferSlack)
+        return .init(journey: journey, firstBoard: candidate.firstDeparture, tripInstanceKey: signature, equivalentTransferKey: candidate.equivalentTransferKey(snapshot: snapshot), minimumTransferSlack: candidate.minimumTransferSlack, totalTransferSlack: candidate.totalTransferSlack)
     }
     private func endpointLocation(_ endpoint: JourneyEndpoint) -> JourneyLocation {
         switch endpoint {
@@ -1011,6 +1026,25 @@ public actor JourneyPlanningSession {
         JourneyQualityPolicy.ranksBefore(lhs.journey, rhs.journey, anchor: query.departureTime,
                                          direction: query.direction, preferences: query.preferences)
     }
+
+    private func sameVehicleChoice(_ lhs: BuiltJourney, _ rhs: BuiltJourney) -> Bool {
+        lhs.equivalentTransferKey == rhs.equivalentTransferKey
+            && lhs.journey.effectiveDeparture == rhs.journey.effectiveDeparture
+            && lhs.journey.effectiveArrival == rhs.journey.effectiveArrival
+            && lhs.journey.accessibility == rhs.journey.accessibility
+            && lhs.journey.matchesPreferredMode == rhs.journey.matchesPreferredMode
+            && abs(lhs.journey.walkingDuration - rhs.journey.walkingDuration) <= 120
+            && abs(lhs.journey.walkingDistance - rhs.journey.walkingDistance) <= 200
+    }
+
+    private func prefersSaferTransfer(_ lhs: BuiltJourney, over rhs: BuiltJourney) -> Bool {
+        // Extra transfer time is useful up to ten minutes. Beyond that, a
+        // longer wait should not outweigh walking or journey time.
+        let lhsValue = Double(min(lhs.minimumTransferSlack, 600)) - lhs.journey.walkingDuration
+        let rhsValue = Double(min(rhs.minimumTransferSlack, 600)) - rhs.journey.walkingDuration
+        if lhsValue != rhsValue { return lhsValue > rhsValue }
+        return prefers(lhs, over: rhs)
+    }
 }
 
 private enum Raptor {
@@ -1043,6 +1077,12 @@ private enum Raptor {
                 "\(snapshot.trips[$0.trip].id)@\($0.day.compactString):\($0.boardPos)-\($0.alightPos)"
             }.joined(separator: "|")
             return "\(firstStop)>\(lastStop):\(rides)"
+        }
+        func equivalentTransferKey(snapshot: RoutingSnapshot) -> String {
+            let rides = transitLegs
+            let vehicles = rides.map { "\(snapshot.trips[$0.trip].id)@\($0.day.compactString)" }
+                .joined(separator: "|")
+            return "\(firstStop)>\(lastStop):\(rides.first?.boardPos ?? -1)-\(rides.last?.alightPos ?? -1):\(vehicles)"
         }
     }
     struct SearchResult: Sendable {
@@ -1372,6 +1412,8 @@ private enum Raptor {
                                     alightStop: alightTime.stop,
                                     departure: effective,
                                     arrival: effectiveArrival,
+                                    minimumSlack: minimumSlack,
+                                    totalSlack: totalSlack,
                                     containsPreferredMode: source.containsPreferredMode || tripMatchesPreferredMode
                                 ) { continue }
                                 let leg = TransitLeg(
@@ -1524,7 +1566,6 @@ private enum Raptor {
             let eligible = (labels[from]?.ordered ?? []).filter { $0.lastTransit != nil }
                 .sorted { $0.time == $1.time ? $0.id < $1.id : $0.time < $1.time }
             guard !eligible.isEmpty else { continue }
-            let representativeIndices = Set([0, eligible.count / 2, eligible.count - 1])
             for to in targets {
                 guard eligible.contains(where: { !$0.walkingStopsVisited.contains(to) }) else { continue }
                 guard distinctPairs < maximumWalkingTransferRequestsPerRound else { break }
@@ -1532,8 +1573,10 @@ private enum Raptor {
                 try Task.checkCancellation()
                 let fromCoordinate = snapshot.stops[from].model.coordinate
                 let toCoordinate = snapshot.stops[to].model.coordinate
-                for index in representativeIndices.sorted() {
-                    let source = eligible[index]
+                // The pedestrian route is fetched once per stop pair. Apply it
+                // to every retained arrival label: sampling only the first,
+                // middle, and last arrival can discard the safer bus.
+                for source in eligible {
                     guard !source.walkingStopsVisited.contains(to) else { continue }
                     let pair = Pair(from: from, to: to)
                     let routeIndex: Int
@@ -1741,6 +1784,8 @@ private enum Raptor {
         alightStop: Int,
         departure: Date,
         arrival: Date,
+        minimumSlack: Int,
+        totalSlack: Int,
         containsPreferredMode: Bool
     ) -> Bool {
         guard let profile else { return false }
@@ -1755,6 +1800,8 @@ private enum Raptor {
                   existing.containsPreferredMode == containsPreferredMode,
                   existing.walkingStopsVisited.count == 1,
                   existing.walkingStopsVisited.contains(alightStop),
+                  existing.minimumSlack >= minimumSlack,
+                  existing.totalSlack >= totalSlack,
                   let existingFirstDeparture = existing.firstDeparture
             else { return false }
             let existingDoorDeparture = existingFirstDeparture.addingTimeInterval(
@@ -1780,7 +1827,9 @@ private enum Raptor {
               lhs.lastTransit?.alight == rhs.lastTransit?.alight,
               lhs.transferWalkSeconds == rhs.transferWalkSeconds,
               lhs.containsPreferredMode == rhs.containsPreferredMode,
-              lhs.walkingStopsVisited == rhs.walkingStopsVisited else { return false }
+              lhs.walkingStopsVisited == rhs.walkingStopsVisited,
+              lhs.minimumSlack >= rhs.minimumSlack,
+              lhs.totalSlack >= rhs.totalSlack else { return false }
         let lhsDeparture = lhs.firstDeparture?.addingTimeInterval(-TimeInterval(lhs.accessSeconds))
         let rhsDeparture = rhs.firstDeparture?.addingTimeInterval(-TimeInterval(rhs.accessSeconds))
         let departureNoWorse: Bool

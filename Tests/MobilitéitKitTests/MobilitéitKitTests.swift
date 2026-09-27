@@ -505,6 +505,60 @@ import ZIPFoundation
     #expect(transit[1].board.stop.id == "transfer-a")
 }
 
+@Test func heienhaffTransferBeatsTighterAirportTransferOnSameBuses() async throws {
+    let heienhaffAlight = Coordinate(latitude: 49.605000, longitude: 6.100000)
+    let heienhaffBoard = Coordinate(latitude: 49.605100, longitude: 6.100000)
+    // Other arrivals at the interchange must not make the 13:19 bus disappear
+    // from the walking-transfer search's time profile.
+    let otherArrivals = [
+        ("12:46:00", "12:55:00"), ("12:51:00", "13:00:00"),
+        ("12:56:00", "13:05:00"), ("13:21:00", "13:30:00"),
+        ("13:26:00", "13:35:00"), ("13:31:00", "13:40:00"),
+        ("13:36:00", "13:45:00"), ("13:41:00", "13:50:00"),
+    ]
+    let otherTrips = otherArrivals.indices.map { "route-29,service,other-\($0),,,," }
+        .joined(separator: "\n") + "\n"
+    let otherStopTimes = otherArrivals.enumerated().map { index, times in
+        "other-\(index),\(times.0),\(times.0),origin,1\n"
+            + "other-\(index),\(times.1),\(times.1),heienhaff-29,2\n"
+    }.joined()
+    let files = scenarioFiles(
+        routes: "route-29,operator,29,Bus 29,3\nroute-16,operator,16,Bus 16,3\n",
+        stops: scenarioStops([
+            ("origin", "Charlys Statioun", 49.600000),
+            ("heienhaff-29", "Héienhaff Quai 2", 49.605000),
+            ("heienhaff-16", "Héienhaff Quai 1", 49.605100),
+            ("airport", "Aéroport", 49.610000),
+            ("destination", "Philharmonie", 49.620000),
+        ]),
+        trips: "route-29,service,bus-29,,,,\nroute-16,service,bus-16,,,,\n" + otherTrips,
+        stopTimes: "bus-29,13:16:00,13:16:00,origin,1\n"
+            + "bus-29,13:19:00,13:19:00,heienhaff-29,2\n"
+            + "bus-29,13:23:00,13:23:00,airport,3\n"
+            + "bus-16,13:26:00,13:26:00,airport,1\n"
+            + "bus-16,13:28:00,13:28:00,heienhaff-16,2\n"
+            + "bus-16,13:44:00,13:44:00,destination,3\n" + otherStopTimes
+    )
+    let fixture = try await installedRouter(using: files, walking: FixtureWalkingProvider(routes: [
+        .init(from: heienhaffAlight, to: heienhaffBoard, seconds: 60),
+    ]))
+    defer { try? FileManager.default.removeItem(at: fixture.folder) }
+    let session = try await fixture.router.makeSession(for: .init(
+        origin: .stop(id: "origin"), destination: .stop(id: "destination"),
+        departureTime: date(hour: 12, minute: 45), preferences: .init(minimumTransferSeconds: 120)
+    ))
+
+    let page = try await session.initial()
+    let intended = try #require(page.journeys.first { transitTripInstanceSequence($0) == ["bus-29", "bus-16"] })
+    #expect(page.recommendedJourneyID == intended.id)
+    let rides = intended.legs.compactMap { leg -> TransitLeg? in
+        if case let .transit(ride) = leg { return ride }
+        return nil
+    }
+    #expect(rides.first?.alight.stop.id == "heienhaff-29")
+    #expect(rides.last?.board.stop.id == "heienhaff-16")
+}
+
 @Test func routePlannerRetainsDifferentScheduledVehiclesOnTheSameLine() async throws {
     let page = try await routePage(using: sameLineFixtureFiles())
     #expect(page.journeys.map(transitTripInstanceSequence) == [["line-10-run-1"], ["line-10-run-2"]])
