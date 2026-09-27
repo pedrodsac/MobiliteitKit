@@ -7,6 +7,9 @@ public enum JourneyQualityPolicy {
     public static let walkingBurdenPerSecond = 1.0
 
     public static func dominates(_ a: Journey, _ b: Journey) -> Bool {
+        // Keep cancelled itineraries visible without letting their attractive
+        // scheduled times suppress a service that is actually running.
+        guard !a.hasCancelledTransitLeg, !b.hasCancelledTransitLeg else { return false }
         // Accessibility and preferred-mode participation are material choices.
         guard a.accessibility == b.accessibility,
               a.matchesPreferredMode == b.matchesPreferredMode else { return false }
@@ -24,6 +27,9 @@ public enum JourneyQualityPolicy {
     public static func ranksBefore(_ a: Journey, _ b: Journey,
                                    anchor: Date, direction: RouteQueryDirection,
                                    preferences: RoutingPreferences) -> Bool {
+        if a.hasCancelledTransitLeg != b.hasCancelledTransitLeg {
+            return !a.hasCancelledTransitLeg
+        }
         // An arrival deadline promises the latest feasible departure. Quality
         // costs distinguish journeys only at the same departure instant.
         if direction == .arriveBy, a.effectiveDeparture != b.effectiveDeparture {
@@ -73,5 +79,14 @@ public enum JourneyQualityPolicy {
         case .preferDirect: transferWeight = 1_200; walkWeight = walkingBurdenPerSecond
         }
         return time + transfers * transferWeight + walking * walkWeight
+    }
+}
+
+extension Journey {
+    var hasCancelledTransitLeg: Bool {
+        legs.contains { leg in
+            if case let .transit(transit) = leg { return transit.status == .cancelled }
+            return false
+        }
     }
 }

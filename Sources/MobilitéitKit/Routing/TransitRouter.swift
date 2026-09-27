@@ -243,7 +243,7 @@ public struct JourneyStopEvent: Hashable, Sendable {
         self.platform = platform
     }
 }
-public struct TransitLeg: Hashable, Sendable { public let tripID: String; public let route: TransitRoute; public let headsign: String?; public let board: JourneyStopEvent; public let alight: JourneyStopEvent; public let intermediateStops: [JourneyStopEvent]; public let scheduledDeparture: Date; public let scheduledArrival: Date; public let effectiveDeparture: Date; public let effectiveArrival: Date; public let requiredTransferSecondsAfterWalking: Int }
+public struct TransitLeg: Hashable, Sendable { public let tripID: String; public let route: TransitRoute; public let headsign: String?; public let board: JourneyStopEvent; public let alight: JourneyStopEvent; public let intermediateStops: [JourneyStopEvent]; public let scheduledDeparture: Date; public let scheduledArrival: Date; public let effectiveDeparture: Date; public let effectiveArrival: Date; public let status: RealtimeTripStatus; public let requiredTransferSecondsAfterWalking: Int }
 public struct InSeatContinuationLeg: Hashable, Sendable { public let fromTripID: String; public let toTripID: String }
 public enum JourneyLeg: Hashable, Sendable { case walk(WalkingLeg), transit(TransitLeg), inSeatContinuation(InSeatContinuationLeg) }
 public struct JourneySignature: Hashable, Sendable, Codable, Comparable, Identifiable { public let value: String; public var id: String { value }; public init(_ value: String) { self.value = value }; public static func < (l: Self, r: Self) -> Bool { l.value < r.value } }
@@ -879,8 +879,10 @@ public actor JourneyPlanningSession {
                 let patch = latestPatchesByInstance[
                     RealtimePatchKey(tripID: trip.id, serviceDate: item.day)
                 ]
-                let boardPatch = patch?.events.first { $0.stopID == board.id }
-                let alightPatch = patch?.events.first { $0.stopID == alight.id }
+                let status = patch?.status ?? .active
+                let events = status == .cancelled ? [] : patch?.events ?? []
+                let boardPatch = events.first { $0.stopID == board.id }
+                let alightPatch = events.first { $0.stopID == alight.id }
                 let b = JourneyStopEvent(
                     stop: board,
                     scheduledTime: item.scheduledBoard,
@@ -897,7 +899,7 @@ public actor JourneyPlanningSession {
                 )
                 let middle = trip.times[(item.boardPos + 1)..<item.alightPos].map { time in
                     let stop = snapshot.stops[time.stop].model
-                    let eventPatch = patch?.events.first { $0.stopID == stop.id }
+                    let eventPatch = events.first { $0.stopID == stop.id }
                     let scheduled = snapshot.converter.date(
                         serviceDate: item.day,
                         serviceSeconds: time.arrival ?? time.departure ?? 0
@@ -914,7 +916,7 @@ public actor JourneyPlanningSession {
                         platform: eventPatch?.platform ?? stop.platformCode
                     )
                 }
-                legs.append(.transit(.init(tripID: trip.id, route: snapshot.routes[trip.route], headsign: trip.headsign, board: b, alight: x, intermediateStops: Array(middle), scheduledDeparture: item.scheduledBoard, scheduledArrival: item.scheduledAlight, effectiveDeparture: item.boardTime, effectiveArrival: item.alightTime, requiredTransferSecondsAfterWalking: item.requiredTransferSecondsAfterWalking)))
+                legs.append(.transit(.init(tripID: trip.id, route: snapshot.routes[trip.route], headsign: trip.headsign, board: b, alight: x, intermediateStops: Array(middle), scheduledDeparture: item.scheduledBoard, scheduledArrival: item.scheduledAlight, effectiveDeparture: item.boardTime, effectiveArrival: item.alightTime, status: status, requiredTransferSecondsAfterWalking: item.requiredTransferSecondsAfterWalking)))
             case let .pathway(item):
                 let fromStop = snapshot.stops[item.from].model
                 let toStop = snapshot.stops[item.to].model
@@ -1308,12 +1310,13 @@ private enum Raptor {
                 let scheduledArrivals = trip.times.map { time in
                     time.arrival.map { serviceDay.start.addingTimeInterval(TimeInterval($0)) }
                 }
+                let timingPatch = patch?.status == .cancelled ? nil : patch
                 let effectiveDepartures = trip.times.indices.map { position in
-                    patchTime(patch, stop: trip.times[position].stop, departure: true)
+                    patchTime(timingPatch, stop: trip.times[position].stop, departure: true)
                         ?? scheduledDepartures[position]
                 }
                 let effectiveArrivals = trip.times.indices.map { position in
-                    patchTime(patch, stop: trip.times[position].stop, departure: false)
+                    patchTime(timingPatch, stop: trip.times[position].stop, departure: false)
                         ?? scheduledArrivals[position]
                 }
 
@@ -1436,7 +1439,7 @@ private enum Raptor {
                       serviceDay.start.addingTimeInterval(TimeInterval(trip.lastServiceTime)) >= scheduledLowerBound
                 else { return nil }
                 let patch = patchesByInstance[.init(trip: tripIndex, serviceDate: serviceDay.date)]
-                guard patch?.status != .cancelled && patch?.status != .unreachable else { return nil }
+                guard patch?.status != .unreachable else { return nil }
                 return .init(tripIndex: tripIndex, serviceDay: serviceDay, patch: patch)
             }
         }

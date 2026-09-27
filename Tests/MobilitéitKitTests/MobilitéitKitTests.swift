@@ -895,7 +895,7 @@ import ZIPFoundation
     #expect(journey.scheduledDeparture < anchor)
 }
 
-@Test func cancelledRealtimeTripIsNotOfferedAsAJourney() async throws {
+@Test func cancelledRealtimeTripRemainsInJourneysWithItsStatus() async throws {
     let folder = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: folder) }
     let archiveURL = folder.appendingPathComponent("fixture.zip")
@@ -916,7 +916,83 @@ import ZIPFoundation
     ))
     let page = try await session.initial()
     #expect(!page.journeys.isEmpty)
-    #expect(page.journeys.allSatisfy { !transitTripInstanceSequence($0).contains("run-1") })
+    let cancelledJourney = try #require(page.journeys.first {
+        transitTripInstanceSequence($0).contains("run-1")
+    })
+    #expect(cancelledJourney.hasCancelledTransitLeg)
+    #expect(cancelledJourney.legs.contains { leg in
+        if case let .transit(transit) = leg {
+            return transit.tripID == "run-1" && transit.status == .cancelled
+        }
+        return false
+    })
+}
+
+@Test func aTransferJourneyKeepsItsCancelledLine() async throws {
+    let folder = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let archiveURL = folder.appendingPathComponent("fixture.zip")
+    let databaseURL = folder.appendingPathComponent("transit.sqlite")
+    try writeArchive(to: archiveURL, files: transferChoiceFixtureFiles())
+    _ = try await GTFSArchiveInstaller.install(archiveAt: archiveURL, databaseAt: databaseURL)
+
+    let live = FixtureRealtime(patches: [.init(
+        tripID: "outgoing",
+        serviceDate: try GTFSDate(parsing: "20260904"),
+        status: .cancelled,
+        events: []
+    )])
+    let router = try await TransitRouter(databaseURL: databaseURL, realtimeProvider: live)
+    let session = try await router.makeSession(for: .init(
+        origin: .stop(id: "origin"), destination: .stop(id: "destination"),
+        departureTime: date(hour: 8), realtimePolicy: .bestEffort()
+    ))
+    let page = try await session.initial()
+    let journey = try #require(page.journeys.first {
+        transitTripInstanceSequence($0).contains("outgoing")
+    })
+    let transit = journey.legs.compactMap { leg -> TransitLeg? in
+        if case let .transit(ride) = leg { return ride }
+        return nil
+    }
+    #expect(transit.map(\.tripID) == ["incoming", "outgoing"])
+    #expect(transit.map(\.status) == [.active, .cancelled])
+}
+
+@Test func cancelledSecondBusAndReplacementShareTheFirstBus() async throws {
+    let folder = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let archiveURL = folder.appendingPathComponent("fixture.zip")
+    let databaseURL = folder.appendingPathComponent("transit.sqlite")
+    try writeArchive(to: archiveURL, files: cancelledTransferAlternativeFixtureFiles())
+    _ = try await GTFSArchiveInstaller.install(archiveAt: archiveURL, databaseAt: databaseURL)
+
+    let live = FixtureRealtime(patches: [.init(
+        tripID: "cancelled-second",
+        serviceDate: try GTFSDate(parsing: "20260904"),
+        status: .cancelled,
+        events: []
+    )])
+    let router = try await TransitRouter(databaseURL: databaseURL, realtimeProvider: live)
+    let session = try await router.makeSession(for: .init(
+        origin: .stop(id: "origin"), destination: .stop(id: "destination"),
+        departureTime: date(hour: 8), realtimePolicy: .bestEffort()
+    ))
+    let page = try await session.initial()
+    let replacementJourney = try #require(page.journeys.first {
+        transitTripInstanceSequence($0).contains("replacement-second")
+    })
+    let routes = page.journeys.map { journey in
+        journey.legs.compactMap { leg -> TransitLeg? in
+            if case let .transit(ride) = leg { return ride }
+            return nil
+        }
+    }
+    let cancelled = try #require(routes.first { $0.map(\.tripID) == ["first", "cancelled-second"] })
+    let replacement = try #require(routes.first { $0.map(\.tripID) == ["first", "replacement-second"] })
+    #expect(cancelled.map(\.status) == [.active, .cancelled])
+    #expect(replacement.map(\.status) == [.active, .active])
+    #expect(page.recommendedJourneyID == replacementJourney.id)
 }
 
 @Test func realtimeDelayCanCreateAnOtherwiseImpossibleTransfer() async throws {
@@ -1257,6 +1333,28 @@ private func transferChoiceFixtureFiles() -> [String: String] {
         stops: scenarioStops([("origin", "Origin", 49.600000), ("transfer-a", "Transfer A", 49.601000), ("transfer-b", "Transfer B", 49.602000), ("destination", "Destination", 49.610000)]),
         trips: "in,service,incoming,,,,\nout,service,outgoing,,,,\n",
         stopTimes: "incoming,08:05:00,08:05:00,origin,1\nincoming,08:10:00,08:10:00,transfer-a,2\nincoming,08:12:00,08:12:00,transfer-b,3\noutgoing,08:25:00,08:25:00,transfer-a,1\noutgoing,08:25:00,08:25:00,transfer-b,2\noutgoing,08:40:00,08:40:00,destination,3\n"
+    )
+}
+
+private func cancelledTransferAlternativeFixtureFiles() -> [String: String] {
+    scenarioFiles(
+        routes: "first-route,operator,FIRST,First bus,3\n"
+            + "cancelled-route,operator,CANCEL,Cancelled bus,3\n"
+            + "replacement-route,operator,REPLACE,Replacement bus,3\n",
+        stops: scenarioStops([
+            ("origin", "Origin", 49.600000),
+            ("transfer", "Transfer", 49.601000),
+            ("destination", "Destination", 49.610000),
+        ]),
+        trips: "first-route,service,first,,,,\n"
+            + "cancelled-route,service,cancelled-second,,,,\n"
+            + "replacement-route,service,replacement-second,,,,\n",
+        stopTimes: "first,08:05:00,08:05:00,origin,1\n"
+            + "first,08:15:00,08:15:00,transfer,2\n"
+            + "cancelled-second,08:20:00,08:20:00,transfer,1\n"
+            + "cancelled-second,08:35:00,08:35:00,destination,2\n"
+            + "replacement-second,08:25:00,08:25:00,transfer,1\n"
+            + "replacement-second,08:40:00,08:40:00,destination,2\n"
     )
 }
 
