@@ -922,7 +922,7 @@ import ZIPFoundation
     #expect(journey.scheduledDeparture < anchor)
 }
 
-@Test func cancelledRealtimeTripRemainsInJourneysWithItsStatus() async throws {
+@Test func cancelledRealtimeTripIsNotOfferedAsAnAlternative() async throws {
     let folder = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: folder) }
     let archiveURL = folder.appendingPathComponent("fixture.zip")
@@ -943,19 +943,10 @@ import ZIPFoundation
     ))
     let page = try await session.initial()
     #expect(!page.journeys.isEmpty)
-    let cancelledJourney = try #require(page.journeys.first {
-        transitTripInstanceSequence($0).contains("run-1")
-    })
-    #expect(cancelledJourney.hasCancelledTransitLeg)
-    #expect(cancelledJourney.legs.contains { leg in
-        if case let .transit(transit) = leg {
-            return transit.tripID == "run-1" && transit.status == .cancelled
-        }
-        return false
-    })
+    #expect(page.journeys.allSatisfy { !transitTripInstanceSequence($0).contains("run-1") })
 }
 
-@Test func aTransferJourneyKeepsItsCancelledLine() async throws {
+@Test func cancelledTripCannotBeBoardedAtAnotherStop() async throws {
     let folder = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: folder) }
     let archiveURL = folder.appendingPathComponent("fixture.zip")
@@ -974,16 +965,14 @@ import ZIPFoundation
         origin: .stop(id: "origin"), destination: .stop(id: "destination"),
         departureTime: date(hour: 8), realtimePolicy: .bestEffort()
     ))
-    let page = try await session.initial()
-    let journey = try #require(page.journeys.first {
-        transitTripInstanceSequence($0).contains("outgoing")
-    })
-    let transit = journey.legs.compactMap { leg -> TransitLeg? in
-        if case let .transit(ride) = leg { return ride }
-        return nil
+    #expect(try await session.initial().journeys.isEmpty)
+    for stopID in ["transfer-a", "transfer-b"] {
+        let boardingSession = try await router.makeSession(for: .init(
+            origin: .stop(id: stopID), destination: .stop(id: "destination"),
+            departureTime: date(hour: 8), realtimePolicy: .bestEffort()
+        ))
+        #expect(try await boardingSession.initial().journeys.isEmpty)
     }
-    #expect(transit.map(\.tripID) == ["incoming", "outgoing"])
-    #expect(transit.map(\.status) == [.active, .cancelled])
 }
 
 @Test func cancelledSecondBusAndReplacementShareTheFirstBus() async throws {
@@ -1015,9 +1004,8 @@ import ZIPFoundation
             return nil
         }
     }
-    let cancelled = try #require(routes.first { $0.map(\.tripID) == ["first", "cancelled-second"] })
     let replacement = try #require(routes.first { $0.map(\.tripID) == ["first", "replacement-second"] })
-    #expect(cancelled.map(\.status) == [.active, .cancelled])
+    #expect(!routes.contains { $0.map(\.tripID).contains("cancelled-second") })
     #expect(replacement.map(\.status) == [.active, .active])
     #expect(page.recommendedJourneyID == replacementJourney.id)
 }

@@ -7,8 +7,8 @@ public enum JourneyQualityPolicy {
     public static let walkingBurdenPerSecond = 1.0
 
     public static func dominates(_ a: Journey, _ b: Journey) -> Bool {
-        // Keep cancelled itineraries visible without letting their attractive
-        // scheduled times suppress a service that is actually running.
+        // A cancelled itinerary must not suppress a running service when this
+        // policy is applied to retained or historical journey results.
         guard !a.hasCancelledTransitLeg, !b.hasCancelledTransitLeg else { return false }
         // Accessibility and preferred-mode participation are material choices.
         guard a.accessibility == b.accessibility,

@@ -1440,7 +1440,11 @@ private enum Raptor {
                       serviceDay.start.addingTimeInterval(TimeInterval(trip.lastServiceTime)) >= scheduledLowerBound
                 else { return nil }
                 let patch = patchesByInstance[.init(trip: tripIndex, serviceDate: serviceDay.date)]
-                guard patch?.status != .unreachable else { return nil }
+                // A trip cancellation applies to the entire vehicle instance,
+                // including every downstream boarding stop. Do not route a
+                // passenger onto it from a different stop.
+                guard patch?.status != .unreachable,
+                      patch?.status != .cancelled else { return nil }
                 return .init(tripIndex: tripIndex, serviceDay: serviceDay, patch: patch)
             }
         }
