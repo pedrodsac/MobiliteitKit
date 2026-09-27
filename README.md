@@ -1,5 +1,9 @@
 # MobiliteitKit
 
+Licensed under the [MIT license](LICENSE). The package does not include an
+ATP API credential or a production GTFS archive; callers supply their own
+authorized data sources.
+
 An iOS 15+ Swift package for the Mobilitéit.lu static GTFS archive and its
 documented HAFAS endpoints.
 
