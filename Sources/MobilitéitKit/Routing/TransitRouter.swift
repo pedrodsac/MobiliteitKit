@@ -1693,20 +1693,22 @@ private enum Raptor {
         if profile.ordered.count > profileWidth {
             // With 49 labels and 48 slots, the reference quotas plus
             // arrival-order fill exclude the last arrival outside every quota.
-            // Find that one label without building a selection set each time.
+            // Build the quota membership once instead of rescanning four
+            // sorted profiles for every possible victim.
             let quota = profileWidth / 5
-            var preferredIDs: [Int] = []
+            var protectedIDs = Set<Int>(minimumCapacity: quota * 5)
+            var preferredCount = 0
             for label in profile.byArrival where label.containsPreferredMode {
-                if preferredIDs.count == quota { break }
-                preferredIDs.append(label.id)
+                if preferredCount == quota { break }
+                protectedIDs.insert(label.id)
+                preferredCount += 1
             }
-            if let victim = profile.byArrival.reversed().first(where: { label in
-                let id = label.id
-                return !preferredIDs.contains(id)
-                    && !profile.ordered.prefix(quota).contains(where: { $0.id == id })
-                    && !profile.ordered.suffix(quota).contains(where: { $0.id == id })
-                    && !profile.byWalk.prefix(quota).contains(where: { $0.id == id })
-                    && !profile.byArrival.prefix(quota).contains(where: { $0.id == id })
+            for label in profile.ordered.prefix(quota) { protectedIDs.insert(label.id) }
+            for label in profile.ordered.suffix(quota) { protectedIDs.insert(label.id) }
+            for label in profile.byWalk.prefix(quota) { protectedIDs.insert(label.id) }
+            for label in profile.byArrival.prefix(quota) { protectedIDs.insert(label.id) }
+            if let victim = profile.byArrival.reversed().first(where: {
+                !protectedIDs.contains($0.id)
             }) {
                 profile.ordered.remove(at: profile.ordered.firstIndex { $0.id == victim.id }!)
                 profile.byWalk.remove(at: profile.byWalk.firstIndex { $0.id == victim.id }!)
