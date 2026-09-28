@@ -1099,18 +1099,45 @@ private enum Raptor {
         let status: RealtimeTripStatus
         let eventsByStop: [Int: RealtimeStopEventPatch]
     }
+    fileprivate enum WalkingVisits: Hashable, Sendable {
+        case one(Int)
+        case multiple(Set<Int>)
+
+        var count: Int {
+            switch self {
+            case .one: 1
+            case let .multiple(stops): stops.count
+            }
+        }
+
+        func contains(_ stop: Int) -> Bool {
+            switch self {
+            case let .one(only): only == stop
+            case let .multiple(stops): stops.contains(stop)
+            }
+        }
+
+        func adding(_ stop: Int) -> Self {
+            switch self {
+            case let .one(only): return only == stop ? self : .multiple([only, stop])
+            case var .multiple(stops):
+                stops.insert(stop)
+                return .multiple(stops)
+            }
+        }
+    }
     fileprivate final class Label: Sendable {
         let id: Int; let time: Date; let legs: [Leg]; let firstStop: Int; let firstDeparture: Date?
         let lastTransit: TransitLeg?; let minimumSlack: Int; let totalSlack: Int; let accessSeconds: Int; let accessDistance: Double; let pathwaySeconds: Int; let pathwayDistance: Double; let transferWalkSeconds: Int
         let containsPreferredMode: Bool
-        let walkingStopsVisited: Set<Int>
+        let walkingStopsVisited: WalkingVisits
         let tripKey: [TripInstance]
 
         init(id: Int, time: Date, legs: [Leg], firstStop: Int, firstDeparture: Date?,
              lastTransit: TransitLeg?, minimumSlack: Int, totalSlack: Int,
              accessSeconds: Int, accessDistance: Double, pathwaySeconds: Int,
              pathwayDistance: Double, transferWalkSeconds: Int, containsPreferredMode: Bool,
-             walkingStopsVisited: Set<Int>, tripKey: [TripInstance]) {
+             walkingStopsVisited: WalkingVisits, tripKey: [TripInstance]) {
             self.id = id; self.time = time; self.legs = legs; self.firstStop = firstStop
             self.firstDeparture = firstDeparture; self.lastTransit = lastTransit
             self.minimumSlack = minimumSlack; self.totalSlack = totalSlack
@@ -1126,6 +1153,10 @@ private enum Raptor {
         var byWalk: [Label] = []
         var byArrival: [Label] = []
         var byIncomingTrip: [Int: [Label]] = [:]
+        // Boundaries for rejecting a candidate that cannot enter any quota.
+        // Recomputed whenever the retained profile changes.
+        var lastUnprotectedArrival: Label?
+        var lastPreferredArrival: Label?
     }
     private struct PatternScanResult: Sendable {
         let chunkIndex: Int
@@ -1197,7 +1228,7 @@ private enum Raptor {
         var labels: [Int: LabelProfile] = [:]
         var nextLabelID = 0
         for a in access {
-            _ = insert(.init(id: nextLabelID, time: searchStart.addingTimeInterval(TimeInterval(a.seconds)), legs: [], firstStop: a.stop, firstDeparture: nil, lastTransit: nil, minimumSlack: .max, totalSlack: 0, accessSeconds: a.seconds, accessDistance: a.distance, pathwaySeconds: 0, pathwayDistance: 0, transferWalkSeconds: 0, containsPreferredMode: query.preferences.preferredMode == nil, walkingStopsVisited: [a.stop], tripKey: []), at: a.stop, into: &labels)
+            _ = insert(.init(id: nextLabelID, time: searchStart.addingTimeInterval(TimeInterval(a.seconds)), legs: [], firstStop: a.stop, firstDeparture: nil, lastTransit: nil, minimumSlack: .max, totalSlack: 0, accessSeconds: a.seconds, accessDistance: a.distance, pathwaySeconds: 0, pathwayDistance: 0, transferWalkSeconds: 0, containsPreferredMode: query.preferences.preferredMode == nil, walkingStopsVisited: .one(a.stop), tripKey: []), at: a.stop, into: &labels)
             nextLabelID += 1
         }
         var destination: [Candidate] = []
@@ -1444,7 +1475,7 @@ private enum Raptor {
                                     pathwayDistance: source.pathwayDistance,
                                     transferWalkSeconds: 0,
                                     containsPreferredMode: source.containsPreferredMode || tripMatchesPreferredMode,
-                                    walkingStopsVisited: [alightTime.stop],
+                                    walkingStopsVisited: .one(alightTime.stop),
                                     tripKey: source.tripKey + [.init(trip: tripIndex, day: day)]
                                 )
                                 nextLabelID += 1
@@ -1530,7 +1561,7 @@ private enum Raptor {
                 guard !source.label.walkingStopsVisited.contains(path.to) else { continue }
                 let arrival = source.label.time.addingTimeInterval(TimeInterval(path.seconds))
                 let leg = PathwayLeg(from: path.from, to: path.to, seconds: path.seconds, distance: path.distance, mode: path.mode, stairCount: path.stairCount, maxSlope: path.maxSlope, minWidth: path.minWidth, departure: source.label.time, arrival: arrival)
-                let label = Label(id: nextLabelID, time: arrival, legs: source.label.legs + [.pathway(leg)], firstStop: source.label.firstStop, firstDeparture: source.label.firstDeparture, lastTransit: source.label.lastTransit, minimumSlack: source.label.minimumSlack, totalSlack: source.label.totalSlack, accessSeconds: source.label.accessSeconds, accessDistance: source.label.accessDistance, pathwaySeconds: source.label.pathwaySeconds + path.seconds, pathwayDistance: source.label.pathwayDistance + path.distance, transferWalkSeconds: source.label.transferWalkSeconds + path.seconds, containsPreferredMode: source.label.containsPreferredMode, walkingStopsVisited: source.label.walkingStopsVisited.union([path.to]), tripKey: source.label.tripKey)
+                let label = Label(id: nextLabelID, time: arrival, legs: source.label.legs + [.pathway(leg)], firstStop: source.label.firstStop, firstDeparture: source.label.firstDeparture, lastTransit: source.label.lastTransit, minimumSlack: source.label.minimumSlack, totalSlack: source.label.totalSlack, accessSeconds: source.label.accessSeconds, accessDistance: source.label.accessDistance, pathwaySeconds: source.label.pathwaySeconds + path.seconds, pathwayDistance: source.label.pathwayDistance + path.distance, transferWalkSeconds: source.label.transferWalkSeconds + path.seconds, containsPreferredMode: source.label.containsPreferredMode, walkingStopsVisited: source.label.walkingStopsVisited.adding(path.to), tripKey: source.label.tripKey)
                 nextLabelID += 1
                 if insert(label, at: path.to, into: &labels) {
                     queue.append((stop: path.to, label: label))
@@ -1628,7 +1659,7 @@ private enum Raptor {
                 pathwayDistance: item.source.pathwayDistance + route.distanceMeters,
                 transferWalkSeconds: item.source.transferWalkSeconds + route.durationSeconds,
                 containsPreferredMode: item.source.containsPreferredMode,
-                walkingStopsVisited: item.source.walkingStopsVisited.union([item.to]),
+                walkingStopsVisited: item.source.walkingStopsVisited.adding(item.to),
                 tripKey: item.source.tripKey
             )
             nextLabelID += 1
@@ -1656,10 +1687,12 @@ private enum Raptor {
             profile.byIncomingTrip[incomingTrip]?.removeAll { removed.contains($0.id) }
         }
         if removed.isEmpty, profile.ordered.count == profileWidth {
+            // A candidate later than the last unprotected arrival is evicted
+            // immediately if it also falls outside every protected quota.
             let quota = profileWidth / 5
-            let lastArrival = profile.byArrival[profileWidth - 1]
-            let candidateIsLastArrival = lastArrival.time < candidate.time
-                || (lastArrival.time == candidate.time && labelOrder(lastArrival, candidate))
+            let candidateIsLastUnprotected = profile.lastUnprotectedArrival.map {
+                arrivalOrder($0, candidate)
+            } ?? false
             let candidateIsInOrderedMiddle = labelOrder(profile.ordered[quota - 1], candidate)
                 && labelOrder(candidate, profile.ordered[profileWidth - quota])
             let walk = candidate.accessSeconds + candidate.pathwaySeconds
@@ -1668,8 +1701,8 @@ private enum Raptor {
             let candidateOutsideWalkQuota = boundaryWalk < walk
                 || (boundaryWalk == walk && labelOrder(walkBoundary, candidate))
             let candidateOutsidePreferredQuota = !candidate.containsPreferredMode
-                || profile.byArrival.lazy.filter(\.containsPreferredMode).prefix(quota).count == quota
-            if candidateIsLastArrival, candidateIsInOrderedMiddle,
+                || profile.lastPreferredArrival.map { arrivalOrder($0, candidate) } == true
+            if candidateIsLastUnprotected, candidateIsInOrderedMiddle,
                candidateOutsideWalkQuota, candidateOutsidePreferredQuota {
                 #if DEBUG
                 if let referenceInput {
@@ -1687,7 +1720,7 @@ private enum Raptor {
             return a == b ? labelOrder(lhs, rhs) : a < b
         }
         insertSorted(candidate, into: &profile.byArrival) { lhs, rhs in
-            lhs.time == rhs.time ? labelOrder(lhs, rhs) : lhs.time < rhs.time
+            arrivalOrder(lhs, rhs)
         }
         profile.byIncomingTrip[incomingTrip, default: []].append(candidate)
         if profile.ordered.count > profileWidth {
@@ -1695,18 +1728,7 @@ private enum Raptor {
             // arrival-order fill exclude the last arrival outside every quota.
             // Build the quota membership once instead of rescanning four
             // sorted profiles for every possible victim.
-            let quota = profileWidth / 5
-            var protectedIDs = Set<Int>(minimumCapacity: quota * 5)
-            var preferredCount = 0
-            for label in profile.byArrival where label.containsPreferredMode {
-                if preferredCount == quota { break }
-                protectedIDs.insert(label.id)
-                preferredCount += 1
-            }
-            for label in profile.ordered.prefix(quota) { protectedIDs.insert(label.id) }
-            for label in profile.ordered.suffix(quota) { protectedIDs.insert(label.id) }
-            for label in profile.byWalk.prefix(quota) { protectedIDs.insert(label.id) }
-            for label in profile.byArrival.prefix(quota) { protectedIDs.insert(label.id) }
+            let protectedIDs = quotaMembership(in: profile).ids
             if let victim = profile.byArrival.reversed().first(where: {
                 !protectedIDs.contains($0.id)
             }) {
@@ -1717,6 +1739,16 @@ private enum Raptor {
                 profile.byIncomingTrip[victimTrip]?.removeAll { $0.id == victim.id }
             }
         }
+        if profile.ordered.count == profileWidth {
+            let membership = quotaMembership(in: profile)
+            profile.lastUnprotectedArrival = profile.byArrival.reversed().first {
+                !membership.ids.contains($0.id)
+            }
+            profile.lastPreferredArrival = membership.lastPreferred
+        } else {
+            profile.lastUnprotectedArrival = nil
+            profile.lastPreferredArrival = nil
+        }
         let retained = profile.ordered.contains { $0.id == candidate.id }
         #if DEBUG
         if let referenceInput {
@@ -1725,6 +1757,28 @@ private enum Raptor {
         }
         #endif
         return retained
+    }
+
+    private static func quotaMembership(in profile: LabelProfile) -> (ids: Set<Int>, lastPreferred: Label?) {
+        let quota = profileWidth / 5
+        var ids = Set<Int>(minimumCapacity: quota * 5)
+        var preferredCount = 0
+        var lastPreferred: Label?
+        for label in profile.byArrival where label.containsPreferredMode {
+            if preferredCount == quota { break }
+            ids.insert(label.id)
+            lastPreferred = label
+            preferredCount += 1
+        }
+        for label in profile.ordered.prefix(quota) { ids.insert(label.id) }
+        for label in profile.ordered.suffix(quota) { ids.insert(label.id) }
+        for label in profile.byWalk.prefix(quota) { ids.insert(label.id) }
+        for label in profile.byArrival.prefix(quota) { ids.insert(label.id) }
+        return (ids, preferredCount == quota ? lastPreferred : nil)
+    }
+
+    private static func arrivalOrder(_ lhs: Label, _ rhs: Label) -> Bool {
+        lhs.time == rhs.time ? labelOrder(lhs, rhs) : lhs.time < rhs.time
     }
 
     #if DEBUG
