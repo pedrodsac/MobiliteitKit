@@ -200,10 +200,23 @@ public struct RealtimePatchBatch: Hashable, Sendable {
     public let patches: [RealtimeTripPatch]
     public let requestedStopIDs: Set<String>
     public let coveredStopIDs: Set<String>
-    public init(patches: [RealtimeTripPatch], requestedStopIDs: Set<String>, coveredStopIDs: Set<String>) {
+    public let boardFetchMilliseconds: Int
+    public let scheduledPreparationMilliseconds: Int
+    public let boardMatchingMilliseconds: Int
+    public init(
+        patches: [RealtimeTripPatch],
+        requestedStopIDs: Set<String>,
+        coveredStopIDs: Set<String>,
+        boardFetchMilliseconds: Int = 0,
+        scheduledPreparationMilliseconds: Int = 0,
+        boardMatchingMilliseconds: Int = 0
+    ) {
         self.patches = patches
         self.requestedStopIDs = requestedStopIDs
         self.coveredStopIDs = coveredStopIDs
+        self.boardFetchMilliseconds = boardFetchMilliseconds
+        self.scheduledPreparationMilliseconds = scheduledPreparationMilliseconds
+        self.boardMatchingMilliseconds = boardMatchingMilliseconds
     }
 }
 public protocol RealtimeRoutingProvider: Sendable {
@@ -262,6 +275,10 @@ public struct RoutingMetrics: Hashable, Sendable {
     public var walkingRequests = 0; public var walkingCacheHits = 0
     public var walkingTransferPairs = 0
     public var hafasRequests = 0; public var hafasCacheHits = 0
+    public var realtimeBoardFetchMilliseconds = 0
+    public var realtimeScheduledPreparationMilliseconds = 0
+    public var realtimeBoardMatchingMilliseconds = 0
+    public var realtimeBoardsCovered = 0
     public var realtimeFrontierSize = 0; public var delayedPastBoardingsInjected = 0
     public var realtimeOverlayRevisions = 0; public var raptorReruns = 0
     public var searchRounds: [RoutingRoundMetrics] = []
@@ -685,6 +702,10 @@ public actor JourneyPlanningSession {
                     cachedRealtimeBatch = batch
                 }
                 patches = batch.patches
+                metrics.realtimeBoardFetchMilliseconds += batch.boardFetchMilliseconds
+                metrics.realtimeScheduledPreparationMilliseconds += batch.scheduledPreparationMilliseconds
+                metrics.realtimeBoardMatchingMilliseconds += batch.boardMatchingMilliseconds
+                metrics.realtimeBoardsCovered = batch.coveredStopIDs.count
                 latestPatchesByInstance = Dictionary(
                     patches.map { (RealtimePatchKey(tripID: $0.tripID, serviceDate: $0.serviceDate), $0) },
                     uniquingKeysWith: { _, latest in latest }

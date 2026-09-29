@@ -27,13 +27,29 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
         let score: Int
     }
 
+    private struct PreparedDeparture: Sendable {
+        let departure: ScheduledDeparture
+        let serviceDate: GTFSDate
+        let scheduledDate: Date
+    }
+
+    private struct PreparedSchedules: Sendable {
+        let byStopID: [String: [PreparedDeparture]]
+        let milliseconds: Int
+    }
+
     private let store: GTFSStore
     private let client: MobiliteitAPIClient
     private let maximumConcurrentBoardRequests: Int
     private let cacheLifetime: TimeInterval
     private let requestTimeout: Duration
     private let now: @Sendable () -> Date
+    private let fullTimestampFormatter: DateFormatter
+    private let minuteTimestampFormatter: DateFormatter
     private var boardsByStopID: [String: CachedBoard] = [:]
+    private var stopTimesByTripID: [String: [TripStopTime]] = [:]
+    private var stopTimeCacheOrder: [String] = []
+    private let maximumCachedTripStopTimes = 512
 
     public init(
         databaseURL: URL,
@@ -48,6 +64,8 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
         self.cacheLifetime = max(0, cacheLifetime)
         self.requestTimeout = requestTimeout
         self.now = { .now }
+        self.fullTimestampFormatter = Self.makeFormatter("yyyy-MM-dd HH:mm:ss")
+        self.minuteTimestampFormatter = Self.makeFormatter("yyyy-MM-dd HH:mm")
     }
 
     init(
@@ -64,6 +82,8 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
         self.cacheLifetime = max(0, cacheLifetime)
         self.requestTimeout = requestTimeout
         self.now = now
+        self.fullTimestampFormatter = Self.makeFormatter("yyyy-MM-dd HH:mm:ss")
+        self.minuteTimestampFormatter = Self.makeFormatter("yyyy-MM-dd HH:mm")
     }
 
     public func patches(
@@ -83,27 +103,29 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
             )
         }
 
+        async let scheduled = Self.prepareSchedules(
+            store: store, stopIDs: orderedStopIDs, from: from, through: through
+        )
+        let fetchStarted = Date()
         let fetched = await boards(
             for: orderedStopIDs,
             from: from,
             through: through
         )
+        let boardFetchMilliseconds = Int(Date().timeIntervalSince(fetchStarted) * 1_000)
         guard !fetched.isEmpty else { throw HafasRealtimeRoutingError.unavailable }
+        let preparedSchedules = await scheduled
 
+        let matchingStarted = Date()
         var patchesByInstance: [String: RealtimeTripPatch] = [:]
         var seenJourneys: Set<String> = []
         for stopID in orderedStopIDs where fetched[stopID] != nil {
             guard let board = fetched[stopID] else { continue }
-            let scheduled = (try? await store.nextScheduledDepartures(
-                fromStopID: stopID,
-                at: from,
-                horizon: through.timeIntervalSince(from),
-                limit: 500
-            )) ?? []
+            let prepared = preparedSchedules.byStopID[stopID] ?? []
 
             for departure in board.departures.values {
                 guard Self.hasRealtimeSignal(departure),
-                      let planned = Self.date(date: departure.plannedDate, time: departure.plannedTime),
+                      let planned = date(date: departure.plannedDate, time: departure.plannedTime),
                       planned >= from.addingTimeInterval(-90),
                       planned <= through.addingTimeInterval(90)
                 else { continue }
@@ -114,7 +136,7 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
                 guard let candidate = await uniqueCandidate(
                     for: departure,
                     planned: planned,
-                    scheduled: scheduled
+                    scheduled: prepared
                 ) else { continue }
 
                 let key = "\(candidate.departure.tripID)@\(candidate.serviceDate.compactString)"
@@ -133,7 +155,58 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
                 ($0.serviceDate, $0.tripID) < ($1.serviceDate, $1.tripID)
             },
             requestedStopIDs: requested,
-            coveredStopIDs: Set(fetched.keys)
+            coveredStopIDs: Set(fetched.keys),
+            boardFetchMilliseconds: boardFetchMilliseconds,
+            scheduledPreparationMilliseconds: preparedSchedules.milliseconds,
+            boardMatchingMilliseconds: Int(Date().timeIntervalSince(matchingStarted) * 1_000)
+        )
+    }
+
+    private nonisolated static func prepareSchedules(
+        store: GTFSStore,
+        stopIDs: [String],
+        from: Date,
+        through: Date
+    ) async -> PreparedSchedules {
+        let started = Date()
+        let feedInfo = await store.feedInfo()
+        let lastServiceDay = feedInfo.firstServiceDate.days(until: feedInfo.lastServiceDate)
+        var serviceDatesByDay: [ServiceDay: GTFSDate] = [:]
+        var byStopID: [String: [PreparedDeparture]] = [:]
+        for stopID in stopIDs {
+            if Task.isCancelled { break }
+            let scheduled = (try? await store.nextScheduledDepartures(
+                fromStopID: stopID,
+                at: from,
+                horizon: through.timeIntervalSince(from),
+                limit: 500
+            )) ?? []
+            byStopID[stopID] = scheduled.compactMap { value -> PreparedDeparture? in
+                guard value.serviceDay.index >= 0,
+                      value.serviceDay.index <= lastServiceDay,
+                      let departureTime = value.departure else { return nil }
+                let serviceDate: GTFSDate
+                if let cached = serviceDatesByDay[value.serviceDay] {
+                    serviceDate = cached
+                } else {
+                    serviceDate = feedInfo.firstServiceDate.adding(days: Int(value.serviceDay.index))
+                    serviceDatesByDay[value.serviceDay] = serviceDate
+                }
+                return PreparedDeparture(
+                    departure: value,
+                    serviceDate: serviceDate,
+                    scheduledDate: Self.serviceDate(serviceDate, time: departureTime)
+                )
+            }.sorted {
+                if $0.scheduledDate != $1.scheduledDate {
+                    return $0.scheduledDate < $1.scheduledDate
+                }
+                return $0.departure.tripID < $1.departure.tripID
+            }
+        }
+        return .init(
+            byStopID: byStopID,
+            milliseconds: Int(Date().timeIntervalSince(started) * 1_000)
         )
     }
 
@@ -271,16 +344,21 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
     private func uniqueCandidate(
         for live: HafasDeparture,
         planned: Date,
-        scheduled: [ScheduledDeparture]
+        scheduled: [PreparedDeparture]
     ) async -> Candidate? {
         var candidates: [Candidate] = []
-        for value in scheduled {
-            guard let serviceDate = await store.date(for: value.serviceDay),
-                  let departureTime = value.departure
-            else { continue }
-            let scheduledDate = Self.serviceDate(serviceDate, time: departureTime)
-            guard abs(scheduledDate.timeIntervalSince(planned)) <= 90,
-                  let lineScore = Self.lineScore(live.product, route: value.route)
+        let lowerBound = planned.addingTimeInterval(-90)
+        let upperBound = planned.addingTimeInterval(90)
+        var lower = 0
+        var upper = scheduled.count
+        while lower < upper {
+            let middle = lower + (upper - lower) / 2
+            if scheduled[middle].scheduledDate < lowerBound { lower = middle + 1 }
+            else { upper = middle }
+        }
+        for value in scheduled[lower...] {
+            guard value.scheduledDate <= upperBound else { break }
+            guard let lineScore = Self.lineScore(live.product, route: value.departure.route)
             else { continue }
 
             // A cancelled board row has no realtime position to disambiguate
@@ -288,27 +366,27 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
             // trip based on line and departure time alone.
             if live.cancelled == true {
                 let directionMatches = live.direction.flatMap { direction in
-                    value.headsign.map { Self.normalized(direction) == Self.normalized($0) }
+                    value.departure.headsign.map { Self.normalized(direction) == Self.normalized($0) }
                 } == true
-                let stopTimes = (try? await store.stopTimes(forTripID: value.tripID)) ?? []
-                let passlistMatches = Self.alignmentCount(live.passlist.values, stopTimes: stopTimes)
+                let stopTimes = await cachedStopTimes(forTripID: value.departure.tripID)
+                let passlistMatches = alignmentCount(live.passlist.values, stopTimes: stopTimes)
                 guard directionMatches || passlistMatches >= 2 else { continue }
             }
 
             var score = lineScore
             if let direction = live.direction,
-               let headsign = value.headsign,
+               let headsign = value.departure.headsign,
                Self.normalized(direction) == Self.normalized(headsign) {
                 score += 2
             }
             if !live.passlist.values.isEmpty {
-                let stopTimes = (try? await store.stopTimes(forTripID: value.tripID)) ?? []
-                score += min(4, Self.alignmentCount(live.passlist.values, stopTimes: stopTimes))
+                let stopTimes = await cachedStopTimes(forTripID: value.departure.tripID)
+                score += min(4, alignmentCount(live.passlist.values, stopTimes: stopTimes))
             }
             candidates.append(.init(
-                departure: value,
-                serviceDate: serviceDate,
-                scheduledDate: scheduledDate,
+                departure: value.departure,
+                serviceDate: value.serviceDate,
+                scheduledDate: value.scheduledDate,
                 score: score
             ))
         }
@@ -334,7 +412,7 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
         candidate: Candidate,
         boardingStopID: String
     ) async -> RealtimeTripPatch? {
-        let realtime = Self.date(
+        let realtime = date(
             date: live.realtimeDate ?? live.plannedDate,
             time: live.realtimeTime
         )
@@ -346,9 +424,9 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
         } else {
             .active
         }
-        let stopTimes = (try? await store.stopTimes(forTripID: candidate.departure.tripID)) ?? []
+        let stopTimes = await cachedStopTimes(forTripID: candidate.departure.tripID)
         guard !stopTimes.isEmpty else { return nil }
-        let passlistPlatforms = Self.platforms(
+        let passlistPlatforms = platforms(
             live.passlist.values,
             alignedTo: stopTimes
         )
@@ -381,6 +459,18 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
             status: status,
             events: events
         )
+    }
+
+    private func cachedStopTimes(forTripID tripID: String) async -> [TripStopTime] {
+        if let cached = stopTimesByTripID[tripID] { return cached }
+        guard let values = try? await store.stopTimes(forTripID: tripID) else { return [] }
+        if stopTimeCacheOrder.count == maximumCachedTripStopTimes {
+            let oldest = stopTimeCacheOrder.removeFirst()
+            stopTimesByTripID[oldest] = nil
+        }
+        stopTimesByTripID[tripID] = values
+        stopTimeCacheOrder.append(tripID)
+        return values
     }
 
     private nonisolated static func merging(
@@ -433,7 +523,7 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
         return liveNames.contains(where: routeNames.contains) ? 4 : nil
     }
 
-    private nonisolated static func alignmentCount(
+    private func alignmentCount(
         _ live: [HafasPasslistStop],
         stopTimes: [TripStopTime]
     ) -> Int {
@@ -451,7 +541,7 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
         return matches
     }
 
-    private nonisolated static func platforms(
+    private func platforms(
         _ live: [HafasPasslistStop],
         alignedTo stopTimes: [TripStopTime]
     ) -> [String: String] {
@@ -471,7 +561,7 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
         return result
     }
 
-    private nonisolated static func passlistStop(
+    private func passlistStop(
         _ live: HafasPasslistStop,
         matches scheduled: TripStopTime
     ) -> Bool {
@@ -479,7 +569,7 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
             return true
         }
         guard let name = live.name,
-              normalized(name) == normalized(scheduled.stop.name)
+              Self.normalized(name) == Self.normalized(scheduled.stop.name)
         else { return false }
         guard let liveTime = date(
             date: live.departureDate ?? live.arrivalDate,
@@ -492,7 +582,7 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
         )
         guard let serviceDate else { return true }
         let scheduledDate = (scheduled.departure ?? scheduled.arrival).map {
-            self.serviceDate(serviceDate, time: $0)
+            Self.serviceDate(serviceDate, time: $0)
         }
         return scheduledDate.map { abs($0.timeIntervalSince(liveTime)) <= 90 } ?? true
     }
@@ -530,15 +620,19 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
         )
     }
 
-    private nonisolated static func date(date: String?, time: String?) -> Date? {
-        guard let date, let time else { return nil }
+    private static func makeFormatter(_ format: String) -> DateFormatter {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = Calendar.luxembourg.timeZone
-        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
-        if let value = formatter.date(from: "\(date) \(time)") { return value }
-        formatter.dateFormat = "yyyy-MM-dd HH:mm"
-        return formatter.date(from: "\(date) \(time)")
+        formatter.dateFormat = format
+        return formatter
+    }
+
+    private func date(date: String?, time: String?) -> Date? {
+        guard let date, let time else { return nil }
+        let timestamp = "\(date) \(time)"
+        return fullTimestampFormatter.date(from: timestamp)
+            ?? minuteTimestampFormatter.date(from: timestamp)
     }
 
     private nonisolated static func normalized(_ value: String) -> String {
