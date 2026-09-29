@@ -1449,6 +1449,7 @@ private enum Raptor {
                     relevantServiceDays: relevantServiceDays,
                     patchesByInstance: patchesByInstance,
                     scheduledLowerBound: scheduledLowerBound,
+                    searchStart: searchStart,
                     profileUpperBound: profileUpperBound
                 )
             }
@@ -1459,7 +1460,7 @@ private enum Raptor {
                 : 1
             maximumWorkerCount = max(maximumWorkerCount, workerCount)
             let previousLabels = labels
-            let chunkSize = max(1, (markedPatternIDs.count + workerCount * 8 - 1) / (workerCount * 8))
+            let chunkSize = max(1, (markedPatternIDs.count + workerCount * 12 - 1) / (workerCount * 12))
             let chunks = stride(from: 0, to: markedPatternIDs.count, by: chunkSize).enumerated().map { chunkIndex, start in
                 (index: chunkIndex, patterns: Array(markedPatternIDs[start..<min(start + chunkSize, markedPatternIDs.count)]))
             }
@@ -1661,7 +1662,8 @@ private enum Raptor {
                                 labelAttempts += 1
                                 if cannotEnterFullProfile(
                                     next[alightTime.stop], source: source,
-                                    tripIndex: tripIndex, alightStop: alightTime.stop,
+                                    tripIndex: tripIndex, day: day, candidateID: candidateID,
+                                    alightStop: alightTime.stop,
                                     departure: effective, arrival: effectiveArrival,
                                     minimumSlack: minimumSlack, totalSlack: totalSlack,
                                     containsPreferredMode: source.containsPreferredMode || tripMatchesPreferredMode
@@ -1737,6 +1739,7 @@ private enum Raptor {
         relevantServiceDays: [SnapshotServiceDay],
         patchesByInstance: [PatchKey: PatchOverlay],
         scheduledLowerBound: Date,
+        searchStart: Date,
         profileUpperBound: Date
     ) -> [ActiveTripInstance] {
         snapshot.patterns[patternID].trips.flatMap { tripIndex -> [ActiveTripInstance] in
@@ -1769,6 +1772,13 @@ private enum Raptor {
                     patchTime(patch, stop: trip.times[position].stop, departure: false)
                         ?? scheduledArrivals[position]
                 }
+                // Access labels start no earlier than searchStart. Even with
+                // realtime delays, an instance whose every pickup has passed
+                // cannot be boarded during this query.
+                guard trip.times.indices.contains(where: { position in
+                    trip.times[position].pickup == 0
+                        && effectiveDepartures[position].map { $0 >= searchStart } == true
+                }) else { return nil }
                 return .init(
                     tripIndex: tripIndex, serviceDay: serviceDay,
                     scheduledDepartures: scheduledDepartures,
@@ -1980,6 +1990,7 @@ private enum Raptor {
             arrivalOrder(lhs, rhs)
         }
         profile.byIncomingTrip[incomingTrip, default: []].append(candidate)
+        var candidateRetained = true
         var membership: (ids: [Int], lastPreferred: Label?)?
         if profile.ordered.count > profileWidth {
             // With 49 labels and 48 slots, the reference quotas plus
@@ -1992,12 +2003,22 @@ private enum Raptor {
             if let victim = profile.byArrival.reversed().first(where: {
                 !protectedIDs.contains($0.id)
             }) {
+                candidateRetained = victim.id != candidate.id
                 profile.ordered.remove(at: profile.ordered.firstIndex { $0.id == victim.id }!)
                 profile.byWalk.remove(at: profile.byWalk.firstIndex { $0.id == victim.id }!)
                 profile.byArrival.remove(at: profile.byArrival.firstIndex { $0.id == victim.id }!)
                 let victimTrip = victim.lastTransit?.trip ?? -1
                 profile.byIncomingTrip[victimTrip]?.removeAll { $0.id == victim.id }
             }
+        }
+        if !candidateRetained && removed.isEmpty {
+            #if DEBUG
+            if let referenceInput {
+                let expected = referenceInsert(candidate, into: referenceInput)
+                precondition(expected.map(\.id) == profile.ordered.map(\.id), "profile mismatch")
+            }
+            #endif
+            return false
         }
         if profile.ordered.count == profileWidth {
             let protected = membership ?? quotaMembership(in: profile)
@@ -2009,14 +2030,13 @@ private enum Raptor {
             profile.lastUnprotectedArrival = nil
             profile.lastPreferredArrival = nil
         }
-        let retained = profile.ordered.contains { $0.id == candidate.id }
         #if DEBUG
         if let referenceInput {
             let expected = referenceInsert(candidate, into: referenceInput)
             precondition(expected.map(\.id) == profile.ordered.map(\.id), "profile mismatch")
         }
         #endif
-        return retained
+        return candidateRetained
     }
 
     @inline(__always) private static func quotaMembership(in profile: LabelProfile) -> (ids: [Int], lastPreferred: Label?) {
@@ -2095,40 +2115,51 @@ private enum Raptor {
     /// exact dominance rule will immediately reject.
     @inline(__always) private static func cannotEnterFullProfile(
         _ profile: LabelProfile?, source: Label,
-        tripIndex: Int, alightStop: Int,
+        tripIndex: Int, day: GTFSDate, candidateID: Int, alightStop: Int,
         departure: Date, arrival: Date,
         minimumSlack: Int, totalSlack: Int,
         containsPreferredMode: Bool
     ) -> Bool {
         guard let profile, profile.ordered.count == profileWidth,
-              let lastUnprotected = profile.lastUnprotectedArrival,
-              lastUnprotected.time < arrival else { return false }
+              let lastUnprotected = profile.lastUnprotectedArrival else { return false }
         let firstDeparture = source.firstDeparture ?? departure
         let walk = source.walkingSeconds
+        let candidateTrip = TripInstance(trip: tripIndex, day: day)
 
-        // Compare only fields before the trip-sequence/ID tie-break. A tie is
-        // deliberately inconclusive and goes through the full insert.
-        func strictlyBefore(_ lhs: Label, _ rhsDeparture: Date, _ rhsArrival: Date, _ rhsWalk: Int) -> Bool {
+        func labelBeforeCandidate(_ lhs: Label) -> Bool {
             let lhsDeparture = lhs.firstDeparture ?? .distantPast
-            if lhsDeparture != rhsDeparture { return lhsDeparture < rhsDeparture }
-            if lhs.time != rhsArrival { return lhs.time < rhsArrival }
-            return lhs.walkingSeconds < rhsWalk
+            if lhsDeparture != firstDeparture { return lhsDeparture < firstDeparture }
+            if lhs.time != arrival { return lhs.time < arrival }
+            if lhs.walkingSeconds != walk { return lhs.walkingSeconds < walk }
+            let key = source.tripKey.appending(candidateTrip)
+            if precedes(lhs.tripKey, key) { return true }
+            if precedes(key, lhs.tripKey) { return false }
+            return lhs.id < candidateID
         }
-        func strictlyBeforeCandidate(_ rhs: Label) -> Bool {
+        func candidateBeforeLabel(_ rhs: Label) -> Bool {
             let rhsDeparture = rhs.firstDeparture ?? .distantPast
             if firstDeparture != rhsDeparture { return firstDeparture < rhsDeparture }
             if arrival != rhs.time { return arrival < rhs.time }
-            return walk < rhs.walkingSeconds
+            if walk != rhs.walkingSeconds { return walk < rhs.walkingSeconds }
+            let key = source.tripKey.appending(candidateTrip)
+            if precedes(key, rhs.tripKey) { return true }
+            if precedes(rhs.tripKey, key) { return false }
+            return candidateID < rhs.id
         }
+        guard lastUnprotected.time < arrival
+            || (lastUnprotected.time == arrival && labelBeforeCandidate(lastUnprotected))
+        else { return false }
         let quota = profileWidth / 5
-        guard strictlyBefore(profile.ordered[quota - 1], firstDeparture, arrival, walk),
-              strictlyBeforeCandidate(profile.ordered[profileWidth - quota]) else { return false }
+        guard labelBeforeCandidate(profile.ordered[quota - 1]),
+              candidateBeforeLabel(profile.ordered[profileWidth - quota]) else { return false }
         let walkBoundary = profile.byWalk[quota - 1]
         let boundaryWalk = walkBoundary.walkingSeconds
         let outsideWalk = boundaryWalk < walk
-            || (boundaryWalk == walk && strictlyBefore(walkBoundary, firstDeparture, arrival, walk))
+            || (boundaryWalk == walk && labelBeforeCandidate(walkBoundary))
         let outsidePreferred = !containsPreferredMode
-            || (profile.lastPreferredArrival?.time ?? .distantFuture) < arrival
+            || profile.lastPreferredArrival.map {
+                $0.time < arrival || ($0.time == arrival && labelBeforeCandidate($0))
+            } == true
         guard outsideWalk && outsidePreferred else { return false }
 
         // The full insert first removes dominated peers. If a peer might be
