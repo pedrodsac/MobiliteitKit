@@ -172,6 +172,18 @@ struct JourneyPlannerTests {
         #expect(!result.journeys.contains { $0.id == journey.id })
         #expect(await session.replacementSearchCount == 1)
         #expect(result.journeys.allSatisfy { $0.effectiveDeparture >= fixture.anchor })
+        #expect(!result.journeys.isEmpty)
+        #expect(result.journeys.contains { $0.walkingDuration == Double(duration) })
+        let next = try #require(result.journeys.first { $0.walkingDuration == Double(duration) })
+        let nextToken = try #require(result.refinementTokens[next.id])
+        guard case let .walk(nextWalk) = next.legs[0] else { return }
+        let nextDuration = Int(nextWalk.arrival.timeIntervalSince(fixture.anchor)) + 600
+        let second = try await session.submitWalkingRefinement(.init(token: nextToken, range: 0..<1,
+            route: .init(durationSeconds: nextDuration, distanceMeters: 1_000),
+            departure: nextWalk.arrival.addingTimeInterval(-Double(nextDuration)), arrival: nextWalk.arrival))
+        #expect(second.invalidatedIDs.contains(next.id))
+        #expect(!second.journeys.contains { $0.id == next.id })
+        #expect(await session.replacementSearchCount == 1)
         await #expect(throws: JourneyPlanningError.staleRefinement) {
             try await session.submitWalkingRefinement(update)
         }
@@ -193,6 +205,21 @@ struct JourneyPlannerTests {
         let scheduled = try await unavailable.calculate(refresh: .forceRefresh)
         #expect(scheduled.journeys.count == 5)
         #expect(scheduled.journeys.allSatisfy { $0.statusEvidence.coverage == .scheduleOnly })
+    }
+
+    @Test func delayedRealtimeTravelsThroughFacade() async throws {
+        let fixture = try await PlannerFixture()
+        defer { fixture.remove() }
+        let session = try await JourneyPlanner(realtimeProvider: PlannerDelay(anchor: fixture.anchor))
+            .makePlanningSession(databaseURL: fixture.database, request: fixture.request)
+        let result = try await session.calculate(refresh: .forceRefresh)
+        let delayed = try #require(result.journeys.first { journey in
+            journey.legs.contains { if case let .transit(t) = $0 { t.tripID == "run-1" } else { false } }
+        })
+        #expect(delayed.effectiveDeparture == fixture.anchor.addingTimeInterval(7 * 60))
+        #expect(delayed.statusEvidence.coverage == .live)
+        #expect(delayed.statusEvidence.status(at: fixture.anchor) == .delayed)
+        #expect(delayed.statusEvidence.status(at: fixture.anchor.addingTimeInterval(10 * 60)) == .missed)
     }
 
     @Test func directWalkRemainsAnInitialComparison() async throws {
@@ -283,5 +310,16 @@ private struct PlannerRealtime: RealtimeRoutingProvider {
         return .init(patches: [.init(tripID: "run-1", serviceDate: try GTFSDate(parsing: "20260904"),
                                     status: .cancelled, events: [])],
                      requestedStopIDs: Set(stopIDs), coveredStopIDs: Set(stopIDs))
+    }
+}
+
+private struct PlannerDelay: RealtimeRoutingProvider {
+    let anchor: Date
+    func patches(for stopIDs: [String], from: Date, through: Date,
+                 refreshPolicy: RealtimeRefreshPolicy) async throws -> RealtimePatchBatch {
+        .init(patches: [.init(tripID: "run-1", serviceDate: try GTFSDate(parsing: "20260904"), events: [
+            .init(stopID: "origin", effectiveDeparture: anchor.addingTimeInterval(7 * 60), departureSource: .reported),
+            .init(stopID: "destination", effectiveArrival: anchor.addingTimeInterval(27 * 60), arrivalSource: .reported)
+        ])], requestedStopIDs: Set(stopIDs), coveredStopIDs: Set(stopIDs))
     }
 }

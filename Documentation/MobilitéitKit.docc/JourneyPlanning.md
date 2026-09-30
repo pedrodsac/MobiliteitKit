@@ -11,9 +11,13 @@ its resolved walking leg; a stop endpoint has zero walking at that stop.
 
 ## Profile rule
 
-A journey is removed only when another journey leaves *strictly later* and
-arrives *strictly earlier*. Equality intentionally remains visible, so two
-different journeys with exactly the same departure can be paged separately.
+`JourneyQualityPolicy` retains tradeoffs in departure, arrival, transfer count
+and walking duration. A journey dominates another only when no metric is worse
+and at least one is better, with matching accessibility and mode-preference
+evidence. Distinct equal-quality journeys remain visible and page by stable ID.
+Results appear chronologically; the recommendation uses the package’s quality
+score and rider preferences. Direct walking comparisons do not consume transit
+alternative slots.
 
 ## Offline operation
 
@@ -47,3 +51,11 @@ validates the itinerary and permits one replacement search per generation.
 
 The existing `TransitRouter` and `JourneyPlanningSession` remain available for
 lower-level integrations. The package has no MapKit, SwiftUI or Valhalla dependency.
+
+The facade preserves five initial transit alternatives, three per adjacent page,
+three transfers by default, a three-hour initial forward horizon and a bounded
+24-hour adjacent/arrival profile. Initial and later realtime lookbacks are 1,200
+and 600 seconds. Its HAFAS provider retains the existing 32-request concurrency,
+60-second cache and four-second acquisition deadline. The “avoid tight transfers”
+choice uses a 180-second buffer and no same-stop shortfall; otherwise the buffer
+is 120 seconds with up to 180 seconds of same-stop shortfall tolerance.

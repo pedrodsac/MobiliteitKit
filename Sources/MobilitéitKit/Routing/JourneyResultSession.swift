@@ -132,8 +132,13 @@ public actor JourneyResultSession {
         journeys[index] = corrected
         await router.correctWalkingRoute(update.route, for: .init(
             source: first.from.coordinate, destination: last.to.coordinate))
-        guard update.token.generation == generation else { throw JourneyPlanningError.staleRefinement }
-        if JourneyItineraryValidator.assess(corrected, context: contexts[corrected.id] ?? context).isInvalid {
+        guard update.token.generation == generation,
+              let current = journeys.first(where: { $0.id == corrected.id }),
+              current.transitFingerprint == update.token.transitFingerprint,
+              !invalidated.contains(corrected.id) else { throw JourneyPlanningError.staleRefinement }
+        // Cache correction suspends this actor; independent spans may have finished
+        // meanwhile. Validate their combined current itinerary, never an old copy.
+        if JourneyItineraryValidator.assess(current, context: contexts[current.id] ?? context).isInvalid {
             invalidated.insert(corrected.id)
             journeys.removeAll { $0.id == corrected.id }
             if !didReplan, corrected.legs.contains(where: { if case .transit = $0 { true } else { false } }) {
