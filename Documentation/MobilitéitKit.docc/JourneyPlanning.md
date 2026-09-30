@@ -32,7 +32,8 @@ Use `makePlanningSession(databaseURL:request:now:)` for a request-scoped
 accumulated profile. Render snapshots directly; do not rank or filter them again.
 
 Results include the recommendation, pagination availability, feasibility, refinement
-tokens and lazily loaded transit polylines. `JourneyQualityPolicy` owns the profile
+tokens and lazily loaded transit polylines. `Journey.summary` supplies display metrics
+without recounting transfers across in-seat continuations. `JourneyQualityPolicy` owns the profile
 quality decisions. `JourneyStatusEvidence.status(at:feasibility:)` and
 `JourneySelectionPolicy` support time-dependent status and manual-selection fallback.
 

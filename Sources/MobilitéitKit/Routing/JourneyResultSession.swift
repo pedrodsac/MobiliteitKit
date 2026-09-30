@@ -211,8 +211,11 @@ public actor JourneyResultSession {
             assessments[journey.id] = assessment
             return !invalidated.contains(journey.id) && !assessment.isInvalid && !journey.hasCancelledTransitLeg
         }
+        let transitProfile = valid.filter { $0.legs.contains { if case .transit = $0 { true } else { false } } }
         let retained = valid.filter { candidate in
-            !valid.contains { $0.id != candidate.id && JourneyQualityPolicy.dominates($0, candidate) }
+            // The engine keeps an all-the-way walk as a comparison outside transit slots.
+            guard transitProfile.contains(where: { $0.id == candidate.id }) else { return true }
+            return !transitProfile.contains { $0.id != candidate.id && JourneyQualityPolicy.dominates($0, candidate) }
         }.sorted { ($0.effectiveDeparture, $0.id) < ($1.effectiveDeparture, $1.id) }
         let transit = retained.filter { $0.legs.contains { if case .transit = $0 { true } else { false } } }
         let recommended = transit.min {

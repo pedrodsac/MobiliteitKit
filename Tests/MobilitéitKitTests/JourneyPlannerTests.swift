@@ -195,6 +195,20 @@ struct JourneyPlannerTests {
         #expect(scheduled.journeys.allSatisfy { $0.statusEvidence.coverage == .scheduleOnly })
     }
 
+    @Test func directWalkRemainsAnInitialComparison() async throws {
+        let fixture = try await PlannerFixture()
+        defer { fixture.remove() }
+        var request = fixture.request
+        request.origin = .coordinate(.init(latitude: 49.5999, longitude: 6.1), label: nil)
+        request.destination = .coordinate(.init(latitude: 49.6101, longitude: 6.1), label: nil)
+        let session = try await JourneyPlanner(walkingProvider: PlannerWalking(longWalkDuration: 2_000))
+            .makePlanningSession(databaseURL: fixture.database, request: request)
+        let result = try await session.calculate(refresh: .scheduleOnly)
+        #expect(result.journeys.contains { $0.id.value.hasPrefix("walk:") })
+        #expect(result.journeys.filter { !$0.id.value.hasPrefix("walk:") }.count == 5)
+        #expect(result.recommendedJourneyID?.value.hasPrefix("walk:") == false)
+    }
+
     @Test func realtimeWindowsAndTransferConfiguration() {
         guard case let .bestEffort(initial, _) = JourneyPlanningPage.initial.realtimePolicy(.forceRefresh),
               case let .bestEffort(later, _) = JourneyPlanningPage.later.realtimePolicy(.useCache) else { return }
@@ -243,12 +257,17 @@ private struct PlannerFixture {
 }
 
 private struct PlannerWalking: WalkingRoutingProvider {
+    var longWalkDuration: Int? = nil
     func estimate(_ request: WalkingRequest) async throws -> WalkingEstimate {
         .init(durationSeconds: 60, distanceMeters: 60)
     }
     func route(_ request: WalkingRequest) async throws -> WalkingRoute {
         // Do not allow access across the entire route, which would hide all transit results.
         guard abs(request.source.latitude - request.destination.latitude) < 0.002 else {
+            if let longWalkDuration {
+                return .init(durationSeconds: longWalkDuration, distanceMeters: 2_000,
+                             polyline: [request.source, request.destination])
+            }
             throw JourneyPlanningError.noRouteFound
         }
         return .init(durationSeconds: 60, distanceMeters: 60,
