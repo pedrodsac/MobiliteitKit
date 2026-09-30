@@ -551,7 +551,14 @@ public actor JourneyPlanningSession {
     public func initial(count: Int = 5) async throws -> JourneyPage { if all.isEmpty { all = try await generate(anchor: query.departureTime, searchHorizon: Raptor.fullProfileHorizon); visibleStart = 0 }; visibleEnd = min(all.count, max(0, count)); return page() }
     public func initial(count: Int = 5, searchHorizon: TimeInterval) async throws -> JourneyPage { all = try await generate(anchor: query.departureTime, searchHorizon: max(0, searchHorizon)); visibleStart = 0; visibleEnd = min(all.count, max(0, count)); revision &+= 1; return page() }
     public func expanded(count: Int = 5) async throws -> JourneyPage { all = try await generate(anchor: query.departureTime, searchHorizon: Raptor.fullProfileHorizon); visibleStart = 0; visibleEnd = min(all.count, max(0, count)); revision &+= 1; return page() }
-    public func later(count: Int = 3) async throws -> JourneyPage { if all.isEmpty { _ = try await initial() }; visibleEnd = min(all.count, visibleEnd + max(0, count)); return page() }
+    public func later(count: Int = 3) async throws -> JourneyPage {
+        if all.isEmpty {
+            all = try await generate(anchor: query.departureTime, searchHorizon: Raptor.fullProfileHorizon)
+            visibleStart = 0; visibleEnd = min(all.count, 5)
+        }
+        visibleEnd = min(all.count, visibleEnd + max(0, count))
+        return page()
+    }
     public func earlier(count: Int = 3) async throws -> JourneyPage { visibleStart = max(0, visibleStart - max(0, count)); return page() }
     public func refreshRealtime() async throws -> JourneyPage { all = try await generate(anchor: query.departureTime, searchHorizon: Raptor.fullProfileHorizon, forceRealtime: true); visibleStart = 0; visibleEnd = min(max(visibleEnd, 5), all.count); revision &+= 1; return page() }
     /// Returns adjacent transit alternatives after applying the boundary to the
@@ -609,9 +616,13 @@ public actor JourneyPlanningSession {
             $0, $1, anchor: query.departureTime, direction: query.direction,
             preferences: query.preferences
         ) }
-        return .init(journeys: journeys + (includeWalking ? directWalking.map { [$0] } ?? [] : []),
+        let result = JourneyPage(journeys: journeys + (includeWalking ? directWalking.map { [$0] } ?? [] : []),
                      recommendedJourneyID: recommendation?.id, hasEarlier: hasEarlier,
                      hasLater: hasLater, realtimeState: state, revision: revision, metrics: metrics, diagnostics: diagnostics)
+        // A subsequent cached page has its own operation, with no historical
+        // scan or acquisition costs. Cumulative RoutingMetrics remain intact.
+        diagnostics = RoutingDiagnostics()
+        return result
     }
     private func generate(anchor: Date, searchHorizon: TimeInterval, forceRealtime: Bool = false) async throws -> [Journey] {
         let started = ContinuousClock.now
@@ -700,6 +711,8 @@ public actor JourneyPlanningSession {
         diagnostics.counters = [.networkRequests: metrics.hafasRequests - countersBefore.hafasRequests,
             .boardCacheHits: metrics.hafasCacheHits - countersBefore.hafasCacheHits,
             .responseBytes: metrics.realtimeResponseBytes - countersBefore.realtimeResponseBytes,
+            .predictedEvents: metrics.realtimePredictedEvents,
+            .delayedPastBoardings: metrics.delayedPastBoardingsInjected - countersBefore.delayedPastBoardingsInjected,
             .walkingRequests: metrics.walkingRequests - countersBefore.walkingRequests,
             .walkingCacheHits: metrics.walkingCacheHits - countersBefore.walkingCacheHits,
             .boardsCovered: metrics.realtimeBoardsCovered, .incompleteBoards: metrics.realtimeIncompleteBoards,

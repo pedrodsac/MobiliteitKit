@@ -228,7 +228,7 @@ import ZIPFoundation
     ))
 
     let page = try await session.initial()
-    print("Routing timings (ms): endpoint=\(page.metrics.endpointPreparationMilliseconds), live=\(page.metrics.realtimePreparationMilliseconds), RAPTOR=\(page.metrics.raptorSearchMilliseconds), RAPTOR CPU=\(page.metrics.raptorCPUMilliseconds), transfer walks=\(page.metrics.walkingTransferMilliseconds), candidates=\(page.metrics.candidateBuildingMilliseconds)")
+    print("Routing timings (ms): endpoint=\(page.metrics.endpointPreparationMilliseconds), live=\(page.metrics.realtimePreparationMilliseconds), RAPTOR=\(page.metrics.raptorSearchMilliseconds), RAPTOR non-walking elapsed=\(page.metrics.raptorCPUMilliseconds), transfer walks=\(page.metrics.walkingTransferMilliseconds), candidates=\(page.metrics.candidateBuildingMilliseconds)")
     #expect(page.journeys.count == 5)
     #expect(page.journeys.allSatisfy { $0.transferCount >= 1 })
     #expect(page.journeys.allSatisfy { journey in journey.legs.contains { if case let .walk(walk) = $0 { return walk.source == .pathway && walk.duration == 90 }; return false } })

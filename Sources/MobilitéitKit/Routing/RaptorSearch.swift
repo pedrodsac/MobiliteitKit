@@ -259,7 +259,18 @@ extension Raptor {
                 slowestChunkMilliseconds: scanResults.map(\.elapsedMilliseconds).max() ?? 0,
                 summedChunkMilliseconds: scanResults.reduce(0) { $0 + $1.elapsedMilliseconds }
             ))
-            relaxPathways(snapshot: snapshot, labels: &next, nextLabelID: &nextLabelID)
+            if verifyKernel {
+                var reference = next, referenceID = nextLabelID
+                relaxPathways(snapshot: snapshot, labels: &reference, nextLabelID: &referenceID, skipEmptySources: false)
+                relaxPathways(snapshot: snapshot, labels: &next, nextLabelID: &nextLabelID)
+                precondition(referenceID == nextLabelID && reference.keys.sorted() == next.keys.sorted(), "Pathway pruning mismatch")
+                for stop in next.keys {
+                    precondition(next[stop]!.ordered.map { String(reflecting: $0.legs) } == reference[stop]!.ordered.map { String(reflecting: $0.legs) }, "Pathway result mismatch")
+                    precondition(next[stop]!.ordered.map(\.id) == reference[stop]!.ordered.map(\.id), "Pathway ID mismatch")
+                }
+            } else {
+                relaxPathways(snapshot: snapshot, labels: &next, nextLabelID: &nextLabelID)
+            }
             cpuSeconds += RoutingDiagnostics.elapsed(since: cpuStarted) / 1_000
             let walkingStarted = ContinuousClock.now
             walkingTransferPairs += try await relaxWalkingTransfers(snapshot: snapshot, labels: &next, nextLabelID: &nextLabelID, walking: walking)

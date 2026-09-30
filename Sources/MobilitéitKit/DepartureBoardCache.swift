@@ -4,6 +4,7 @@ struct CachedBoardResponse: Sendable {
     let board: HafasDepartureBoard
     let networkRequests: Int
     let cacheHits: Int
+    var fetchedAt: Date = .now
     var httpMilliseconds: Int = 0
     var decodeMilliseconds: Int = 0
 }
@@ -21,6 +22,7 @@ actor DepartureBoardCache {
         let task: Task<Void, Never>
         var waiters: [UUID: CheckedContinuation<CachedBoardResponse, any Error>]
         let initiator: UUID
+        let startedAt: Date
     }
     private let lifetime: TimeInterval
     private let capacity: Int
@@ -55,7 +57,7 @@ actor DepartureBoardCache {
         try Task.checkCancellation()
         if refreshPolicy == .useCache, let entry = entries[key],
            now().timeIntervalSince(entry.fetchedAt) < lifetime {
-            return .init(board: entry.board, networkRequests: 0, cacheHits: 1)
+            return .init(board: entry.board, networkRequests: 0, cacheHits: 1, fetchedAt: entry.fetchedAt)
         }
         let waiter = UUID()
         return try await withTaskCancellationHandler {
@@ -82,7 +84,7 @@ actor DepartureBoardCache {
                     complete(id, result: result)
                 }
                 flights[id] = Flight(key: key, refreshPolicy: refreshPolicy, task: task,
-                                     waiters: [waiter: continuation], initiator: waiter)
+                                     waiters: [waiter: continuation], initiator: waiter, startedAt: now())
                 latestByKey[key] = id
             }
         } onCancel: {
@@ -107,7 +109,7 @@ actor DepartureBoardCache {
         if latestByKey[flight.key] == id {
             latestByKey[flight.key] = nil
             if case let .success(board) = result {
-                entries[flight.key] = Entry(board: board.board, fetchedAt: now())
+                entries[flight.key] = Entry(board: board.board, fetchedAt: flight.startedAt)
                 if entries.count > capacity,
                    let oldest = entries.min(by: { $0.value.fetchedAt < $1.value.fetchedAt })?.key {
                     entries[oldest] = nil
@@ -119,7 +121,7 @@ actor DepartureBoardCache {
         for (waiter, continuation) in flight.waiters {
             continuation.resume(with: result.map {
                 .init(board: $0.board, networkRequests: waiter == networkOwner ? 1 : 0,
-                      cacheHits: waiter == networkOwner ? 0 : 1,
+                      cacheHits: waiter == networkOwner ? 0 : 1, fetchedAt: flight.startedAt,
                       httpMilliseconds: waiter == networkOwner ? $0.httpMilliseconds : 0,
                       decodeMilliseconds: waiter == networkOwner ? $0.decodeMilliseconds : 0)
             })

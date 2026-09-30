@@ -107,7 +107,7 @@ extension HafasRealtimeRoutingProvider {
                 httpMilliseconds += response.httpMilliseconds; decodeMilliseconds += response.decodeMilliseconds
                 requests += response.networkRequests; hits += response.cacheHits
                 if response.networkRequests > 0 { bytes += response.board.responseBytes }
-                fetchedAt = min(fetchedAt, now())
+                fetchedAt = min(fetchedAt, response.fetchedAt)
                 for departure in response.board.departures.values {
                     let key = departureKey(departure)
                     departures[key] = departure
@@ -118,7 +118,7 @@ extension HafasRealtimeRoutingProvider {
                         intervals.insert(contentsOf: [(from, midpoint), (midpoint, through)], at: 0)
                     } else { incomplete = true }
                 } else {
-                    completedSlices.append(.init(from: from, through: through, board: response.board, fetchedAt: now()))
+                    completedSlices.append(.init(from: from, through: through, board: response.board, fetchedAt: response.fetchedAt))
                 }
             } catch {
                 requests += 1

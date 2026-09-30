@@ -20,4 +20,18 @@ import Testing
         #expect(refreshed.metrics.raptorNonWalkingMilliseconds == refreshed.metrics.raptorCPUMilliseconds)
         #expect(initial.journeys.map(\.id) == refreshed.journeys.map(\.id))
     }
+    @Test func cachedRawPagesDoNotRepeatSearchCosts() async throws {
+        let fixture = try await RealtimeTestFixture(); defer { fixture.remove() }
+        let router = try await TransitRouter(databaseURL: fixture.database)
+        let session = try await router.makeSession(for: .init(origin: .stop(id: "a"), destination: .stop(id: "c"),
+            departureTime: RealtimeTestFixture.date("07:55:00")))
+        let initial = try await session.initial()
+        let cached = try await session.initial()
+        #expect(initial.diagnostics.requestID != cached.diagnostics.requestID)
+        #expect(cached.diagnostics.milliseconds[.raptor] == nil)
+        #expect(cached.diagnostics.counters.isEmpty)
+        #expect(initial.metrics.pointRaptorScans == cached.metrics.pointRaptorScans)
+        #expect(initial.journeys.map(\.id) == cached.journeys.map(\.id))
+    }
+
 }

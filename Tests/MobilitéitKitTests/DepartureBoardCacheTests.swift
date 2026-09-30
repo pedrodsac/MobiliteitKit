@@ -152,3 +152,13 @@ private final class BoardProtocol: URLProtocol {
     let reused = try await cache.value(for: "generation") { Issue.record("Missed fresh cache"); return old }
     #expect(latest.responseBytes == 2 && reused.responseBytes == 2)
 }
+
+@Test func cacheHitsPreserveAcquisitionTimeInsteadOfRenewingFreshness() async throws {
+    let board = try JSONDecoder().decode(HafasDepartureBoard.self, from: Data(#"{"Departure":[]}"#.utf8))
+    let cache = DepartureBoardCache()
+    let first = try await cache.response(for: "freshness") { board }
+    let second = try await cache.response(for: "freshness") { board }
+    #expect(first.networkRequests == 1)
+    #expect(second.cacheHits == 1)
+    #expect(first.fetchedAt == second.fetchedAt)
+}

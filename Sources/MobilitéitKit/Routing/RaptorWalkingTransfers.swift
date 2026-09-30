@@ -1,8 +1,10 @@
 import Foundation
 
 extension Raptor {
-    static func relaxPathways(snapshot: RoutingSnapshot, labels: inout [Int: LabelProfile], nextLabelID: inout Int) {
-        var queue = labels.keys.sorted().flatMap { stop in
+    static func relaxPathways(snapshot: RoutingSnapshot, labels: inout [Int: LabelProfile], nextLabelID: inout Int, skipEmptySources: Bool = true) {
+        // A stop without outgoing pathways cannot insert a label or consume an
+        // ID. Excluding these no-op sources preserves queue and merge order.
+        var queue = labels.keys.sorted().filter { !skipEmptySources || !snapshot.pathsByFrom[$0].isEmpty }.flatMap { stop in
             (labels[stop]?.ordered ?? []).sorted { $0.id < $1.id }.map { (stop: stop, label: $0) }
         }
         var queueIndex = 0

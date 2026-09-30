@@ -10,6 +10,7 @@ public struct RoutingDiagnostics: Hashable, Sendable {
     }
     public enum Counter: String, Hashable, Sendable, Codable {
         case networkRequests, boardCacheHits, responseBytes, walkingRequests, walkingCacheHits
+        case predictedEvents, delayedPastBoardings
         case boardsCovered, incompleteBoards, workers, candidates, retainedAlternatives
     }
     public var counters: [Counter: Int] = [:]
