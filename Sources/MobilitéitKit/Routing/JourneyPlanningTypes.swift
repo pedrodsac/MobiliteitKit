@@ -70,6 +70,8 @@ public struct JourneyValidationContext: Hashable, Sendable {
     }
 }
 
+public enum JourneyTransferRisk: String, Codable, Hashable, Sendable { case tight, missed }
+
 public enum JourneyRealtimeCoverage: String, Codable, Hashable, Sendable {
     case live, partial, scheduleOnly
 }
@@ -115,6 +117,7 @@ public struct JourneyPlanningResult: Sendable {
     public let recommendedJourneyID: JourneySignature?
     public let invalidatedIDs: Set<JourneySignature>
     public let feasibility: [JourneySignature: JourneyFeasibility]
+    public let transferRisks: [JourneySignature: [Int: JourneyTransferRisk]]
     public let refinementTokens: [JourneySignature: JourneyRefinementToken]
     public let hasEarlier: Bool
     public let hasLater: Bool

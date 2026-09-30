@@ -34,6 +34,28 @@ public enum JourneyItineraryValidator {
         }, context: context)
     }
 
+    public static func transferRisks(_ journey: Journey,
+                                     context: JourneyValidationContext) -> [Int: JourneyTransferRisk] {
+        let rides = journey.legs.enumerated().compactMap { index, leg -> (Int, TransitLeg)? in
+            if case let .transit(t) = leg { (index, t) } else { nil }
+        }
+        var risks: [Int: JourneyTransferRisk] = [:]
+        for (incoming, outgoing) in zip(rides, rides.dropFirst()) {
+            let between = journey.legs[(incoming.0 + 1)..<outgoing.0]
+            if between.contains(where: { if case .inSeatContinuation = $0 { true } else { false } }) { continue }
+            let movement = between.reduce(0.0) { sum, leg in
+                if case let .walk(w) = leg { sum + w.duration } else { sum }
+            }
+            let gap = outgoing.1.effectiveDeparture.timeIntervalSince(incoming.1.effectiveArrival)
+            let slack = gap - movement - Double(outgoing.1.requiredTransferSecondsAfterWalking)
+            let sameStop = incoming.1.alight.stop.id == outgoing.1.board.stop.id && movement == 0
+            if slack < 0 {
+                risks[outgoing.0] = sameStop && slack >= -Double(context.sameStopTransferShortfallSeconds) ? .tight : .missed
+            } else if sameStop && gap < 120 { risks[outgoing.0] = .tight }
+        }
+        return risks
+    }
+
     public static func assess(_ itinerary: [JourneyTimingLeg],
                               context: JourneyValidationContext) -> JourneyFeasibility {
         let legs = itinerary.filter { $0.kind != .continuation }
@@ -119,11 +141,12 @@ extension Journey {
         let live = rides.filter { $0.board.timingSource != .scheduled || $0.alight.timingSource != .scheduled }
         let coverage: JourneyRealtimeCoverage = live.isEmpty ? .scheduleOnly :
             (live.count == rides.count ? .live : .partial)
-        let gaps = zip(rides, rides.dropFirst()).map { $1.effectiveDeparture.timeIntervalSince($0.effectiveArrival) }
+        let tight = JourneyItineraryValidator.transferRisks(self, context: .init(
+            anchor: effectiveDeparture, arriveBy: false, minimumTransferSeconds: 120)).values.contains(.tight)
         return .init(firstBoarding: rides.first?.effectiveDeparture,
                      cancelled: rides.contains { $0.status == .cancelled },
                      delayed: live.contains { $0.effectiveDeparture > $0.scheduledDeparture },
-                     tightTransfer: gaps.contains { $0 < 120 }, coverage: coverage)
+                     tightTransfer: tight, coverage: coverage)
     }
     public var transitFingerprint: String {
         legs.map {

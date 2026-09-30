@@ -122,9 +122,11 @@ public actor JourneyResultSession {
         legs[update.range.lowerBound] = .walk(replacement)
         // Retain native indices for other in-flight span updates. Presentation omits these placeholders.
         for position in update.range.dropFirst() {
-            legs[position] = .walk(.init(from: last.to, to: last.to, departure: update.arrival,
+            var placeholder = WalkingLeg(from: last.to, to: last.to, departure: update.arrival,
                 arrival: update.arrival, duration: 0, distanceMeters: 0, polyline: [], steps: [],
-                source: .pathway, evidence: .routedPedestrian))
+                source: .pathway, evidence: .routedPedestrian)
+            placeholder.nativeRange = position..<(position + 1)
+            legs[position] = .walk(placeholder)
         }
         let corrected = journey.replacing(legs: legs)
         journeys[index] = corrected
@@ -137,14 +139,20 @@ public actor JourneyResultSession {
             if !didReplan, corrected.legs.contains(where: { if case .transit = $0 { true } else { false } }) {
                 didReplan = true; replacementSearches += 1
                 let expectedGeneration = generation
-                let session = try await router.makeSession(for: makeQuery(page: .initial, refresh: .useCache))
-                let raw = direction == .arriveBy
-                    ? try await session.expanded(count: 5)
-                    : try await session.initial(count: 5, searchHorizon: 3 * 60 * 60)
-                let replacements = await JourneyGeometry.enrich(raw.journeys, store: store)
-                guard expectedGeneration == generation else { throw JourneyPlanningError.staleRefinement }
-                merge(replacements)
-                metrics = raw.metrics
+                do {
+                    let session = try await router.makeSession(for: makeQuery(page: .initial, refresh: .useCache))
+                    let raw = direction == .arriveBy
+                        ? try await session.expanded(count: 5)
+                        : try await session.initial(count: 5, searchHorizon: 3 * 60 * 60)
+                    let replacements = await JourneyGeometry.enrich(raw.journeys, store: store)
+                    guard expectedGeneration == generation else { throw JourneyPlanningError.staleRefinement }
+                    merge(replacements)
+                    metrics = raw.metrics
+                } catch is CancellationError { throw CancellationError() }
+                catch {
+                    guard expectedGeneration == generation else { throw JourneyPlanningError.staleRefinement }
+                    // A failed replacement search must still remove the unsafe itinerary.
+                }
             }
         }
         revision &+= 1
@@ -216,7 +224,10 @@ public actor JourneyResultSession {
                                           transitFingerprint: $0.transitFingerprint))
         })
         return .init(journeys: retained, recommendedJourneyID: recommended?.id,
-            invalidatedIDs: invalidated, feasibility: assessments, refinementTokens: tokens,
+            invalidatedIDs: invalidated, feasibility: assessments,
+            transferRisks: Dictionary(uniqueKeysWithValues: retained.map {
+                ($0.id, JourneyItineraryValidator.transferRisks($0, context: contexts[$0.id] ?? context))
+            }), refinementTokens: tokens,
             hasEarlier: hasEarlier, hasLater: hasLater, revision: revision, metrics: metrics,
             validationContext: context)
     }
