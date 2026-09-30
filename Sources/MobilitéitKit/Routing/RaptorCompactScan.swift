@@ -76,17 +76,20 @@ extension Raptor {
                 let preferred = query.preferences.preferredMode?.contains(
                     routeType: snapshot.routes[trip.route].type) ?? false
                 // This eligibility is invariant for every boarding on the instance.
-                let alights = trip.times.indices.filter {
-                    let time = trip.times[$0]
-                    return time.dropoff == 0 && instance.alightingAllowed[$0]
-                        && instance.scheduledArrivals[$0] != nil && instance.effectiveArrivals[$0] != nil
-                        && reachableStops?[time.stop] != false
-                        && (round + 1 < maxRounds || finalRoundAlightStops.contains(time.stop))
+                let alights = trip.times.indices.compactMap { position -> (position: Int, stop: Int, arrival: Double)? in
+                    let time = trip.times[position]
+                    guard time.dropoff == 0, instance.alightingAllowed[position],
+                          instance.scheduledArrivals[position] != nil,
+                          let arrival = instance.effectiveArrivals[position],
+                          reachableStops?[time.stop] != false,
+                          round + 1 < maxRounds || finalRoundAlightStops.contains(time.stop)
+                    else { return nil }
+                    return (position, time.stop, arrival.timeIntervalSinceReferenceDate)
                 }
                 var firstAlight = 0
                 for boardPos in startPosition..<trip.times.count {
                     try Task.checkCancellation()
-                    while firstAlight < alights.count && alights[firstAlight] <= boardPos { firstAlight += 1 }
+                    while firstAlight < alights.count && alights[firstAlight].position <= boardPos { firstAlight += 1 }
                     let board = trip.times[boardPos]
                     guard let scheduled = instance.scheduledDepartures[boardPos],
                           let effective = instance.effectiveDepartures[boardPos],
@@ -122,10 +125,11 @@ extension Raptor {
                             totalSlack: totalSlack, preferred: source.containsPreferredMode || preferred,
                             prefixRank: boardings.prefixRanks[sourceIndex], incomingTrip: tripIndex, serviceDate: day)
                         for position in firstAlight..<alights.count {
-                            let alightPos = alights[position]
-                            let stop = trip.times[alightPos].stop
+                            let alight = alights[position]
+                            let alightPos = alight.position
+                            let stop = alight.stop
                             alightingChecks += 1
-                            key.arrival = instance.effectiveArrivals[alightPos]!.timeIntervalSinceReferenceDate
+                            key.arrival = alight.arrival
                             key.id = nextID
                             if consider(key, profile: &next[stop], nextID: &nextID, attempts: &attempts,
                                 rejected: &rejected, path: {
@@ -153,6 +157,7 @@ extension Raptor {
         for stop in compactLabels.keys.sorted() {
             let compact = compactLabels[stop]!
             var profile = LabelProfile()
+            var bySlot = [Label?](repeating: nil, count: profileWidth + 1)
             for slot in compact.ordered {
                 let key = compact.keys[slot]!, path = compact.paths[slot]!
                 let source = boardings.sources[path.sourceIndex]
@@ -168,8 +173,17 @@ extension Raptor {
                     pathwaySeconds: source.pathwaySeconds, pathwayDistance: source.pathwayDistance,
                     transferWalkSeconds: 0, containsPreferredMode: key.preferred,
                     walkingStopsVisited: .one(stop), tripKey: source.tripKey.appending(.init(trip: path.trip, day: path.day)))
-                _ = insert(label, into: &profile)
+                bySlot[slot] = label
+                profile.byIncomingTrip[path.trip, default: []].append(label)
             }
+            // The compact merge has already applied dominance, quotas and all
+            // three orders. Copy its surviving indices instead of repeating
+            // insertion and reference-counted array shifts for every label.
+            profile.ordered = compact.ordered.map { bySlot[$0]! }
+            profile.byWalk = compact.byWalk.map { bySlot[$0]! }
+            profile.byArrival = compact.byArrival.map { bySlot[$0]! }
+            profile.lastUnprotectedArrival = compact.lastUnprotected.flatMap { bySlot[$0] }
+            profile.lastPreferredArrival = compact.lastPreferred.flatMap { bySlot[$0] }
             labels[stop] = profile
         }
         return labels

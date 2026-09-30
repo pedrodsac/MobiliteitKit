@@ -231,6 +231,15 @@ extension Raptor {
                 if verifyKernel {
                     precondition(next.keys.sorted() == referenceNext.keys.sorted(), "Merged stops mismatch")
                     for stop in next.keys {
+                        let profile = next[stop]!, reference = referenceNext[stop]!
+                        precondition(profile.byWalk.map(\.id) == reference.byWalk.map(\.id)
+                            && profile.byArrival.map(\.id) == reference.byArrival.map(\.id)
+                            && profile.lastUnprotectedArrival?.id == reference.lastUnprotectedArrival?.id
+                            && profile.lastPreferredArrival?.id == reference.lastPreferredArrival?.id,
+                            "Materialized profile index mismatch")
+                        let peers = profile.byIncomingTrip.filter { !$0.value.isEmpty }.mapValues { $0.map(\.id).sorted() }
+                        let expectedPeers = reference.byIncomingTrip.filter { !$0.value.isEmpty }.mapValues { $0.map(\.id).sorted() }
+                        precondition(peers == expectedPeers, "Materialized incoming-trip index mismatch")
                         let actual = next[stop]!.ordered, expected = referenceNext[stop]!.ordered
                         precondition(actual.count == expected.count, "Merged profile count mismatch")
                         for (a, b) in zip(actual, expected) {
