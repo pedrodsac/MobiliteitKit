@@ -93,4 +93,19 @@ import Testing
         #expect(patch.events[2].effectiveArrival == from.addingTimeInterval(25 * 60))
     }
 
+    @Test func ambiguousAutumnWallTimesDoNotGuessATripInstance() async throws {
+        let fixture = try await RealtimeTestFixture(
+            stopTimes: "trip,02:30:00,02:30:00,a,1\ntrip,02:50:00,02:50:00,c,2\n",
+            serviceDates: "service,20261025,1\n")
+        defer { fixture.remove() }
+        let body = liveBoard(stops: "", time: "02:30:00", realtime: "02:35:00", day: "2026-10-25")
+        let (client, host) = RealtimeBoardProtocol.client { _ in body }
+        defer { RealtimeBoardProtocol.remove(host) }
+        let provider = try HafasRealtimeRoutingProvider(databaseURL: fixture.database, client: client)
+        let from = ISO8601DateFormatter().date(from: "2026-10-25T02:25:00+01:00")!
+        let batch = try await provider.patches(for: ["a"], from: from,
+            through: from.addingTimeInterval(30 * 60), refreshPolicy: .useCache)
+        #expect(batch.patches.isEmpty)
+    }
+
 }

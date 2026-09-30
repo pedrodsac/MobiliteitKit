@@ -38,7 +38,8 @@ Boards request `SERVER_DEFAULT` and `passlist=1`. Acquisition covers up to
 split, up to eight requests per stop; exhausted slices are explicitly incomplete.
 Destination-aware discovery queries access stops and reachable outgoing trips,
 including delayed departures absent from static winners, before a final RAPTOR
-scan. It stops after four waves, 24 stop targets, or one shared four-second
+scan. Discovery carries its optimistic envelope forward one ride per wave,
+avoiding repeated scans of prior waves. It stops after four waves, 24 stop targets, or one shared four-second
 deadline; at most four requests run concurrently. Coverage outside those bounds
 remains partial.
 
@@ -61,7 +62,9 @@ let query = RouteQuery(
 The provider only applies a live journey when one GTFS trip instance is the
 unique best match by service date, stop, scheduled time, line, destination, and
 monotonic pass-list alignment. Ambiguous data is ignored. The matched GTFS
-service date remains authoritative for after-midnight trips. Arrival and
+service date remains authoritative for after-midnight trips. Wall times in
+the repeated autumn DST hour are ignored until ATP provides a verified offset
+contract; they cannot identify an unambiguous trip instance. Arrival and
 departure predictions are matched independently at each stop occurrence using
 GTFS stop sequence, preserving repeated stops and delay recovery. Missing
 predictions propagate only forward from a preceding report, for up to 30

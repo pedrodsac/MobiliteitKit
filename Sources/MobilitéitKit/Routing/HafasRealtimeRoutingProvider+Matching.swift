@@ -139,8 +139,21 @@ extension HafasRealtimeRoutingProvider {
     func date(date: String?, time: String?) -> Date? {
         guard let date, let time else { return nil }
         let timestamp = "\(date) \(time)"
-        return fullTimestampFormatter.date(from: timestamp)
-            ?? minuteTimestampFormatter.date(from: timestamp)
+        guard let parsed = fullTimestampFormatter.date(from: timestamp)
+            ?? minuteTimestampFormatter.date(from: timestamp) else { return nil }
+        let earlier = parsed.addingTimeInterval(-3_600)
+        let later = parsed.addingTimeInterval(3_600)
+        let zone = Calendar.luxembourg.timeZone
+        if zone.secondsFromGMT(for: earlier) != zone.secondsFromGMT(for: later) {
+            let formatter = time.split(separator: ":").count == 2
+                ? minuteTimestampFormatter : fullTimestampFormatter
+            if formatter.string(from: earlier) == timestamp || formatter.string(from: later) == timestamp {
+                // TODO: resolve the repeated autumn hour only if ATP supplies
+                // a verified UTC-offset/fold contract. Wall time alone is ambiguous.
+                return nil
+            }
+        }
+        return parsed
     }
 
     nonisolated static func normalized(_ value: String) -> String {
