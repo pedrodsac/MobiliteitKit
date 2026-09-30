@@ -19,7 +19,9 @@ public enum MobiliteitAPIError: Error, LocalizedError, Sendable, Equatable {
 
 /// Controls whether HAFAS realtime fields are populated.
 public enum HafasRealtimeMode: String, Sendable, Codable, Hashable {
-    case full = "FULL"
+    case serverDefault = "SERVER_DEFAULT"
+    /// Compatibility spelling; ATP does not accept the legacy FULL value.
+    public static var full: Self { .serverDefault }
     case off = "OFF"
 }
 
@@ -241,7 +243,16 @@ public struct MobiliteitAPIClient: Sendable {
     ///
     /// - Throws: ``MobiliteitAPIError/invalidRequest(_:)`` when the station or
     ///   duration is invalid, or a transport, HTTP, or decoding error.
-    public func departureBoard(_ request: HafasDepartureBoardRequest) async throws -> HafasDepartureBoard {
+    public func departureBoard(
+        _ request: HafasDepartureBoardRequest,
+        refreshPolicy: RealtimeRefreshPolicy = .useCache
+    ) async throws -> HafasDepartureBoard {
+        try await departureBoardResponse(request, refreshPolicy: refreshPolicy).board
+    }
+
+    func departureBoardResponse(
+        _ request: HafasDepartureBoardRequest, refreshPolicy: RealtimeRefreshPolicy
+    ) async throws -> CachedBoardResponse {
         guard !request.stationID.isEmpty else { throw MobiliteitAPIError.invalidRequest("stationID is required") }
         if let duration = request.durationMinutes, !(0...1_439).contains(duration) {
             throw MobiliteitAPIError.invalidRequest("durationMinutes must be in 0...1439")
@@ -267,8 +278,13 @@ public struct MobiliteitAPIClient: Sendable {
             .init(name: "passlist", value: request.includePasslist ? "1" : nil),
         ].filter { $0.value != nil }
         let requestURL = try url(path: "departureBoard", queryItems: items)
-        return try await Self.departureBoardCache.value(for: requestURL.absoluteString) {
+        return try await Self.departureBoardCache.response(
+            for: requestURL.absoluteString, refreshPolicy: refreshPolicy
+        ) {
             let response: HafasDepartureBoardEnvelope = try await fetch(requestURL: requestURL)
+            guard response.departureBoard.errorCode == nil else {
+                throw MobiliteitAPIError.invalidRequest(response.departureBoard.errorText ?? "HAFAS rejected the board")
+            }
             return response.departureBoard
         }
     }
@@ -300,7 +316,9 @@ public struct MobiliteitAPIClient: Sendable {
             throw MobiliteitAPIError.httpStatus(http.statusCode, body: String(data: data.prefix(8_192), encoding: .utf8))
         }
         do {
-            return try JSONDecoder().decode(Response.self, from: data)
+            let decoder = JSONDecoder()
+            decoder.userInfo[.hafasResponseBytes] = data.count
+            return try decoder.decode(Response.self, from: data)
         } catch {
             throw MobiliteitAPIError.decoding(error.localizedDescription)
         }
@@ -365,10 +383,18 @@ public struct HafasDepartureBoard: Hashable, Sendable, Decodable {
     public let errorText: String?
     public let requestID: String?
     public let serverVersion: String?
+    /// Decoded response bytes, before discarding unused HAFAS metadata.
+    public let responseBytes: Int
 
     enum CodingKeys: String, CodingKey {
         case departures = "Departure"
         case errorCode, errorText, requestID = "requestId", serverVersion
+    }
+
+    init(departures: [HafasDeparture], responseBytes: Int = 0) {
+        self.departures = .init(departures)
+        self.responseBytes = responseBytes
+        errorCode = nil; errorText = nil; requestID = nil; serverVersion = nil
     }
 
     public init(from decoder: Decoder) throws {
@@ -378,6 +404,7 @@ public struct HafasDepartureBoard: Hashable, Sendable, Decodable {
         errorText = try values.decodeIfPresent(String.self, forKey: .errorText)
         requestID = try values.decodeIfPresent(String.self, forKey: .requestID)
         serverVersion = try values.decodeIfPresent(String.self, forKey: .serverVersion)
+        responseBytes = decoder.userInfo[.hafasResponseBytes] as? Int ?? 0
     }
 }
 
@@ -701,4 +728,8 @@ private extension KeyedDecodingContainer {
         if let value = try? decode(String.self, forKey: key) { return [value] }
         return []
     }
+}
+
+private extension CodingUserInfoKey {
+    static let hafasResponseBytes = CodingUserInfoKey(rawValue: "hafasResponseBytes")!
 }

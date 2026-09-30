@@ -162,73 +162,8 @@ public extension WalkingRoutingProvider {
     }
 }
 
-public enum RealtimeTripStatus: String, Hashable, Sendable, Codable { case active, cancelled, unreachable }
-public enum RealtimeTimingSource: String, Hashable, Sendable, Codable { case scheduled, reported, estimated }
-public struct RealtimeStopEventPatch: Hashable, Sendable {
-    public let stopID: String
-    public let scheduledDeparture: Date?
-    public let effectiveDeparture: Date?
-    public let departureSource: RealtimeTimingSource
-    public let scheduledArrival: Date?
-    public let effectiveArrival: Date?
-    public let arrivalSource: RealtimeTimingSource
-    public let platform: String?
-    public init(
-        stopID: String,
-        scheduledDeparture: Date? = nil,
-        effectiveDeparture: Date? = nil,
-        departureSource: RealtimeTimingSource = .scheduled,
-        scheduledArrival: Date? = nil,
-        effectiveArrival: Date? = nil,
-        arrivalSource: RealtimeTimingSource = .scheduled,
-        platform: String? = nil
-    ) {
-        self.stopID = stopID
-        self.scheduledDeparture = scheduledDeparture
-        self.effectiveDeparture = effectiveDeparture
-        self.departureSource = departureSource
-        self.scheduledArrival = scheduledArrival
-        self.effectiveArrival = effectiveArrival
-        self.arrivalSource = arrivalSource
-        self.platform = platform
-    }
-}
-/// A high-confidence, already matched GTFS trip-instance update. The mapping
-/// layer belongs outside RAPTOR; this compact value is its immutable hand-off.
-public struct RealtimeTripPatch: Hashable, Sendable { public let tripID: String; public let serviceDate: GTFSDate; public let status: RealtimeTripStatus; public let events: [RealtimeStopEventPatch]; public init(tripID: String, serviceDate: GTFSDate, status: RealtimeTripStatus = .active, events: [RealtimeStopEventPatch]) { self.tripID = tripID; self.serviceDate = serviceDate; self.status = status; self.events = events } }
-public struct RealtimePatchBatch: Hashable, Sendable {
-    public let patches: [RealtimeTripPatch]
-    public let requestedStopIDs: Set<String>
-    public let coveredStopIDs: Set<String>
-    public let boardFetchMilliseconds: Int
-    public let scheduledPreparationMilliseconds: Int
-    public let boardMatchingMilliseconds: Int
-    public init(
-        patches: [RealtimeTripPatch],
-        requestedStopIDs: Set<String>,
-        coveredStopIDs: Set<String>,
-        boardFetchMilliseconds: Int = 0,
-        scheduledPreparationMilliseconds: Int = 0,
-        boardMatchingMilliseconds: Int = 0
-    ) {
-        self.patches = patches
-        self.requestedStopIDs = requestedStopIDs
-        self.coveredStopIDs = coveredStopIDs
-        self.boardFetchMilliseconds = boardFetchMilliseconds
-        self.scheduledPreparationMilliseconds = scheduledPreparationMilliseconds
-        self.boardMatchingMilliseconds = boardMatchingMilliseconds
-    }
-}
-public protocol RealtimeRoutingProvider: Sendable {
-    func patches(
-        for stopIDs: [String],
-        from: Date,
-        through: Date,
-        refreshPolicy: RealtimeRefreshPolicy
-    ) async throws -> RealtimePatchBatch
-}
 
-private struct RealtimePatchKey: Hashable, Sendable {
+struct RealtimePatchKey: Hashable, Sendable {
     let tripID: String
     let serviceDate: GTFSDate
 }
@@ -279,6 +214,8 @@ public struct RoutingMetrics: Hashable, Sendable {
     public var realtimeScheduledPreparationMilliseconds = 0
     public var realtimeBoardMatchingMilliseconds = 0
     public var realtimeBoardsCovered = 0
+    public var realtimeResponseBytes = 0; public var realtimeIncompleteBoards = 0
+    public var realtimePredictedEvents = 0
     public var realtimeFrontierSize = 0; public var delayedPastBoardingsInjected = 0
     public var realtimeOverlayRevisions = 0; public var raptorReruns = 0
     public var searchRounds: [RoutingRoundMetrics] = []
@@ -317,9 +254,9 @@ public struct ServiceInstantConverter: Sendable {
 
 // MARK: - Immutable snapshot
 
-private struct SnapshotStop: Sendable { let id: String; let model: TransitStop; let parent: String? }
-private struct SnapshotTime: Sendable { let stop: Int; let sequence: Int; let arrival: Int32?; let departure: Int32?; let pickup: Int; let dropoff: Int }
-private struct SnapshotTrip: Sendable {
+struct SnapshotStop: Sendable { let id: String; let model: TransitStop; let parent: String? }
+struct SnapshotTime: Sendable { let stop: Int; let sequence: Int; let arrival: Int32?; let departure: Int32?; let pickup: Int; let dropoff: Int }
+struct SnapshotTrip: Sendable {
     let id: String; let route: Int; let service: Int; let times: [SnapshotTime]; let headsign: String?
     let wheelchairAccessible: Int
     let firstServiceTime: Int32; let lastServiceTime: Int32
@@ -331,22 +268,22 @@ private struct SnapshotTrip: Sendable {
         lastServiceTime = times.lazy.reversed().compactMap { $0.departure ?? $0.arrival }.first ?? 0
     }
 }
-private struct SnapshotRule: Sendable { let order: Int; let from: Int?; let to: Int?; let type: Int; let minimum: Int?; let fromRoute: Int?; let toRoute: Int?; let fromTrip: Int?; let toTrip: Int? }
-private struct RuleGroupKey: Hashable, Sendable { let from: Int?; let to: Int? }
-private struct SnapshotPath: Sendable {
+struct SnapshotRule: Sendable { let order: Int; let from: Int?; let to: Int?; let type: Int; let minimum: Int?; let fromRoute: Int?; let toRoute: Int?; let fromTrip: Int?; let toTrip: Int? }
+struct RuleGroupKey: Hashable, Sendable { let from: Int?; let to: Int? }
+struct SnapshotPath: Sendable {
     let from: Int; let to: Int; let seconds: Int; let distance: Double; let mode: Int
     let stairCount: Int?; let maxSlope: Double?; let minWidth: Double?
 }
-private struct SnapshotPattern: Sendable { let trips: [Int]; let stops: [Int] }
-private struct PatternOccurrence: Sendable { let pattern: Int; let position: Int }
-private struct SnapshotServiceDay: Sendable { let offset: Int; let date: GTFSDate; let start: Date; let activeServices: Set<Int> }
+struct SnapshotPattern: Sendable { let trips: [Int]; let stops: [Int] }
+struct PatternOccurrence: Sendable { let pattern: Int; let position: Int }
+struct SnapshotServiceDay: Sendable { let offset: Int; let date: GTFSDate; let start: Date; let activeServices: Set<Int> }
 private struct StopGridCell: Hashable { let latitude: Int; let longitude: Int }
-private struct RoutingSnapshot: Sendable {
+struct RoutingSnapshot: Sendable {
     let info: FeedInfo; let converter: ServiceInstantConverter; let stops: [SnapshotStop]; let stopByID: [String: Int]; let routes: [TransitRoute]; let trips: [SnapshotTrip]; let tripByID: [String: Int]; let tripIndicesByDepartureStop: [[Int]]; let serviceRoutesByStop: [[ServiceRoute]]; let boardableStops: Set<Int>; let alightableStops: Set<Int>; let serviceDays: [SnapshotServiceDay]; let lastActiveDayStartByService: [Date?]; let rulesByGroup: [RuleGroupKey: [SnapshotRule]]; let stationGroupByStop: [Int]; let pathsByFrom: [[SnapshotPath]]; let pathsByTo: [[SnapshotPath]]; let nearbyTransferStopsByStop: [[Int]]
     let patterns: [SnapshotPattern]; let patternOccurrencesByStop: [[PatternOccurrence]]; let loadMilliseconds: Int
 }
 
-private struct ServiceRoute: Hashable, Sendable {
+struct ServiceRoute: Hashable, Sendable {
     let service: Int
     let route: Int
 }
@@ -579,12 +516,12 @@ public actor TransitRouter {
 }
 
 public actor JourneyPlanningSession {
-    private let snapshot: RoutingSnapshot; private let query: RouteQuery; private let walking: WalkingRouteCache?; private let realtimeProvider: (any RealtimeRoutingProvider)?
-    private var all: [Journey] = []; private var visibleStart = 0; private var visibleEnd = 0; private var revision: UInt64 = 0; private var state: PageRealtimeState; private var metrics = RoutingMetrics()
+    let snapshot: RoutingSnapshot; let query: RouteQuery; private let walking: WalkingRouteCache?; let realtimeProvider: (any RealtimeRoutingProvider)?
+    private var all: [Journey] = []; private var visibleStart = 0; private var visibleEnd = 0; private var revision: UInt64 = 0; var state: PageRealtimeState; var metrics = RoutingMetrics()
     private var directWalking: Journey?
     private var cachedEndpointEdges: (access: [Edge], egress: [Edge])?
-    private var cachedRealtimeBatch: RealtimePatchBatch?
-    private var latestPatchesByInstance: [RealtimePatchKey: RealtimeTripPatch] = [:]
+    var cachedRealtimeBatch: RealtimePatchBatch?
+    var latestPatchesByInstance: [RealtimePatchKey: RealtimeTripPatch] = [:]
     fileprivate struct BuiltJourney {
         let journey: Journey
         let firstBoard: Date
@@ -676,60 +613,11 @@ public actor JourneyPlanningSession {
         let access = edges.access; let egress = edges.egress
         metrics.endpointAccessCandidates = access.count
         metrics.endpointEgressCandidates = egress.count
-        var patches: [RealtimeTripPatch] = []
-        let realtimeStarted = Date()
-        if case let .bestEffort(configuration, requestedRefresh) = query.realtimePolicy,
-           let realtimeProvider {
-            // Bootstrap with every access stop and the bounded, timetable
-            // derived interchange frontier reachable from those first boards.
-            // The backwards start is crucial: a 17:50 scheduled departure can
-            // be returned and injected when its effective time is 18:05.
-            let ids = realtimeFrontier(access: access, anchor: anchor, lookback: configuration.scheduledLookbackSeconds)
-            metrics.realtimeFrontierSize = ids.count
-            do {
-                let batch: RealtimePatchBatch
-                if !forceRealtime, let cachedRealtimeBatch {
-                    batch = cachedRealtimeBatch
-                    metrics.hafasCacheHits += 1
-                } else {
-                    metrics.hafasRequests += 1
-                    batch = try await realtimeProvider.patches(
-                        for: ids,
-                        from: anchor.addingTimeInterval(-TimeInterval(configuration.scheduledLookbackSeconds)),
-                        through: anchor.addingTimeInterval(TimeInterval(configuration.minimumForwardHorizonSeconds)),
-                        refreshPolicy: forceRealtime ? .forceRefresh : requestedRefresh
-                    )
-                    cachedRealtimeBatch = batch
-                }
-                patches = batch.patches
-                metrics.realtimeBoardFetchMilliseconds += batch.boardFetchMilliseconds
-                metrics.realtimeScheduledPreparationMilliseconds += batch.scheduledPreparationMilliseconds
-                metrics.realtimeBoardMatchingMilliseconds += batch.boardMatchingMilliseconds
-                metrics.realtimeBoardsCovered = batch.coveredStopIDs.count
-                latestPatchesByInstance = Dictionary(
-                    patches.map { (RealtimePatchKey(tripID: $0.tripID, serviceDate: $0.serviceDate), $0) },
-                    uniquingKeysWith: { _, latest in latest }
-                )
-                metrics.delayedPastBoardingsInjected += patches.reduce(0) { partial, patch in
-                    partial + patch.events.filter {
-                        ($0.scheduledDeparture ?? .distantFuture) < anchor
-                            && ($0.effectiveDeparture ?? .distantPast) >= anchor
-                    }.count
-                }
-                metrics.realtimeOverlayRevisions += 1
-                if batch.coveredStopIDs.isEmpty {
-                    state = .unavailable
-                } else if batch.coveredStopIDs == batch.requestedStopIDs, !patches.isEmpty {
-                    state = .live
-                } else {
-                    state = .partial
-                }
-            } catch {
-                state = .unavailable
-                latestPatchesByInstance = [:]
-            }
-        }
-        metrics.realtimePreparationMilliseconds += Int(Date().timeIntervalSince(realtimeStarted) * 1_000)
+        let realtimeStarted = ContinuousClock.now
+        let patches = try await acquireRealtime(access: access, egress: egress, anchor: anchor,
+                                                searchHorizon: searchHorizon, force: forceRealtime)
+        metrics.realtimePreparationMilliseconds += HafasRealtimeRoutingProvider.milliseconds(
+            realtimeStarted.duration(to: .now))
         metrics.pointRaptorScans += 1
         async let directJourney = Self.directWalk(snapshot: snapshot, query: query, walking: walking, anchor: anchor)
         let raptorStarted = Date()
@@ -779,34 +667,7 @@ public actor JourneyPlanningSession {
         metrics.profileGenerationMilliseconds = Int(Date().timeIntervalSince(started) * 1_000)
         return journeys
     }
-    private func realtimeFrontier(access: [Edge], anchor: Date, lookback: Int) -> [String] {
-        let accessStops = Set(access.map { $0.stop })
-        var result = accessStops
-        let lowerBound = anchor.addingTimeInterval(-TimeInterval(lookback))
-        let candidateTrips = Set(accessStops.flatMap { snapshot.tripIndicesByDepartureStop[$0] }).sorted()
-        // This is intentionally bounded and purely static. It finds transfer
-        // stops before the live overlay exists, without network work in RAPTOR.
-        for tripIndex in candidateTrips {
-            let trip = snapshot.trips[tripIndex]
-            guard let lastActiveDay = snapshot.lastActiveDayStartByService[trip.service] else { continue }
-            for time in trip.times where accessStops.contains(time.stop) {
-                guard let departure = time.departure else { continue }
-                if lastActiveDay.addingTimeInterval(TimeInterval(departure)) >= lowerBound {
-                    result.formUnion(trip.times.map(\.stop))
-                }
-            }
-            if result.count >= 64 { break }
-        }
-        // The deadline may expire before every board is fetched. Prioritize
-        // stops the rider can reach soonest, rather than snapshot/GTFS ID order.
-        let orderedAccess = access.sorted {
-            if $0.seconds != $1.seconds { return $0.seconds < $1.seconds }
-            return snapshot.stops[$0.stop].id < snapshot.stops[$1.stop].id
-        }.map(\.stop)
-        let ordered = orderedAccess + result.subtracting(accessStops).sorted()
-        return ordered.prefix(64).map { snapshot.stops[$0].id }
-    }
-    fileprivate struct Edge: Sendable { let stop: Int; let seconds: Int; let distance: Double; let walk: WalkingRoute? }
+    struct Edge: Sendable { let stop: Int; let seconds: Int; let distance: Double; let walk: WalkingRoute? }
     private enum EndpointEdgePurpose: Equatable { case access, egress }
     private static let endpointCandidateLimit = 40
     private static let initialEndpointCandidateLimit = 24
@@ -934,9 +795,8 @@ public actor JourneyPlanningSession {
                     RealtimePatchKey(tripID: trip.id, serviceDate: item.day)
                 ]
                 let status = patch?.status ?? .active
-                let events = status == .cancelled ? [] : patch?.events ?? []
-                let boardPatch = events.first { $0.stopID == board.id }
-                let alightPatch = events.first { $0.stopID == alight.id }
+                let boardPatch = patch?.event(stopID: board.id, sequence: trip.times[item.boardPos].sequence)
+                let alightPatch = patch?.event(stopID: alight.id, sequence: trip.times[item.alightPos].sequence)
                 let b = JourneyStopEvent(
                     stop: board,
                     scheduledTime: item.scheduledBoard,
@@ -953,7 +813,7 @@ public actor JourneyPlanningSession {
                 )
                 let middle = trip.times[(item.boardPos + 1)..<item.alightPos].map { time in
                     let stop = snapshot.stops[time.stop].model
-                    let eventPatch = events.first { $0.stopID == stop.id }
+                    let eventPatch = patch?.event(stopID: stop.id, sequence: time.sequence)
                     let scheduled = snapshot.converter.date(
                         serviceDate: item.day,
                         serviceSeconds: time.arrival ?? time.departure ?? 0
@@ -1136,7 +996,7 @@ private enum Raptor {
     private struct PatchKey: Hashable, Sendable { let trip: Int; let serviceDate: GTFSDate }
     private struct PatchOverlay: Sendable {
         let status: RealtimeTripStatus
-        let eventsByStop: [Int: RealtimeStopEventPatch]
+        let eventsByPosition: [Int: RealtimeStopEventPatch]
     }
     fileprivate enum WalkingVisits: Hashable, Sendable {
         case one(Int)
@@ -1283,6 +1143,8 @@ private enum Raptor {
         let scheduledArrivals: [Date?]
         let effectiveDepartures: [Date?]
         let effectiveArrivals: [Date?]
+        let boardingAllowed: [Bool]
+        let alightingAllowed: [Bool]
     }
 
     /// A conservative topology bound. A true bit means that a stop may still
@@ -1384,14 +1246,18 @@ private enum Raptor {
         let patchesByInstance = Dictionary(
             patches.compactMap { patch -> (PatchKey, PatchOverlay)? in
                 guard let trip = snapshot.tripByID[patch.tripID] else { return nil }
-                let events = patch.events.compactMap { event -> (Int, RealtimeStopEventPatch)? in
-                    snapshot.stopByID[event.stopID].map { ($0, event) }
+                let times = snapshot.trips[trip].times
+                let events = times.indices.compactMap { position -> (Int, RealtimeStopEventPatch)? in
+                    let time = times[position]
+                    guard let event = patch.event(stopID: snapshot.stops[time.stop].id, sequence: time.sequence)
+                    else { return nil }
+                    return (position, event)
                 }
                 return (
                     PatchKey(trip: trip, serviceDate: patch.serviceDate),
                     PatchOverlay(
                         status: patch.status,
-                        eventsByStop: Dictionary(events, uniquingKeysWith: { _, latest in latest })
+                        eventsByPosition: Dictionary(events, uniquingKeysWith: { _, latest in latest })
                     )
                 )
             },
@@ -1613,6 +1479,7 @@ private enum Raptor {
                 let eligibleAlights = trip.times.indices.filter { position in
                     let stopTime = trip.times[position]
                     return stopTime.dropoff == 0
+                        && instance.alightingAllowed[position]
                         && scheduledArrivals[position] != nil
                         && effectiveArrivals[position] != nil
                         && reachableStops?[stopTime.stop] != false
@@ -1625,6 +1492,7 @@ private enum Raptor {
                         guard let scheduled = scheduledDepartures[boardPos],
                               let effective = effectiveDepartures[boardPos],
                               boardTime.pickup == 0,
+                              instance.boardingAllowed[boardPos],
                               let sources = previousLabels[boardTime.stop]?.ordered
                         else { continue }
                         let latestPossibleArrival = effective.addingTimeInterval(
@@ -1786,11 +1654,11 @@ private enum Raptor {
                     time.arrival.map { serviceDay.start.addingTimeInterval(TimeInterval($0)) }
                 }
                 let effectiveDepartures = trip.times.indices.map { position in
-                    patchTime(patch, stop: trip.times[position].stop, departure: true)
+                    patchTime(patch, position: position, departure: true)
                         ?? scheduledDepartures[position]
                 }
                 let effectiveArrivals = trip.times.indices.map { position in
-                    patchTime(patch, stop: trip.times[position].stop, departure: false)
+                    patchTime(patch, position: position, departure: false)
                         ?? scheduledArrivals[position]
                 }
                 // Access labels start no earlier than searchStart. Even with
@@ -1798,6 +1666,7 @@ private enum Raptor {
                 // cannot be boarded during this query.
                 guard trip.times.indices.contains(where: { position in
                     trip.times[position].pickup == 0
+                        && patch?.eventsByPosition[position]?.boardingAllowed != false
                         && effectiveDepartures[position].map { $0 >= searchStart } == true
                 }) else { return nil }
                 return .init(
@@ -1805,7 +1674,9 @@ private enum Raptor {
                     scheduledDepartures: scheduledDepartures,
                     scheduledArrivals: scheduledArrivals,
                     effectiveDepartures: effectiveDepartures,
-                    effectiveArrivals: effectiveArrivals
+                    effectiveArrivals: effectiveArrivals,
+                    boardingAllowed: trip.times.indices.map { patch?.eventsByPosition[$0]?.boardingAllowed != false },
+                    alightingAllowed: trip.times.indices.map { patch?.eventsByPosition[$0]?.alightingAllowed != false }
                 )
             }
         }
@@ -2305,7 +2176,7 @@ private enum Raptor {
         return lhs.count < rhs.count
     }
 
-    private static func patchTime(_ patch: PatchOverlay?, stop: Int, departure: Bool) -> Date? { guard let event = patch?.eventsByStop[stop] else { return nil }; return departure ? event.effectiveDeparture : event.effectiveArrival }
+    private static func patchTime(_ patch: PatchOverlay?, position: Int, departure: Bool) -> Date? { guard let event = patch?.eventsByPosition[position] else { return nil }; return departure ? event.effectiveDeparture : event.effectiveArrival }
     /// Resolves the single maximally-specific GTFS transfer rule. Returning nil
     /// means type 3 forbids the operation. This is intentionally centralised so
     /// numerical scan code cannot accidentally apply several conflicting rules.
@@ -2380,4 +2251,4 @@ private func strictEnvelope(_ journeys: [JourneyPlanningSession.BuiltJourney]) -
     }
 }
 private func journeyOrder(_ a: JourneyPlanningSession.BuiltJourney, _ b: JourneyPlanningSession.BuiltJourney) -> Bool { (a.journey.effectiveDeparture, a.journey.effectiveArrival, a.journey.transferCount, a.journey.walkingDuration, a.journey.duration, a.tripInstanceKey) < (b.journey.effectiveDeparture, b.journey.effectiveArrival, b.journey.transferCount, b.journey.walkingDuration, b.journey.duration, b.tripInstanceKey) }
-private func distance(_ a: Coordinate, _ b: Coordinate) -> Double { let p = a.latitude * .pi / 180, q = b.latitude * .pi / 180, dp = q-p, dl = (b.longitude-a.longitude) * .pi / 180; let x = sin(dp/2)*sin(dp/2)+cos(p)*cos(q)*sin(dl/2)*sin(dl/2); return 6_371_000 * 2 * atan2(sqrt(x),sqrt(1-x)) }
+func distance(_ a: Coordinate, _ b: Coordinate) -> Double { let p = a.latitude * .pi / 180, q = b.latitude * .pi / 180, dp = q-p, dl = (b.longitude-a.longitude) * .pi / 180; let x = sin(dp/2)*sin(dp/2)+cos(p)*cos(q)*sin(dl/2)*sin(dl/2); return 6_371_000 * 2 * atan2(sqrt(x),sqrt(1-x)) }

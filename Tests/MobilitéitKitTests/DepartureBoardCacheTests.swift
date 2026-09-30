@@ -113,3 +113,42 @@ private final class BoardProtocol: URLProtocol {
 
     override func stopLoading() {}
 }
+
+@Test func boardCacheCoalescesAndOneWaiterCanCancelWithoutCancelingAnother() async throws {
+    let board = try JSONDecoder().decode(HafasDepartureBoard.self, from: Data(#"{"Departure":[]}"#.utf8))
+    let cache = DepartureBoardCache()
+    let count = FetchCount()
+    let fetch: @Sendable () async throws -> HafasDepartureBoard = {
+        await count.increment()
+        try await Task.sleep(for: .milliseconds(150))
+        return board
+    }
+    let first = Task { try await cache.value(for: "shared", fetch: fetch) }
+    while await count.value == 0 { await Task.yield() }
+    let second = Task { try await cache.value(for: "shared", fetch: fetch) }
+    try await Task.sleep(for: .milliseconds(20))
+    first.cancel()
+    do { _ = try await first.value; Issue.record("Cancelled waiter completed") }
+    catch is CancellationError {}
+    #expect(try await second.value.departures.values.isEmpty)
+    #expect(await count.value == 1)
+}
+
+@Test func forceRefreshCannotBeOverwrittenByAnOlderInflightResponse() async throws {
+    let old = HafasDepartureBoard(departures: [], responseBytes: 1)
+    let fresh = HafasDepartureBoard(departures: [], responseBytes: 2)
+    let cache = DepartureBoardCache()
+    let count = FetchCount()
+    let first = Task {
+        try await cache.value(for: "generation") {
+            await count.increment()
+            try await Task.sleep(for: .milliseconds(100))
+            return old
+        }
+    }
+    while await count.value == 0 { await Task.yield() }
+    let latest = try await cache.value(for: "generation", refreshPolicy: .forceRefresh) { fresh }
+    _ = try await first.value
+    let reused = try await cache.value(for: "generation") { Issue.record("Missed fresh cache"); return old }
+    #expect(latest.responseBytes == 2 && reused.responseBytes == 2)
+}
