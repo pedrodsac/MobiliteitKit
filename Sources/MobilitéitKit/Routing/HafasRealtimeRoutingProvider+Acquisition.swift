@@ -8,6 +8,7 @@ extension HafasRealtimeRoutingProvider {
 
     func boards(for stopIDs: [String], request: RealtimeRoutingRequest,
                 deadline: ContinuousClock.Instant) async -> [String: BoardResult] {
+        guard ContinuousClock.now < deadline else { return [:] }
         // Stable UTC boundaries are independent of the rider's moving clock,
         // including the repeated autumn hour. Cache only proven complete coverage.
         let width: TimeInterval = 30 * 60

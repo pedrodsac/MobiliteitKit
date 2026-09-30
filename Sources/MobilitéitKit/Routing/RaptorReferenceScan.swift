@@ -14,11 +14,16 @@ extension Raptor {
                 activeInstancesByPattern: activeInstancesByPattern, reachableStops: reachableStops,
                 round: round, maxRounds: maxRounds, finalRoundAlightStops: finalRoundAlightStops)
         }
-        let result = try scanPatternsCompact(chunkIndex: chunkIndex, patternIDs: patternIDs, snapshot: snapshot,
+        var result = try scanPatternsCompact(chunkIndex: chunkIndex, patternIDs: patternIDs, snapshot: snapshot,
             query: query, boardings: boardings, patternStartPositions: patternStartPositions,
             activeInstancesByPattern: activeInstancesByPattern, reachableStops: reachableStops,
             round: round, maxRounds: maxRounds, finalRoundAlightStops: finalRoundAlightStops)
         if verifyKernel {
+            result = .init(chunkIndex: result.chunkIndex, labels: materialize(result.compactLabels!, boardings: boardings),
+                scannedPatterns: result.scannedPatterns, scannedTripInstances: result.scannedTripInstances,
+                boardingChecks: result.boardingChecks, feasibleBoardings: result.feasibleBoardings, alightingChecks: result.alightingChecks,
+                labelAttempts: result.labelAttempts, retainedLabels: result.retainedLabels, rejectedBeforeAllocation: result.rejectedBeforeAllocation,
+                elapsedMilliseconds: result.elapsedMilliseconds, compactLabels: result.compactLabels)
             let expected = try scanPatternsReference(chunkIndex: chunkIndex, patternIDs: patternIDs, snapshot: snapshot,
                 query: query, previousLabels: previousLabels, patternStartPositions: patternStartPositions,
                 activeInstancesByPattern: activeInstancesByPattern, reachableStops: reachableStops,

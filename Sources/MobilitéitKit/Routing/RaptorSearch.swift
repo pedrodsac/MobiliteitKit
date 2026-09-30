@@ -184,6 +184,9 @@ extension Raptor {
             var roundLabelAttempts = 0
             var roundRetainedLabels = 0
             var roundRejectedBeforeAllocation = 0
+            var mergedCompact: [Int: CompactProfile] = [:]
+            var referenceNext: [Int: LabelProfile] = [:]
+            var referenceID = nextLabelID
             for result in scanResults {
                 scannedPatterns += result.scannedPatterns
                 scannedTripInstances += result.scannedTripInstances
@@ -193,14 +196,53 @@ extension Raptor {
                 roundLabelAttempts += result.labelAttempts
                 roundRetainedLabels += result.retainedLabels
                 roundRejectedBeforeAllocation += result.rejectedBeforeAllocation
-                for stop in result.labels.keys.sorted() {
-                    for candidate in result.labels[stop]?.ordered ?? [] {
-                        let candidate = candidate.replacingID(with: nextLabelID)
-                        nextLabelID += 1
-                        _ = insert(candidate, at: stop, into: &next)
+                if let compact = result.compactLabels {
+                    for stop in compact.keys.sorted() {
+                        let profile = compact[stop]!
+                        for slot in profile.ordered {
+                            var key = profile.keys[slot]!
+                            key.id = nextLabelID; nextLabelID += 1
+                            if mergedCompact[stop] == nil { mergedCompact[stop] = CompactProfile() }
+                            if !mergedCompact[stop]!.isDominated(key), !mergedCompact[stop]!.cannotEnter(key) {
+                                _ = mergedCompact[stop]!.insert(key, path: profile.paths[slot]!)
+                            }
+                        }
+                    }
+                    if verifyKernel {
+                        for stop in result.labels.keys.sorted() {
+                            for label in result.labels[stop]!.ordered {
+                                _ = insert(label.replacingID(with: referenceID), at: stop, into: &referenceNext)
+                                referenceID += 1
+                            }
+                        }
+                    }
+                } else {
+                    for stop in result.labels.keys.sorted() {
+                        for candidate in result.labels[stop]?.ordered ?? [] {
+                            let candidate = candidate.replacingID(with: nextLabelID)
+                            nextLabelID += 1
+                            _ = insert(candidate, at: stop, into: &next)
+                        }
                     }
                 }
             }
+            if !mergedCompact.isEmpty {
+                next = materialize(mergedCompact, boardings: boardings)
+                if verifyKernel {
+                    precondition(next.keys.sorted() == referenceNext.keys.sorted(), "Merged stops mismatch")
+                    for stop in next.keys {
+                        let actual = next[stop]!.ordered, expected = referenceNext[stop]!.ordered
+                        precondition(actual.count == expected.count, "Merged profile count mismatch")
+                        for (a, b) in zip(actual, expected) {
+                            precondition(a.id == b.id && a.time == b.time && a.firstDeparture == b.firstDeparture
+                                && a.minimumSlack == b.minimumSlack && a.totalSlack == b.totalSlack
+                                && a.tripKey == b.tripKey && a.walkingSeconds == b.walkingSeconds
+                                && String(reflecting: a.legs) == String(reflecting: b.legs), "Merged label mismatch")
+                        }
+                    }
+                }
+            }
+
             let mergeMilliseconds = Int(RoutingDiagnostics.elapsed(since: mergeStarted))
             roundMetrics.append(.init(
                 tripPreparationMilliseconds: preparationMilliseconds,

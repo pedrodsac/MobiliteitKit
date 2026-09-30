@@ -4,7 +4,7 @@ import Foundation
 public struct RoutingDiagnostics: Hashable, Sendable {
     public enum Stage: String, Hashable, Sendable, Codable {
         case snapshotPreparation, endpoints, realtime, boardFetch, schedulePreparation, http, decode
-        case boardMatching, raptor, walkingTransfers, candidateBuilding, directWalkingWait
+        case realtimeDiscovery, boardMatching, raptor, walkingTransfers, candidateBuilding, directWalkingWait
         case geometry, resultAssembly, timetableReadiness, graphPreparation, adapterMapping
         case publication, firstRender
     }

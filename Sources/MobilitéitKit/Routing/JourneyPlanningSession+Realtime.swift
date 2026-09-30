@@ -57,9 +57,11 @@ extension JourneyPlanningSession {
                 }
             } catch is CancellationError { throw CancellationError() }
             catch { break }
+            let discoveryStarted = ContinuousClock.now
             frontier = realtimeFrontier(arrivalByStop: &discoveryArrivals, egress: egress, from: from, through: through,
                                          lookback: configuration.scheduledLookbackSeconds,
                                          deadline: deadline, patches: patches, excluding: queried)
+            diagnostics.record(.realtimeDiscovery, since: discoveryStarted)
         }
         metrics.realtimeFrontierSize = queried.count
         metrics.realtimeBoardsCovered = covered.count
@@ -101,6 +103,7 @@ extension JourneyPlanningSession {
         for (stop, reach) in arrivalByStop {
             if Task.isCancelled || ContinuousClock.now >= deadline { return [] }
             for tripIndex in snapshot.tripIndicesByDepartureStop[stop] {
+                if Task.isCancelled || ContinuousClock.now >= deadline { return [] }
                 let trip = snapshot.trips[tripIndex]
                 guard query.preferences.allowedModes.contains(routeType: snapshot.routes[trip.route].type)
                 else { continue }
@@ -134,6 +137,7 @@ extension JourneyPlanningSession {
             }
         }
         arrivalByStop = improved
+        guard !Task.isCancelled, ContinuousClock.now < deadline else { return [] }
         let target = egress.first.map { snapshot.stops[$0.stop].model.coordinate }
         return arrivalByStop.keys.filter { stop in
             !excluding.contains(snapshot.stops[stop].id) && snapshot.boardableStops.contains(stop)

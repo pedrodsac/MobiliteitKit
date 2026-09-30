@@ -106,13 +106,13 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
         guard !requested.isEmpty, request.through >= request.from else {
             return .init(patches: [], requestedStopIDs: requested, coveredStopIDs: [])
         }
-        let deadline = request.deadline ?? ContinuousClock.now.advanced(by: min(request.timeout, requestTimeout))
+        let localDeadline = ContinuousClock.now.advanced(by: min(request.timeout, requestTimeout))
+        let deadline = request.deadline.map { min($0, localDeadline) } ?? localDeadline
         let matchingFrom = request.from.addingTimeInterval(-Double(request.scheduledLookbackSeconds))
         async let schedules = prepareSchedules(for: stopIDs, from: matchingFrom, through: request.through, deadline: deadline)
         let started = ContinuousClock.now
         let fetched = await boards(for: stopIDs, request: request, deadline: deadline)
         let fetchMilliseconds = Self.milliseconds(started.duration(to: .now))
-        guard fetched.values.contains(where: { $0.board != nil }) else { throw HafasRealtimeRoutingError.unavailable }
         let prepared = await schedules
         try Task.checkCancellation()
         let matchingStarted = ContinuousClock.now
@@ -157,6 +157,7 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
                 let key = "\(update.tripID)@\(update.serviceDate.compactString)"
                 patches[key] = patches[key].map { $0.merging(update) } ?? update
             }
+            if ContinuousClock.now >= deadline { unfinished.insert(stopID) }
         }
         if matchedJourneys.count > 512 {
             matchedJourneys = Dictionary(uniqueKeysWithValues: matchedJourneys.sorted {
@@ -179,6 +180,7 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
 
     func prepareSchedules(for stopIDs: [String], from: Date, through: Date, deadline: ContinuousClock.Instant) async -> PreparedSchedules {
         let started = ContinuousClock.now
+        guard ContinuousClock.now < deadline else { return .init(byStopID: [:], milliseconds: 0) }
         let feed = await store.feedInfo()
         let lastDay = feed.firstServiceDate.days(until: feed.lastServiceDate)
         var result: [String: [PreparedDeparture]] = [:]

@@ -325,11 +325,14 @@ public struct MobiliteitAPIClient: Sendable {
         let httpMilliseconds = Int(RoutingDiagnostics.elapsed(since: started))
         let decodeStarted = ContinuousClock.now
         do {
+            try Task.checkCancellation()
             let decoder = JSONDecoder()
             decoder.userInfo[.hafasResponseBytes] = data.count
             let value = try decoder.decode(Response.self, from: data)
+            try Task.checkCancellation()
             return (value, httpMilliseconds, Int(RoutingDiagnostics.elapsed(since: decodeStarted)))
-        } catch {
+        } catch is CancellationError { throw CancellationError() }
+        catch {
             throw MobiliteitAPIError.decoding(error.localizedDescription)
         }
     }

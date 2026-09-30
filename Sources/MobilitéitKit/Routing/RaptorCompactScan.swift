@@ -139,9 +139,19 @@ extension Raptor {
                 }
             }
         }
+        let compactLabels = Dictionary(uniqueKeysWithValues: next.indices.compactMap { stop in
+            next[stop].map { (stop, $0) }
+        })
+        return .init(chunkIndex: chunkIndex, labels: [:], scannedPatterns: patternIDs.count,
+            scannedTripInstances: scannedInstances, boardingChecks: boardingChecks, feasibleBoardings: feasibleBoardings,
+            alightingChecks: alightingChecks, labelAttempts: attempts, retainedLabels: retained,
+            rejectedBeforeAllocation: rejected, elapsedMilliseconds: Int(RoutingDiagnostics.elapsed(since: started)), compactLabels: compactLabels)
+    }
+
+    static func materialize(_ compactLabels: [Int: CompactProfile], boardings: BoardingIndex) -> [Int: LabelProfile] {
         var labels: [Int: LabelProfile] = [:]
-        for stop in next.indices {
-            guard let compact = next[stop] else { continue }
+        for stop in compactLabels.keys.sorted() {
+            let compact = compactLabels[stop]!
             var profile = LabelProfile()
             for slot in compact.ordered {
                 let key = compact.keys[slot]!, path = compact.paths[slot]!
@@ -162,10 +172,7 @@ extension Raptor {
             }
             labels[stop] = profile
         }
-        return .init(chunkIndex: chunkIndex, labels: labels, scannedPatterns: patternIDs.count,
-            scannedTripInstances: scannedInstances, boardingChecks: boardingChecks, feasibleBoardings: feasibleBoardings,
-            alightingChecks: alightingChecks, labelAttempts: attempts, retainedLabels: retained,
-            rejectedBeforeAllocation: rejected, elapsedMilliseconds: Int(RoutingDiagnostics.elapsed(since: started)))
+        return labels
     }
 
     @inline(__always) static func consider(_ key: ScanKey, profile: inout CompactProfile?,

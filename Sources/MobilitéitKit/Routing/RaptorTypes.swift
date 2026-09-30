@@ -193,6 +193,7 @@ enum Raptor {
         let retainedLabels: Int
         let rejectedBeforeAllocation: Int
         let elapsedMilliseconds: Int
+        var compactLabels: [Int: CompactProfile]? = nil
     }
     struct ActiveTripInstance: Sendable {
         let tripIndex: Int
