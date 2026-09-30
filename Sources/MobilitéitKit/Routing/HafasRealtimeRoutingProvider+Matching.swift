@@ -4,7 +4,8 @@ extension HafasRealtimeRoutingProvider {
     func uniqueCandidate(
         for live: HafasDeparture,
         planned: Date,
-        scheduled: [PreparedDeparture]
+        scheduled: [PreparedDeparture],
+        deadline: ContinuousClock.Instant
     ) async -> Candidate? {
         var candidates: [Candidate] = []
         let lowerBound = planned.addingTimeInterval(-90)
@@ -17,6 +18,7 @@ extension HafasRealtimeRoutingProvider {
             else { upper = middle }
         }
         for value in scheduled[lower...] {
+            guard !Task.isCancelled, ContinuousClock.now < deadline else { return nil }
             guard value.scheduledDate <= upperBound else { break }
             guard let lineScore = Self.lineScore(live.product, route: value.departure.route)
             else { continue }
@@ -29,7 +31,7 @@ extension HafasRealtimeRoutingProvider {
                     value.departure.headsign.map { Self.normalized(direction) == Self.normalized($0) }
                 } == true
                 let stopTimes = await cachedStopTimes(forTripID: value.departure.tripID)
-                let passlistMatches = align(live.passlist.values, to: stopTimes, serviceDate: value.serviceDate).count
+                let passlistMatches = align(live.passlist.values, to: stopTimes, serviceDate: value.serviceDate, deadline: deadline).count
                 guard directionMatches || passlistMatches >= 2 else { continue }
             }
 
@@ -41,7 +43,7 @@ extension HafasRealtimeRoutingProvider {
             }
             if !live.passlist.values.isEmpty {
                 let stopTimes = await cachedStopTimes(forTripID: value.departure.tripID)
-                score += min(4, align(live.passlist.values, to: stopTimes, serviceDate: value.serviceDate).count)
+                score += min(4, align(live.passlist.values, to: stopTimes, serviceDate: value.serviceDate, deadline: deadline).count)
             }
             candidates.append(.init(
                 departure: value.departure,

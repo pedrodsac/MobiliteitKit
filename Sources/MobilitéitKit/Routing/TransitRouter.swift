@@ -226,6 +226,7 @@ public struct RoutingMetrics: Hashable, Sendable {
     public var walkingRequests = 0; public var walkingCacheHits = 0
     public var walkingTransferPairs = 0
     public var hafasRequests = 0; public var hafasCacheHits = 0
+    public var realtimeHTTPMilliseconds = 0; public var realtimeDecodeMilliseconds = 0
     public var realtimeBoardFetchMilliseconds = 0
     public var realtimeScheduledPreparationMilliseconds = 0
     public var realtimeBoardMatchingMilliseconds = 0
@@ -615,6 +616,7 @@ public actor JourneyPlanningSession {
     private func generate(anchor: Date, searchHorizon: TimeInterval, forceRealtime: Bool = false) async throws -> [Journey] {
         let started = ContinuousClock.now
         diagnostics = RoutingDiagnostics()
+        let countersBefore = metrics
         let boardFetchBefore = metrics.realtimeBoardFetchMilliseconds
         let scheduleBefore = metrics.realtimeScheduledPreparationMilliseconds
         let matchingBefore = metrics.realtimeBoardMatchingMilliseconds
@@ -640,6 +642,8 @@ public actor JourneyPlanningSession {
         metrics.realtimePreparationMilliseconds += HafasRealtimeRoutingProvider.milliseconds(
             realtimeStarted.duration(to: .now))
         diagnostics.record(.realtime, since: realtimeStarted)
+        diagnostics.milliseconds[.http] = Double(metrics.realtimeHTTPMilliseconds - countersBefore.realtimeHTTPMilliseconds)
+        diagnostics.milliseconds[.decode] = Double(metrics.realtimeDecodeMilliseconds - countersBefore.realtimeDecodeMilliseconds)
         diagnostics.milliseconds[.boardFetch] = Double(metrics.realtimeBoardFetchMilliseconds - boardFetchBefore)
         diagnostics.milliseconds[.schedulePreparation] = Double(metrics.realtimeScheduledPreparationMilliseconds - scheduleBefore)
         diagnostics.milliseconds[.boardMatching] = Double(metrics.realtimeBoardMatchingMilliseconds - matchingBefore)
@@ -693,6 +697,15 @@ public actor JourneyPlanningSession {
             metrics.walkingRequests += after.requests - before.requests
             metrics.walkingCacheHits += after.hits - before.hits
         }
+        diagnostics.counters = [.networkRequests: metrics.hafasRequests - countersBefore.hafasRequests,
+            .boardCacheHits: metrics.hafasCacheHits - countersBefore.hafasCacheHits,
+            .responseBytes: metrics.realtimeResponseBytes - countersBefore.realtimeResponseBytes,
+            .walkingRequests: metrics.walkingRequests - countersBefore.walkingRequests,
+            .walkingCacheHits: metrics.walkingCacheHits - countersBefore.walkingCacheHits,
+            .boardsCovered: metrics.realtimeBoardsCovered, .incompleteBoards: metrics.realtimeIncompleteBoards,
+            .workers: metrics.raptorWorkerCount, .candidates: metrics.candidatesGenerated,
+            .retainedAlternatives: metrics.alternativesRetained]
+        diagnostics.rounds = searchResult.roundMetrics
         directWalking = direct
         metrics.profileGenerationMilliseconds = Int(RoutingDiagnostics.elapsed(since: started))
         diagnostics.totalMilliseconds = RoutingDiagnostics.elapsed(since: started)

@@ -278,14 +278,16 @@ public struct MobiliteitAPIClient: Sendable {
             .init(name: "passlist", value: request.includePasslist ? "1" : nil),
         ].filter { $0.value != nil }
         let requestURL = try url(path: "departureBoard", queryItems: items)
-        return try await Self.departureBoardCache.response(
+        return try await Self.departureBoardCache.measuredResponse(
             for: requestURL.absoluteString, refreshPolicy: refreshPolicy
         ) {
-            let response: HafasDepartureBoardEnvelope = try await fetch(requestURL: requestURL)
+            let measured: (value: HafasDepartureBoardEnvelope, http: Int, decode: Int) = try await fetchMeasured(requestURL: requestURL)
+            let response = measured.value
             guard response.departureBoard.errorCode == nil else {
                 throw MobiliteitAPIError.invalidRequest(response.departureBoard.errorText ?? "HAFAS rejected the board")
             }
-            return response.departureBoard
+            return .init(board: response.departureBoard, networkRequests: 1, cacheHits: 0,
+                         httpMilliseconds: measured.http, decodeMilliseconds: measured.decode)
         }
     }
 
@@ -308,6 +310,11 @@ public struct MobiliteitAPIClient: Sendable {
     }
 
     private func fetch<Response: Decodable>(requestURL: URL) async throws -> Response {
+        try await fetchMeasured(requestURL: requestURL).value as Response
+    }
+
+    private func fetchMeasured<Response: Decodable>(requestURL: URL) async throws -> (value: Response, http: Int, decode: Int) {
+        let started = ContinuousClock.now
         var request = URLRequest(url: requestURL)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         let (data, response) = try await session.data(for: request)
@@ -315,10 +322,13 @@ public struct MobiliteitAPIClient: Sendable {
         guard (200..<300).contains(http.statusCode) else {
             throw MobiliteitAPIError.httpStatus(http.statusCode, body: String(data: data.prefix(8_192), encoding: .utf8))
         }
+        let httpMilliseconds = Int(RoutingDiagnostics.elapsed(since: started))
+        let decodeStarted = ContinuousClock.now
         do {
             let decoder = JSONDecoder()
             decoder.userInfo[.hafasResponseBytes] = data.count
-            return try decoder.decode(Response.self, from: data)
+            let value = try decoder.decode(Response.self, from: data)
+            return (value, httpMilliseconds, Int(RoutingDiagnostics.elapsed(since: decodeStarted)))
         } catch {
             throw MobiliteitAPIError.decoding(error.localizedDescription)
         }

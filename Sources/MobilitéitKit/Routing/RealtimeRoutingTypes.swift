@@ -59,6 +59,8 @@ public struct RealtimePatchBatch: Hashable, Sendable {
     public let responseBytes: Int
     public let incompleteStopIDs: Set<String>
     public let fetchedAt: Date?
+    public var httpMilliseconds: Int = 0
+    public var decodeMilliseconds: Int = 0
     public init(
         patches: [RealtimeTripPatch],
         requestedStopIDs: Set<String>,
@@ -70,7 +72,7 @@ public struct RealtimePatchBatch: Hashable, Sendable {
         cacheHits: Int = 0,
         responseBytes: Int = 0,
         incompleteStopIDs: Set<String> = [],
-        fetchedAt: Date? = nil
+        fetchedAt: Date? = nil, httpMilliseconds: Int = 0, decodeMilliseconds: Int = 0
     ) {
         self.patches = patches
         self.requestedStopIDs = requestedStopIDs
@@ -83,6 +85,7 @@ public struct RealtimePatchBatch: Hashable, Sendable {
         self.responseBytes = responseBytes
         self.incompleteStopIDs = incompleteStopIDs
         self.fetchedAt = fetchedAt
+        self.httpMilliseconds = httpMilliseconds; self.decodeMilliseconds = decodeMilliseconds
     }
 }
 public protocol RealtimeRoutingProvider: Sendable {
@@ -105,15 +108,18 @@ public struct RealtimeRoutingRequest: Sendable {
     public let refreshPolicy: RealtimeRefreshPolicy
     public let maximumConcurrentRequests: Int
     public let timeout: Duration
+    public let deadline: ContinuousClock.Instant?
     public init(stopIDs: [String], from: Date, through: Date,
                 scheduledLookbackSeconds: Int = 7_200,
                 refreshPolicy: RealtimeRefreshPolicy = .useCache,
-                maximumConcurrentRequests: Int = 4, timeout: Duration = .seconds(4)) {
+                maximumConcurrentRequests: Int = 4, timeout: Duration = .seconds(4),
+                deadline: ContinuousClock.Instant? = nil) {
         self.stopIDs = stopIDs; self.from = from; self.through = through
         self.scheduledLookbackSeconds = max(0, scheduledLookbackSeconds)
         self.refreshPolicy = refreshPolicy
         self.maximumConcurrentRequests = max(1, maximumConcurrentRequests)
         self.timeout = timeout
+        self.deadline = deadline
     }
 }
 

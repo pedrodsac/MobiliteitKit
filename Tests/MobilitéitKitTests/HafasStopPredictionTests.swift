@@ -22,7 +22,7 @@ import Testing
         let url = try #require(RealtimeBoardProtocol.requests(host).first?.url)
         let params = URLComponents(url: url, resolvingAgainstBaseURL: false)!.queryItems!
         #expect(params.first { $0.name == "rtMode" }?.value == "SERVER_DEFAULT")
-        #expect(params.first { $0.name == "time" }?.value == "08:05:00")
+        #expect(params.first { $0.name == "time" }?.value == "08:00:00")
         #expect(params.first { $0.name == "passlist" }?.value == "1")
         let router = try await TransitRouter(databaseURL: fixture.database, realtimeProvider: provider)
         let session = try await router.makeSession(for: .init(origin: .stop(id: "a"), destination: .stop(id: "c"),

@@ -16,7 +16,7 @@ extension JourneyPlanningSession {
             return cachedRealtimeBatch.patches
         }
         let started = ContinuousClock.now
-        let deadline = started.advanced(by: .seconds(4))
+        let deadline = started.advanced(by: .milliseconds(max(0, configuration.acquisitionBudgetMilliseconds)))
         var queried: Set<String> = []
         var covered: Set<String> = []
         var incomplete: Set<String> = []
@@ -39,10 +39,12 @@ extension JourneyPlanningSession {
                     scheduledLookbackSeconds: configuration.scheduledLookbackSeconds,
                     refreshPolicy: force ? .forceRefresh : requestedRefresh,
                     maximumConcurrentRequests: min(4, configuration.maximumConcurrentBoardRequests),
-                    timeout: ContinuousClock.now.duration(to: deadline)))
+                    timeout: ContinuousClock.now.duration(to: deadline), deadline: deadline))
                 covered.formUnion(batch.coveredStopIDs)
                 incomplete.formUnion(batch.incompleteStopIDs)
                 if let date = batch.fetchedAt { fetchedAt = min(fetchedAt ?? date, date) }
+                metrics.realtimeHTTPMilliseconds += batch.httpMilliseconds
+                metrics.realtimeDecodeMilliseconds += batch.decodeMilliseconds
                 metrics.hafasRequests += batch.networkRequests
                 metrics.hafasCacheHits += batch.cacheHits
                 metrics.realtimeResponseBytes += batch.responseBytes

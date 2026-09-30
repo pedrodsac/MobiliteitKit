@@ -4,11 +4,12 @@ extension HafasRealtimeRoutingProvider {
     /// Route indices are HAFAS occurrences, not GTFS sequences. Match by ordered
     /// identity + scheduled instant, using the GTFS service date after midnight.
     func align(_ live: [HafasPasslistStop], to scheduled: [TripStopTime],
-               serviceDate: GTFSDate) -> [Int: HafasPasslistStop] {
+               serviceDate: GTFSDate, deadline: ContinuousClock.Instant? = nil) -> [Int: HafasPasslistStop] {
         var result: [Int: HafasPasslistStop] = [:]
         var start = 0
         var previousRouteIndex: Int?
         for stop in live {
+            if Task.isCancelled || deadline.map({ ContinuousClock.now >= $0 }) == true { return [:] }
             if let index = stop.routeIndex, let previousRouteIndex, index <= previousRouteIndex { continue }
             guard start < scheduled.count,
                   let position = scheduled[start...].firstIndex(where: {
@@ -47,10 +48,10 @@ extension HafasRealtimeRoutingProvider {
     }
 
     func patch(for live: HafasDeparture, candidate: Candidate,
-               boardingStopID: String, observedAt: Date) async -> RealtimeTripPatch? {
+               boardingStopID: String, observedAt: Date, deadline: ContinuousClock.Instant? = nil) async -> RealtimeTripPatch? {
         let stopTimes = await cachedStopTimes(forTripID: candidate.departure.tripID)
         guard !stopTimes.isEmpty else { return nil }
-        let aligned = align(live.passlist.values, to: stopTimes, serviceDate: candidate.serviceDate)
+        let aligned = align(live.passlist.values, to: stopTimes, serviceDate: candidate.serviceDate, deadline: deadline)
         let boarding = stopTimes.indices.min { left, right in
             func distance(_ position: Int) -> TimeInterval {
                 let value = stopTimes[position]
@@ -68,6 +69,7 @@ extension HafasRealtimeRoutingProvider {
         var precedingDelay: (seconds: TimeInterval, scheduled: Date)?
         var events: [RealtimeStopEventPatch] = []
         for position in stopTimes.indices {
+            if Task.isCancelled || deadline.map({ ContinuousClock.now >= $0 }) == true { return nil }
             let value = stopTimes[position]
             let pass = aligned[position]
             let arrival = value.arrival.map { Self.serviceDate(candidate.serviceDate, time: $0) }

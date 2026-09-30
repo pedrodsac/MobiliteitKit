@@ -74,6 +74,13 @@ extension Raptor {
         var lastUnprotected: Int?
         var lastPreferred: Int?
 
+        init() {
+            ordered.reserveCapacity(profileWidth + 1)
+            byArrival.reserveCapacity(profileWidth + 1)
+            byWalk.reserveCapacity(profileWidth + 1)
+            byIncomingTrip.reserveCapacity(profileWidth + 1)
+        }
+
         @inline(__always) func isDominated(_ candidate: ScanKey) -> Bool {
             var peers = byIncomingTrip[candidate.incomingTrip, default: 0]
             while peers != 0 {
@@ -132,7 +139,8 @@ extension Raptor {
 
         mutating func remove(_ slot: Int) {
             let trip = keys[slot]!.incomingTrip
-            byIncomingTrip[trip, default: 0] &= ~(1 << slot)
+            let remaining = byIncomingTrip[trip, default: 0] & ~(1 << slot)
+            byIncomingTrip[trip] = remaining == 0 ? nil : remaining
             ordered.remove(at: ordered.firstIndex(of: slot)!)
             byArrival.remove(at: byArrival.firstIndex(of: slot)!)
             byWalk.remove(at: byWalk.firstIndex(of: slot)!)

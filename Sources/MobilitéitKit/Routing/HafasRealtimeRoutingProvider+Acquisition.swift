@@ -6,64 +6,91 @@ extension HafasRealtimeRoutingProvider {
         case deadline
     }
 
-    func boards(for stopIDs: [String], request: RealtimeRoutingRequest) async -> [String: BoardResult] {
-        var result: [String: BoardResult] = [:]
-        var pending: [String] = []
+    func boards(for stopIDs: [String], request: RealtimeRoutingRequest,
+                deadline: ContinuousClock.Instant) async -> [String: BoardResult] {
+        // Stable UTC boundaries are independent of the rider's moving clock,
+        // including the repeated autumn hour. Cache only proven complete coverage.
+        let width: TimeInterval = 30 * 60
+        let first = Date(timeIntervalSince1970: floor(request.from.timeIntervalSince1970 / width) * width)
+        var intervals: [(Date, Date)] = []
+        var cursor = first
+        repeat {
+            intervals.append((cursor, cursor.addingTimeInterval(width)))
+            cursor = cursor.addingTimeInterval(width)
+        } while cursor < request.through && intervals.count < 8
+        var seeds: [String: [CompletedSlice]] = [:]
+        var missing: [String: [(Date, Date)]] = [:]
         for stopID in stopIDs {
-            if request.refreshPolicy == .useCache, let cached = boardsByStopID[stopID],
-               now().timeIntervalSince(cached.fetchedAt) < cacheLifetime,
-               cached.from <= request.from, cached.through >= request.through,
-               !cached.result.incomplete {
-                result[stopID] = .init(stopID: stopID, board: cached.result.board,
-                                       fetchedAt: cached.fetchedAt, incomplete: false,
-                                       requests: 0, hits: 1, bytes: 0)
-            } else { pending.append(stopID) }
-        }
-        let fetched = await Self.fetchResults(
-            stopIDs: pending,
-            maximumConcurrentRequests: min(maximumConcurrentBoardRequests, request.maximumConcurrentRequests),
-            timeout: min(requestTimeout, request.timeout)
-        ) { [client, now] stopID in
-            await Self.acquireStop(client: client, stopID: stopID, request: request, now: now)
-        }
-        for (stopID, value) in fetched {
-            result[stopID] = value
-            // An older request may finish after an explicit refresh. Preserve
-            // the newer interval rather than allowing that completion to win.
-            if value.fetchedAt >= (boardsByStopID[stopID]?.fetchedAt ?? .distantPast) {
-                if value.board != nil, !value.incomplete {
-                    boardsByStopID[stopID] = .init(fetchedAt: value.fetchedAt, from: request.from,
-                                                  through: request.through, result: value)
-                } else { boardsByStopID[stopID] = nil }
+            let cached = request.refreshPolicy == .useCache ? boardsBySlice.values.filter {
+                $0.result.stopID == stopID && now().timeIntervalSince($0.fetchedAt) < cacheLifetime
+            }.sorted { $0.from < $1.from } : []
+            for (from, through) in intervals {
+                var position = from
+                for slice in cached where slice.through > from && slice.from < through {
+                    if slice.from > position { missing[stopID, default: []].append((position, min(slice.from, through))) }
+                    guard let board = slice.result.board else { continue }
+                    seeds[stopID, default: []].append(.init(from: slice.from, through: slice.through,
+                                                          board: board, fetchedAt: slice.fetchedAt))
+                    position = max(position, slice.through)
+                    if position >= through { break }
+                }
+                if position < through { missing[stopID, default: []].append((position, through)) }
             }
         }
-        if boardsByStopID.count > 128 {
-            boardsByStopID = Dictionary(uniqueKeysWithValues: boardsByStopID.sorted {
-                $0.value.fetchedAt > $1.value.fetchedAt
-            }.prefix(128).map { ($0.key, $0.value) })
+        let missingSnapshot = missing
+        let seedSnapshot = seeds
+        let omittedCoverage = cursor < request.through
+        let fetched = await Self.fetchResults(
+            stopIDs: stopIDs,
+            maximumConcurrentRequests: min(maximumConcurrentBoardRequests, request.maximumConcurrentRequests),
+            timeout: max(.zero, ContinuousClock.now.duration(to: deadline))
+        ) { [client, now] stopID in
+            await Self.acquireStop(client: client, stopID: stopID, request: request, now: now,
+                                   intervals: missingSnapshot[stopID] ?? [],
+                                   cached: seedSnapshot[stopID] ?? [],
+                                   omittedCoverage: omittedCoverage)
         }
-        return result
+        for value in fetched.values {
+            for slice in value.completedSlices {
+                let key = BoardSliceKey(stopID: value.stopID, start: slice.from)
+                if slice.fetchedAt >= (boardsBySlice[key]?.fetchedAt ?? .distantPast) {
+                    boardsBySlice[key] = .init(fetchedAt: slice.fetchedAt, from: slice.from, through: slice.through,
+                        result: .init(stopID: value.stopID, board: slice.board, fetchedAt: slice.fetchedAt,
+                                      incomplete: false, requests: 0, hits: 0, bytes: 0))
+                }
+            }
+        }
+        if boardsBySlice.count > 512 {
+            boardsBySlice = Dictionary(uniqueKeysWithValues: boardsBySlice.sorted {
+                $0.value.fetchedAt > $1.value.fetchedAt
+            }.prefix(512).map { ($0.key, $0.value) })
+        }
+        return fetched
     }
 
     /// Small intervals avoid filling a bounded board with historical departures.
     /// A full interval is split rather than being mistaken for complete coverage.
     private nonisolated static func acquireStop(
         client: MobiliteitAPIClient, stopID: String, request: RealtimeRoutingRequest,
-        now: @escaping @Sendable () -> Date
+        now: @escaping @Sendable () -> Date,
+        intervals initialIntervals: [(Date, Date)], cached: [CompletedSlice], omittedCoverage: Bool
     ) async -> BoardResult {
         let maximumJourneys = 50
         let maximumSlices = 8
-        var intervals: [(Date, Date)] = []
-        var start = request.from
-        repeat {
-            let end = min(request.through, start.addingTimeInterval(30 * 60))
-            intervals.append((start, end)); start = end
-        } while start < request.through && intervals.count < maximumSlices
-        var incomplete = start < request.through
+        var intervals = initialIntervals
+        var incomplete = omittedCoverage
+        var completedSlices: [CompletedSlice] = []
         var departures: [String: HafasDeparture] = [:]
         var requests = 0; var hits = 0; var bytes = 0; var slices = 0
-        var successful = false
-        var fetchedAt = now()
+        var httpMilliseconds = 0; var decodeMilliseconds = 0
+        var successful = !cached.isEmpty
+        var fetchedAt = cached.map(\.fetchedAt).min() ?? now()
+        for slice in cached {
+            hits += 1
+            for departure in slice.board.departures.values {
+                departures[departureKey(departure)] = departure
+            }
+        }
         while !intervals.isEmpty, !Task.isCancelled, slices < maximumSlices {
             let (from, through) = intervals.removeFirst()
             let (date, time) = requestDateAndTime(from)
@@ -76,12 +103,12 @@ extension HafasRealtimeRoutingProvider {
                     includePasslist: true
                 ), refreshPolicy: request.refreshPolicy)
                 successful = true
+                httpMilliseconds += response.httpMilliseconds; decodeMilliseconds += response.decodeMilliseconds
                 requests += response.networkRequests; hits += response.cacheHits
                 if response.networkRequests > 0 { bytes += response.board.responseBytes }
                 fetchedAt = min(fetchedAt, now())
                 for departure in response.board.departures.values {
-                    let key = [departure.journeyReference?.reference, departure.stopExternalID,
-                               departure.plannedDate, departure.plannedTime].compactMap { $0 }.joined(separator: "|")
+                    let key = departureKey(departure)
                     departures[key] = departure
                 }
                 if response.board.departures.values.count >= maximumJourneys {
@@ -89,6 +116,8 @@ extension HafasRealtimeRoutingProvider {
                         let midpoint = from.addingTimeInterval(floor(through.timeIntervalSince(from) / 120) * 60)
                         intervals.insert(contentsOf: [(from, midpoint), (midpoint, through)], at: 0)
                     } else { incomplete = true }
+                } else {
+                    completedSlices.append(.init(from: from, through: through, board: response.board, fetchedAt: now()))
                 }
             } catch {
                 requests += 1
@@ -100,7 +129,12 @@ extension HafasRealtimeRoutingProvider {
         return .init(stopID: stopID,
                      board: successful ? .init(departures: Array(departures.values)) : nil,
                      fetchedAt: fetchedAt, incomplete: incomplete,
-                     requests: requests, hits: hits, bytes: bytes)
+                     requests: requests, hits: hits, bytes: bytes, httpMilliseconds: httpMilliseconds, decodeMilliseconds: decodeMilliseconds, completedSlices: completedSlices)
+    }
+
+    private nonisolated static func departureKey(_ departure: HafasDeparture) -> String {
+        [departure.journeyReference?.reference, departure.stopExternalID,
+         departure.plannedDate, departure.plannedTime].compactMap { $0 }.joined(separator: "|")
     }
 
     private nonisolated static func fetchResults(
