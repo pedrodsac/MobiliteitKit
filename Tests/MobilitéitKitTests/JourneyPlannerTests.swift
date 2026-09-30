@@ -87,6 +87,21 @@ struct JourneyPlannerTests {
         #expect(ride.polyline.count == 3)
     }
 
+    @Test func summariesPreserveContinuationTransferSemantics() async throws {
+        let fixture = try await PlannerFixture()
+        defer { fixture.remove() }
+        let session = try await JourneyPlanner().makePlanningSession(databaseURL: fixture.database, request: fixture.request)
+        let result = try await session.calculate(refresh: .scheduleOnly)
+        let journey = try #require(result.journeys.first)
+        guard case let .transit(t) = journey.legs[0] else { return }
+        let continuation = JourneyLeg.inSeatContinuation(.init(fromTripID: t.tripID, toTripID: "continued"))
+        let continued = journey.replacing(legs: [journey.legs[0], continuation, journey.legs[0]])
+        #expect(continued.summary.transferCount == 0)
+        #expect(continued.summary.transferGaps.isEmpty)
+        #expect(continued.summary.firstBoarding == t.effectiveDeparture)
+        #expect(continued.statusEvidence.tightTransfer == false)
+    }
+
     @Test func invalidRefinementCannotReplaceTransit() async throws {
         let fixture = try await PlannerFixture()
         defer { fixture.remove() }

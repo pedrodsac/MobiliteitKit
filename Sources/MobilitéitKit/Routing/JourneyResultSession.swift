@@ -160,7 +160,7 @@ public actor JourneyResultSession {
     }
 
     private func resolved(_ page: JourneyPlanningPage) -> JourneyPlanningPage {
-        let transit = journeys.filter { $0.legs.contains { if case .transit = $0 { true } else { false } } }
+        let transit = snapshot().journeys.filter { $0.legs.contains { if case .transit = $0 { true } else { false } } }
             .sorted { ($0.effectiveDeparture, $0.id) < ($1.effectiveDeparture, $1.id) }
         switch page {
         case .earlier:
