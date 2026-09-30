@@ -36,8 +36,10 @@ public actor JourneyPlanner {
 
     public func makePlanningSession(databaseURL: URL, request: JourneyPlanningRequest,
                                     now: Date = .now) async throws -> JourneyResultSession {
+        let started = ContinuousClock.now
         let router = try await router(for: databaseURL)
-        return try JourneyResultSession(router: router, databaseURL: databaseURL, request: request, now: now)
+        return try JourneyResultSession(router: router, databaseURL: databaseURL, request: request, now: now,
+            preparationMilliseconds: RoutingDiagnostics.elapsed(since: started))
     }
 
     public func router(for databaseURL: URL) async throws -> TransitRouter {

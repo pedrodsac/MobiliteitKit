@@ -13,9 +13,9 @@ public enum JourneyPlanningPage: Hashable, Sendable {
     case before(Date, JourneySignature?, Int)
     case after(Date, JourneySignature?, Int)
 
-    public func realtimePolicy(_ refresh: JourneyRefreshPolicy) -> RealtimePolicy {
+    public func realtimePolicy(_ refresh: JourneyRefreshPolicy, acquisitionBudgetMilliseconds: Int = 4_000) -> RealtimePolicy {
         let later: Bool = switch self { case .later, .after: true; default: false }
-        let configuration = RealtimeConfiguration(scheduledLookbackSeconds: later ? 600 : 1_200)
+        let configuration = RealtimeConfiguration(scheduledLookbackSeconds: later ? 600 : 1_200, acquisitionBudgetMilliseconds: acquisitionBudgetMilliseconds)
         return switch refresh {
         case .scheduleOnly: .disabled
         case .useCache: .bestEffort(configuration: configuration, refresh: .useCache)
@@ -29,10 +29,13 @@ public struct JourneyPlanningRequest: Hashable, Sendable {
     public var destination: JourneyEndpoint
     public var time: JourneyPlanningTime
     public var preferences: RoutingPreferences
+    public var realtimeAcquisitionBudgetMilliseconds: Int
     public init(origin: JourneyEndpoint, destination: JourneyEndpoint,
-                time: JourneyPlanningTime = .now, preferences: RoutingPreferences = .init()) {
+                time: JourneyPlanningTime = .now, preferences: RoutingPreferences = .init(),
+                realtimeAcquisitionBudgetMilliseconds: Int = 4_000) {
         self.origin = origin; self.destination = destination
         self.time = time; self.preferences = preferences
+        self.realtimeAcquisitionBudgetMilliseconds = max(0, realtimeAcquisitionBudgetMilliseconds)
     }
 }
 
@@ -123,6 +126,7 @@ public struct JourneyPlanningResult: Sendable {
     public let hasLater: Bool
     public let revision: UInt64
     public let metrics: RoutingMetrics
+    public var diagnostics = RoutingDiagnostics()
     public let validationContext: JourneyValidationContext
 }
 

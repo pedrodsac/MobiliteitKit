@@ -15,12 +15,15 @@ public actor JourneyResultSession {
     private var hasEarlier = true
     private var hasLater = true
     private var metrics = RoutingMetrics()
+    private var diagnostics = RoutingDiagnostics()
+    private var preparationMilliseconds: Double
     private var didReplan = false
     private var replacementSearches = 0
 
     public var replacementSearchCount: Int { replacementSearches }
 
-    init(router: TransitRouter, databaseURL: URL, request: JourneyPlanningRequest, now: Date) throws {
+    init(router: TransitRouter, databaseURL: URL, request: JourneyPlanningRequest, now: Date, preparationMilliseconds: Double = 0) throws {
+        self.preparationMilliseconds = preparationMilliseconds
         self.router = router; self.store = try GTFSStore(databaseAt: databaseURL)
         self.request = request
         self.anchor = switch request.time {
@@ -40,6 +43,7 @@ public actor JourneyResultSession {
 
     public func calculate(page: JourneyPlanningPage = .initial,
                           refresh: JourneyRefreshPolicy = .useCache) async throws -> JourneyPlanningResult {
+        let operationStarted = ContinuousClock.now
         operation &+= 1
         let currentOperation = operation
         let effectivePage = resolved(page)
@@ -61,10 +65,16 @@ public actor JourneyResultSession {
                 : try await session.initial(count: 5, searchHorizon: 3 * 60 * 60)
         }
         try Task.checkCancellation()
+        let geometryStarted = ContinuousClock.now
         let enriched = await JourneyGeometry.enrich(raw.journeys, store: store)
         try Task.checkCancellation()
         guard operation == currentOperation else { throw JourneyPlanningError.supersededRequest }
         metrics = raw.metrics
+        diagnostics = raw.diagnostics
+        diagnostics.milliseconds[.snapshotPreparation] = preparationMilliseconds
+        preparationMilliseconds = 0
+        diagnostics.record(.geometry, since: geometryStarted)
+        let assemblyStarted = ContinuousClock.now
         for journey in enriched where journey.hasCancelledTransitLeg {
             invalidated.insert(journey.id)
         }
@@ -79,6 +89,9 @@ public actor JourneyResultSession {
             hasLater = hasEarlier
         }
         revision &+= 1
+        diagnostics.record(.resultAssembly, since: assemblyStarted)
+        diagnostics.totalMilliseconds = RoutingDiagnostics.elapsed(since: operationStarted)
+            + (diagnostics.milliseconds[.snapshotPreparation] ?? 0)
         let result = snapshot()
         if page == .initial && result.journeys.isEmpty { throw JourneyPlanningError.noRouteFound }
         return result
@@ -188,7 +201,7 @@ public actor JourneyResultSession {
         }
         return .init(origin: request.origin, destination: request.destination,
                      departureTime: searchAnchor, direction: direction, preferences: request.preferences,
-                     realtimePolicy: page.realtimePolicy(refresh))
+                     realtimePolicy: page.realtimePolicy(refresh, acquisitionBudgetMilliseconds: request.realtimeAcquisitionBudgetMilliseconds))
     }
     private func merge(_ incoming: [Journey], validationAnchor: Date? = nil) {
         var values = Dictionary(journeys.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
@@ -237,6 +250,6 @@ public actor JourneyResultSession {
                 ($0.id, JourneyItineraryValidator.transferRisks($0, context: contexts[$0.id] ?? context))
             }), refinementTokens: tokens,
             hasEarlier: hasEarlier, hasLater: hasLater, revision: revision, metrics: metrics,
-            validationContext: context)
+            diagnostics: diagnostics, validationContext: context)
     }
 }
