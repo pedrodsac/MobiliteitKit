@@ -192,9 +192,10 @@ extension Raptor {
     @inline(__always) static func consider(_ key: ScanKey, profile: inout CompactProfile?,
         nextID: inout Int, attempts: inout Int, rejected: inout Int, path: () -> ScanPath) -> Bool {
         if profile == nil { profile = CompactProfile() }
-        if profile!.isDominated(key) { return false }
+        let peers = profile!.byIncomingTrip[key.incomingTrip, default: 0]
+        if profile!.isDominated(key, peers: peers) { return false }
         nextID += 1; attempts += 1
-        if profile!.cannotEnter(key) { rejected += 1; return false }
+        if profile!.cannotEnter(key, peers: peers) { rejected += 1; return false }
         return profile!.insert(key, path: path())
     }
 }

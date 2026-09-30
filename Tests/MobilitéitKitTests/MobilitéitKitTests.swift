@@ -277,7 +277,7 @@ import ZIPFoundation
     for run in 1...2 {
         let session = try await router.makeSession(for: query)
         let page = try await session.initial(count: 5, searchHorizon: 3 * 60 * 60)
-        print("Full-feed run \(run): profile=\(page.metrics.profileGenerationMilliseconds)ms endpoint=\(page.metrics.endpointPreparationMilliseconds)ms RAPTOR=\(page.metrics.raptorSearchMilliseconds)ms CPU=\(page.metrics.raptorCPUMilliseconds)ms walks=\(page.metrics.walkingTransferMilliseconds)ms pairs=\(page.metrics.walkingTransferPairs) requests=\(page.metrics.walkingRequests) hits=\(page.metrics.walkingCacheHits) journeys=\(page.journeys.map(\.id.value))")
+        print("Full-feed run \(run): profile=\(page.metrics.profileGenerationMilliseconds)ms endpoint=\(page.metrics.endpointPreparationMilliseconds)ms RAPTOR=\(page.metrics.raptorSearchMilliseconds)ms nonWalkingElapsed=\(page.metrics.raptorNonWalkingMilliseconds)ms walks=\(page.metrics.walkingTransferMilliseconds)ms pairs=\(page.metrics.walkingTransferPairs) requests=\(page.metrics.walkingRequests) hits=\(page.metrics.walkingCacheHits) journeys=\(page.journeys.map(\.id.value))")
         #expect(!page.journeys.isEmpty)
     }
 }

@@ -203,7 +203,9 @@ extension Raptor {
                             var key = profile.keys[slot]!
                             key.id = nextLabelID; nextLabelID += 1
                             if mergedCompact[stop] == nil { mergedCompact[stop] = CompactProfile() }
-                            if !mergedCompact[stop]!.isDominated(key), !mergedCompact[stop]!.cannotEnter(key) {
+                            let peers = mergedCompact[stop]!.byIncomingTrip[key.incomingTrip, default: 0]
+                            if !mergedCompact[stop]!.isDominated(key, peers: peers),
+                               !mergedCompact[stop]!.cannotEnter(key, peers: peers) {
                                 _ = mergedCompact[stop]!.insert(key, path: profile.paths[slot]!)
                             }
                         }

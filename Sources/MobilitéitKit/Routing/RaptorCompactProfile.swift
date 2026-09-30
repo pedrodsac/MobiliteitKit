@@ -81,8 +81,8 @@ extension Raptor {
             byIncomingTrip.reserveCapacity(profileWidth + 1)
         }
 
-        @inline(__always) func isDominated(_ candidate: ScanKey) -> Bool {
-            var peers = byIncomingTrip[candidate.incomingTrip, default: 0]
+        @inline(__always) func isDominated(_ candidate: ScanKey, peers suppliedPeers: UInt64? = nil) -> Bool {
+            var peers = suppliedPeers ?? byIncomingTrip[candidate.incomingTrip, default: 0]
             while peers != 0 {
                 let index = peers.trailingZeroBitCount
                 peers &= peers - 1
@@ -93,7 +93,7 @@ extension Raptor {
 
         /// Identical quota rejection to the reference profile. Never reject a
         /// candidate that could first remove one of its dominated peers.
-        @inline(__always) func cannotEnter(_ candidate: ScanKey) -> Bool {
+        @inline(__always) func cannotEnter(_ candidate: ScanKey, peers suppliedPeers: UInt64? = nil) -> Bool {
             guard ordered.count == profileWidth, let lastUnprotected else { return false }
             let quota = profileWidth / 5
             guard keys[lastUnprotected]!.arrivesBefore(candidate),
@@ -102,7 +102,7 @@ extension Raptor {
                   keys[byWalk[quota - 1]]!.walksBefore(candidate),
                   !candidate.preferred || lastPreferred.map({ keys[$0]!.arrivesBefore(candidate) }) == true
             else { return false }
-            var peers = byIncomingTrip[candidate.incomingTrip, default: 0]
+            var peers = suppliedPeers ?? byIncomingTrip[candidate.incomingTrip, default: 0]
             while peers != 0 {
                 let index = peers.trailingZeroBitCount
                 peers &= peers - 1
