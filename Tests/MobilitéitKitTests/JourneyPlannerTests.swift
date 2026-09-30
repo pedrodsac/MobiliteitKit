@@ -5,6 +5,13 @@ import ZIPFoundation
 
 @Suite("Public journey planner")
 struct JourneyPlannerTests {
+    @Test func missingFeedIsTypedAndRecoverable() async {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        await #expect(throws: JourneyPlannerError.noInstalledFeed) {
+            try await JourneyPlanner().router(for: url)
+        }
+    }
+
     @Test func initialPagingAndEmptyPages() async throws {
         let fixture = try await PlannerFixture()
         defer { fixture.remove() }
@@ -60,6 +67,41 @@ struct JourneyPlannerTests {
                     ride.alight.stop.coordinate, ride.board.stop.coordinate]
         #expect(JourneyGeometry.segment(of: loop, from: ride.board.stop.coordinate,
                                         to: ride.alight.stop.coordinate).count == 3)
+    }
+
+    @Test func frequencyGeometryUsesBaseTripShape() async throws {
+        let fixture = try await PlannerFixture()
+        defer { fixture.remove() }
+        let session = try await JourneyPlanner().makePlanningSession(databaseURL: fixture.database, request: fixture.request)
+        let result = try await session.calculate(refresh: .scheduleOnly)
+        let journey = try #require(result.journeys.first)
+        guard case let .transit(t) = journey.legs[0] else { return }
+        let frequency = TransitLeg(tripID: t.tripID + "#frequency-480", route: t.route,
+            headsign: t.headsign, board: t.board, alight: t.alight, intermediateStops: t.intermediateStops,
+            scheduledDeparture: t.scheduledDeparture, scheduledArrival: t.scheduledArrival,
+            effectiveDeparture: t.effectiveDeparture, effectiveArrival: t.effectiveArrival,
+            status: t.status, requiredTransferSecondsAfterWalking: t.requiredTransferSecondsAfterWalking)
+        let enriched = await JourneyGeometry.enrich([journey.replacing(legs: [.transit(frequency)])],
+                                                    store: try GTFSStore(databaseAt: fixture.database))
+        guard case let .transit(ride)? = enriched.first?.legs.first else { return }
+        #expect(ride.polyline.count == 3)
+    }
+
+    @Test func invalidRefinementCannotReplaceTransit() async throws {
+        let fixture = try await PlannerFixture()
+        defer { fixture.remove() }
+        let session = try await JourneyPlanner().makePlanningSession(databaseURL: fixture.database, request: fixture.request)
+        let initial = try await session.calculate(refresh: .scheduleOnly)
+        let journey = try #require(initial.journeys.first)
+        let token = try #require(initial.refinementTokens[journey.id])
+        let update = JourneyWalkingRefinement(token: token, range: 0..<1,
+            route: .init(durationSeconds: 60, distanceMeters: 60),
+            departure: fixture.anchor, arrival: fixture.anchor.addingTimeInterval(60))
+        await #expect(throws: JourneyPlanningError.invalidRefinement) {
+            try await session.submitWalkingRefinement(update)
+        }
+        let untouched = await session.result()
+        #expect(untouched.journeys == initial.journeys)
     }
 
     @Test func independentRefinementsAndStaleTokens() async throws {

@@ -41,7 +41,9 @@ public actor JourneyPlanner {
     }
 
     public func router(for databaseURL: URL) async throws -> TransitRouter {
-        let fingerprint = fingerprint(for: databaseURL)
+        guard let fingerprint = fingerprint(for: databaseURL) else {
+            throw JourneyPlannerError.noInstalledFeed
+        }
         if fingerprint == routerFingerprint, let router {
             return router
         }
