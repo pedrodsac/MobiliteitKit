@@ -28,6 +28,11 @@ extension JourneyPlanningSession {
                                            uniquingKeysWith: min)
         let omittedAccess = access.count > frontier.count
         let limitedHorizon = searchHorizon > through.timeIntervalSince(from)
+        // Reserve the bounded board budget for trips that can still lead to the
+        // destination. Earliest intermediate stops alone starve later lines.
+        let maxRides = min(8, max(1, (query.preferences.maxTransfers ?? 7) + 1))
+        let reachability = Raptor.DestinationReachability(snapshot: snapshot,
+            egressStops: Set(egress.map(\.stop)), maxRides: maxRides + 1)
         for _ in 0..<min(4, max(1, configuration.maximumRefinementWaves)) {
             try Task.checkCancellation()
             guard !frontier.isEmpty, ContinuousClock.now < deadline, queried.count < 24 else { break }
@@ -60,7 +65,7 @@ extension JourneyPlanningSession {
             let discoveryStarted = ContinuousClock.now
             frontier = realtimeFrontier(arrivalByStop: &discoveryArrivals, egress: egress, from: from, through: through,
                                          lookback: configuration.scheduledLookbackSeconds,
-                                         deadline: deadline, patches: patches, excluding: queried)
+                                         deadline: deadline, patches: patches, excluding: queried, reachability: reachability)
             diagnostics.record(.realtimeDiscovery, since: discoveryStarted)
         }
         metrics.realtimeFrontierSize = queried.count
@@ -91,7 +96,7 @@ extension JourneyPlanningSession {
     private func realtimeFrontier(arrivalByStop: inout [Int: Date], egress: [Edge], from: Date, through: Date,
                                   lookback: Int, deadline: ContinuousClock.Instant,
                                   patches: [RealtimePatchKey: RealtimeTripPatch],
-                                  excluding: Set<String>) -> [String] {
+                                  excluding: Set<String>, reachability: Raptor.DestinationReachability) -> [String] {
         let serviceDays = snapshot.serviceDays.filter {
             $0.start <= through && $0.start.addingTimeInterval(Double(snapshot.info.maximumServiceTime.rawValue))
                 >= from.addingTimeInterval(-Double(lookback))
@@ -138,6 +143,10 @@ extension JourneyPlanningSession {
         }
         arrivalByStop = improved
         guard !Task.isCancelled, ContinuousClock.now < deadline else { return [] }
+        let reachableAfterBoarding = reachability.stopsByRemainingRides[reachability.stopsByRemainingRides.count - 2]
+        let remainingRides = snapshot.stops.indices.map { stop in
+            reachability.stopsByRemainingRides.firstIndex { $0[stop] } ?? Int.max
+        }
         let target = egress.first.map { snapshot.stops[$0.stop].model.coordinate }
         return arrivalByStop.keys.filter { stop in
             !excluding.contains(snapshot.stops[stop].id) && snapshot.boardableStops.contains(stop)
@@ -148,14 +157,21 @@ extension JourneyPlanningSession {
                     return serviceDays.contains { day in
                         guard day.activeServices.contains(trip.service),
                               patches[.init(tripID: trip.id, serviceDate: day.date)] == nil else { return false }
-                        return trip.times.contains { time in
+                        return trip.times.indices.contains { position in
+                            let time = trip.times[position]
                             guard time.stop == stop, time.pickup == 0, let departure = time.departure else { return false }
                             let date = day.start.addingTimeInterval(Double(departure))
                             return date >= arrivalByStop[stop]!.addingTimeInterval(-Double(lookback)) && date <= through
+                                && trip.times.dropFirst(position + 1).contains {
+                                    $0.dropoff == 0 && reachableAfterBoarding[$0.stop]
+                                }
                         }
                     }
                 }
         }.sorted { left, right in
+            if remainingRides[left] != remainingRides[right] {
+                return remainingRides[left] < remainingRides[right]
+            }
             let a = arrivalByStop[left]!; let b = arrivalByStop[right]!
             if a != b { return a < b }
             if let target {
