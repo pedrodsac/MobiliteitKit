@@ -717,7 +717,7 @@ public actor JourneyPlanningSession {
                 transferRepresentatives.append(journey)
             }
         }
-        let journeys = strictEnvelope(transferRepresentatives).sorted(by: journeyOrder).map(\.journey)
+        let journeys = strictEnvelope(transferRepresentatives, preferences: query.preferences).sorted(by: journeyOrder).map(\.journey)
         metrics.alternativesRetained = journeys.count
         metrics.candidateBuildingMilliseconds = Int(RoutingDiagnostics.elapsed(since: candidateStarted))
         diagnostics.record(.candidateBuilding, since: candidateStarted)
@@ -1061,11 +1061,12 @@ public actor JourneyPlanningSession {
 }
 
 
-private func strictEnvelope(_ journeys: [JourneyPlanningSession.BuiltJourney]) -> [JourneyPlanningSession.BuiltJourney] {
+private func strictEnvelope(_ journeys: [JourneyPlanningSession.BuiltJourney], preferences: RoutingPreferences) -> [JourneyPlanningSession.BuiltJourney] {
     journeys.filter { candidate in
         !journeys.contains { other in
             other.tripInstanceKey != candidate.tripInstanceKey
-                && JourneyQualityPolicy.dominates(other.journey, candidate.journey)
+                && (JourneyQualityPolicy.dominates(other.journey, candidate.journey)
+                    || JourneyQualityPolicy.redundantAccessFeeder(candidate.journey, replacedBy: other.journey, preferences: preferences))
         }
     }
 }

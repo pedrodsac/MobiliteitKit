@@ -296,7 +296,10 @@ public actor JourneyResultSession {
         let retained = valid.filter { candidate in
             // The engine keeps an all-the-way walk as a comparison outside transit slots.
             guard transitProfile.contains(where: { $0.id == candidate.id }) else { return true }
-            return !transitProfile.contains { $0.id != candidate.id && JourneyQualityPolicy.dominates($0, candidate) }
+            return !transitProfile.contains {
+                $0.id != candidate.id && (JourneyQualityPolicy.dominates($0, candidate)
+                    || JourneyQualityPolicy.redundantAccessFeeder(candidate, replacedBy: $0, preferences: request.preferences))
+            }
         }.sorted { JourneyQualityPolicy.chronologicalOrder($0, $1, query: .init(origin: request.origin, destination: request.destination, departureTime: anchor, direction: direction, preferences: request.preferences)) }
         let selectionQuery = RouteQuery(origin: request.origin, destination: request.destination,
             departureTime: anchor, direction: direction, preferences: request.preferences)

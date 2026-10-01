@@ -19,6 +19,41 @@ extension Journey {
 }
 
 extension JourneyQualityPolicy {
+    /// Remove a feeder only when a verified access walk catches the identical
+    /// remaining trip occurrences, leaves home no earlier, and adds at most
+    /// five minutes of walking. Keep a requested lower-walking choice.
+    static func redundantAccessFeeder(_ candidate: Journey, replacedBy other: Journey,
+                                      preferences: RoutingPreferences) -> Bool {
+        guard other.id != candidate.id, !other.hasCancelledTransitLeg, !candidate.hasCancelledTransitLeg,
+              other.origin == candidate.origin, other.destination == candidate.destination,
+              other.accessibility == candidate.accessibility,
+              other.matchesPreferredMode == candidate.matchesPreferredMode,
+              other.transferCount < candidate.transferCount,
+              other.effectiveDeparture >= candidate.effectiveDeparture,
+              other.effectiveArrival <= candidate.effectiveArrival,
+              other.walkingDuration <= candidate.walkingDuration + transferPenaltySeconds,
+              preferences.routePreference != .lessWalking || other.walkingDuration <= candidate.walkingDuration
+        else { return false }
+        let rides = candidate.legs.compactMap { if case let .transit(t) = $0 { t } else { nil } }
+        let replacement = other.legs.compactMap { if case let .transit(t) = $0 { t } else { nil } }
+        guard !replacement.isEmpty, replacement.count < rides.count else { return false }
+        // Line numbers/headsigns cannot establish an equivalent connection.
+        // Match service day and the actual boarding/alighting occurrences.
+        return zip(rides.suffix(replacement.count), replacement).enumerated().allSatisfy { index, pair in
+            let (a, b) = pair
+            guard a.instance != nil, a.instance == b.instance,
+                  a.boardSequence != nil, b.boardSequence != nil,
+                  a.alightSequence != nil, a.alightSequence == b.alightSequence,
+                  a.alight.stop.id == b.alight.stop.id, a.effectiveArrival == b.effectiveArrival
+            else { return false }
+            // The first retained vehicle may be boarded at another reachable
+            // occurrence. Both full journeys already passed feed/access checks.
+            // Thereafter the downstream boarding actions must be identical.
+            return index == 0 || (a.boardSequence == b.boardSequence
+                && a.board.stop.id == b.board.stop.id && a.effectiveDeparture == b.effectiveDeparture)
+        }
+    }
+
     static func materiallyInferior(_ candidate: Journey, among journeys: [Journey],
                                   policy: JourneySuggestionPolicy) -> Bool {
         journeys.contains { other in
