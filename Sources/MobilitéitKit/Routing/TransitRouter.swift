@@ -837,9 +837,19 @@ public actor JourneyPlanningSession {
         return edges
     }
     private nonisolated static func directWalk(snapshot: RoutingSnapshot, query: RouteQuery, walking: WalkingRouteCache?, anchor: Date) async -> Journey? {
+        func place(_ endpoint: JourneyEndpoint) -> JourneyLocation? {
+            switch endpoint {
+            case let .coordinate(coordinate, label): return .init(coordinate: coordinate, label: label)
+            case let .stop(id):
+                guard let index = snapshot.stopByID[id] else { return nil }
+                let stop = snapshot.stops[index].model
+                return .init(stop: stop, coordinate: stop.coordinate, label: stop.name)
+            }
+        }
         guard query.preferences.wheelchair != .required,
-              case let .coordinate(a, al) = query.origin,
-              case let .coordinate(b, bl) = query.destination,
+              let origin = place(query.origin), let destination = place(query.destination) else { return nil }
+        let a = origin.coordinate; let b = destination.coordinate
+        guard
               distance(a, b) <= 3_050,
               let walking, let route = try? await walking.route(.init(source: a, destination: b, departure: anchor)),
               route.durationSeconds > 0, route.durationSeconds <= 45 * 60, route.evidence == .routedPedestrian,
@@ -848,7 +858,7 @@ public actor JourneyPlanningSession {
         let departure = query.direction == .arriveBy
             ? anchor.addingTimeInterval(-TimeInterval(route.durationSeconds)) : anchor
         let arrival = departure.addingTimeInterval(TimeInterval(route.durationSeconds))
-        let leg = WalkingLeg(from: .init(coordinate: a, label: al), to: .init(coordinate: b, label: bl), departure: departure, arrival: arrival, duration: TimeInterval(route.durationSeconds), distanceMeters: route.distanceMeters, polyline: route.polyline, steps: route.steps, source: .provider, evidence: route.evidence)
+        let leg = WalkingLeg(from: origin, to: destination, departure: departure, arrival: arrival, duration: TimeInterval(route.durationSeconds), distanceMeters: route.distanceMeters, polyline: route.polyline, steps: route.steps, source: .provider, evidence: route.evidence)
         return .init(id: .init("walk:\(a.latitude),\(a.longitude):\(b.latitude),\(b.longitude)"), origin: query.origin, destination: query.destination, scheduledDeparture: departure, scheduledArrival: arrival, effectiveDeparture: departure, effectiveArrival: arrival, transferCount: 0, walkingDuration: TimeInterval(route.durationSeconds), walkingDistance: route.distanceMeters, waitingDuration: 0, inVehicleDuration: 0, legs: [.walk(leg)], feedGeneration: snapshot.info.generation, accessibility: .unknown, matchesPreferredMode: query.preferences.preferredMode == nil)
     }
     private func buildJourney(_ candidate: Raptor.Candidate, access: [Edge], egress: [Edge]) -> BuiltJourney? {
@@ -991,13 +1001,17 @@ public actor JourneyPlanningSession {
                 : stop.model.wheelchairBoarding
             return switch code { case 1: .verified; case 2: .inaccessible; default: .unknown }
         }
-        for leg in candidate.legs {
+        for (index, leg) in candidate.legs.enumerated() {
             switch leg {
             case let .transit(ride):
                 let vehicle = snapshot.trips[ride.trip].wheelchairAccessible
                 combine(vehicle == 1 ? .verified : vehicle == 2 ? .inaccessible : .unknown)
                 if !ride.continuesFromPrevious { combine(stopEvidence(ride.board)) }
-                if !candidate.transitLegs.contains(where: { $0.continuesFromPrevious && $0.board == ride.alight && $0.boardTime >= ride.alightTime }) { combine(stopEvidence(ride.alight)) }
+                let continuesNext = index + 1 < candidate.legs.count && {
+                    if case let .transit(next) = candidate.legs[index + 1] { return next.continuesFromPrevious }
+                    return false
+                }()
+                if !continuesNext { combine(stopEvidence(ride.alight)) }
             case let .pathway(path):
                 let structurallyBlocked = path.mode == 2 || path.mode == 4
                     || path.stairCount.map { $0 != 0 } == true

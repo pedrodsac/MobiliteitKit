@@ -94,6 +94,19 @@ struct RoutingPreventionPolicyTests {
         #expect(JourneyQualityPolicy.recommendation([bus, unpreferredWalk], query: transitPreference)?.id == bus.id)
     }
 
+    @Test(arguments: [0, 1, 2]) func directWalkWorksWithSelectedStopEndpoints(endpointKind: Int) async throws {
+        var files = preventionFiles(trips: "bus,service,ride,,,,\n", times: "ride,08:05:00,08:05:00,a,1\nride,08:25:00,08:25:00,d,2\n")
+        files["stops.txt"] = "stop_id,stop_name,stop_lat,stop_lon\na,A,49.6,6.1\nd,D,49.61,6.1\n"
+        let a = Coordinate(latitude: 49.6, longitude: 6.1), d = Coordinate(latitude: 49.61, longitude: 6.1)
+        let fixture = try await RoutingPreventionFixture(files: files, walking: PreventionWalking(edges: [.init(from: a, to: d, seconds: 900)])); defer { fixture.remove() }
+        let origin: JourneyEndpoint = endpointKind == 1 ? .coordinate(a, label: nil) : .stop(id: "a")
+        let destination: JourneyEndpoint = endpointKind == 2 ? .coordinate(d, label: nil) : .stop(id: "d")
+        let session = try await fixture.planning(.init(origin: origin, destination: destination, time: .departAt(date(hour: 8))))
+        let result = try await session.calculate(refresh: .scheduleOnly)
+        let selected = try #require(result.journeys.first { $0.id == result.recommendedJourneyID })
+        #expect(selected.firstRide == nil && selected.duration == 900)
+    }
+
     // 09–10: minor entrances collapse only with compatible access evidence.
     @Test func tinyEndpointVariationKeepsAccessibleException() throws {
         let simple = try preventionJourney(id: "simple", arrival: 1800, walking: 100)

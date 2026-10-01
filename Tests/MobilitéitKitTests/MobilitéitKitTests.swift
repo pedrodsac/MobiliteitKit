@@ -311,16 +311,25 @@ import ZIPFoundation
         print("Breedewues metrics: \(page.metrics)")
         print("Breedewues recommended: \(String(describing: page.recommendedJourneyID?.value))")
         print("Breedewues first options: \(page.journeys.prefix(4).map { "\(transitTripInstanceSequence($0)) dep=\($0.effectiveDeparture) arr=\($0.effectiveArrival) walk=\($0.walkingDuration)" })")
-        let direct = try #require(page.journeys.first {
-            transitTripInstanceSequence($0) == ["24261864", "24365017"]
-        })
-        #expect(page.recommendedJourneyID == direct.id)
-        let rides: [TransitLeg] = direct.legs.compactMap { leg in
-            if case let .transit(ride) = leg { return ride }
-            return nil
+        // The previous assertion accepted a 405-second gap against a
+        // 450-second requirement. Recheck the actual scoped rule and walking
+        // movement; the same trip pair can survive at a different occurrence.
+        #expect(!page.journeys.isEmpty)
+        #expect(page.journeys.allSatisfy { !JourneyPublicationValidator.assess($0, query: query).isInvalid })
+        for journey in page.journeys {
+            var incoming: TransitLeg?
+            var walking = 0.0
+            for leg in journey.legs {
+                if case let .walk(walk) = leg, incoming != nil { walking += walk.duration }
+                if case let .transit(ride) = leg {
+                    if let incoming {
+                        #expect(ride.effectiveDeparture.timeIntervalSince(incoming.effectiveArrival)
+                            >= walking + Double(ride.requiredTransferSecondsAfterWalking))
+                    }
+                    incoming = ride; walking = 0
+                }
+            }
         }
-        #expect(rides[1].requiredTransferSecondsAfterWalking == 450)
-        #expect(rides[1].effectiveDeparture.timeIntervalSince(rides[0].effectiveArrival) == 405)
     }
 }
 

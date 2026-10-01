@@ -133,6 +133,16 @@ struct RoutingPreventionSearchTests {
         #expect(try await fixture.profile(fixture.query(anchor: date(hour: 8).addingTimeInterval(86400))).journeys.count == 1)
     }
 
+    @Test(arguments: ["20260329", "20261025"]) func daylightSavingServiceInstantsRemainChronological(serviceDate: String) throws {
+        let converter = ServiceInstantConverter(timeZone: TimeZone(identifier: "Europe/Luxembourg")!)
+        let day = try GTFSDate(parsing: serviceDate)
+        let first = converter.date(serviceDate: day, serviceSeconds: 2 * 3600)
+        let second = converter.date(serviceDate: day, serviceSeconds: 3 * 3600)
+        let overflow = converter.date(serviceDate: day, serviceSeconds: 25 * 3600)
+        #expect(second.timeIntervalSince(first) == 3600)
+        #expect(overflow.timeIntervalSince(first) == 23 * 3600)
+    }
+
     // 45, 47: permission is a hard rule, even when the line goes to the destination.
     @Test(arguments: ["pickup_type", "drop_off_type"])
     func forbiddenPickupOrDropoff(column: String) async throws {
