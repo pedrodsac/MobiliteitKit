@@ -70,6 +70,19 @@ struct RoutingPreventionPolicyTests {
         #expect(JourneyQualityPolicy.recommendation([best, later], query: arriveBy)?.id == later.id)
     }
 
+    @Test func needlessWaitAndSlowerChangeLoseWhileSoleRuralServiceSurvives() throws {
+        let stay = try preventionJourney(id: "stay", arrival: 1200, firstTrip: "direct")
+        let slowChange = try preventionJourney(id: "change", arrival: 1500, transfers: 1, firstTrip: "connection")
+        #expect(JourneyQualityPolicy.primarySuggestions([stay, slowChange], count: 5, query: query).map(\.id) == [stay.id])
+        let longWait = try preventionJourney(id: "wait", arrival: 3600, transfers: 1, firstTrip: "rural")
+        let laterDirect = try preventionJourney(id: "later", departure: 2400, arrival: 3600, firstTrip: "later")
+        #expect(JourneyQualityPolicy.dominates(laterDirect, longWait))
+        #expect(JourneyQualityPolicy.recommendation([longWait, laterDirect], query: query)?.id == laterDirect.id)
+        #expect(JourneyQualityPolicy.primarySuggestions([longWait], count: 5, query: query).map(\.id) == [longWait.id])
+        let early = try preventionJourney(id: "early", arrival: 3600, firstTrip: "early")
+        #expect(JourneyQualityPolicy.dominates(laterDirect, early))
+    }
+
     // 19: direct walk is an eligible recommendation; transit preferences still count.
     @Test func fifteenMinuteWalkBeatsTwentyFiveMinuteTwoBusRide() throws {
         let walk = try preventionJourney(id: "walk", arrival: 900, walking: 900, firstTrip: nil)

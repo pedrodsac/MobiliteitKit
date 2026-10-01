@@ -123,6 +123,16 @@ struct RoutingPreventionSearchTests {
         #expect(try await fixture.profile(fixture.query(anchor: anchor.addingTimeInterval(86400))).journeys.isEmpty)
     }
 
+    @Test func removedCalendarDayCannotBeActivatedByLiveEvidence() async throws {
+        var files = preventionFiles(trips: "bus,service,ride,,,,\n", times: "ride,08:05:00,08:05:00,a,1\nride,08:20:00,08:20:00,d,2\n")
+        files["calendar.txt"] = "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\nservice,1,1,1,1,1,0,0,20260904,20260905\n"
+        files["calendar_dates.txt"] = "service_id,date,exception_type\nservice,20260904,2\nservice,20260905,1\n"
+        let patch = RealtimeTripPatch(tripID: "ride", serviceDate: try GTFSDate(parsing: "20260904"), events: [.init(stopID: "a", effectiveDeparture: date(hour: 8, minute: 10), departureSource: .reported, stopSequence: 1, observedAt: date(hour: 8))])
+        let fixture = try await RoutingPreventionFixture(files: files, realtime: PreventionRealtime(patches: [patch]), now: date(hour: 8)); defer { fixture.remove() }
+        #expect(try await fixture.profile(fixture.query(live: true)).journeys.isEmpty)
+        #expect(try await fixture.profile(fixture.query(anchor: date(hour: 8).addingTimeInterval(86400))).journeys.count == 1)
+    }
+
     // 45, 47: permission is a hard rule, even when the line goes to the destination.
     @Test(arguments: ["pickup_type", "drop_off_type"])
     func forbiddenPickupOrDropoff(column: String) async throws {
