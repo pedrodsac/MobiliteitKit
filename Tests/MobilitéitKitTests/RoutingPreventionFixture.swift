@@ -7,13 +7,13 @@ struct RoutingPreventionFixture {
     let database: URL
     let router: TransitRouter
     init(files: [String: String], walking: (any WalkingRoutingProvider)? = nil,
-         realtime: (any RealtimeRoutingProvider)? = nil, now: Date = date(hour: 8)) async throws {
+         realtime: (any RealtimeRoutingProvider)? = nil, now: Date = date(hour: 8), clock: (@Sendable () -> Date)? = nil) async throws {
         directory = try temporaryDirectory(); database = directory.appendingPathComponent("transit.sqlite")
         let archive = directory.appendingPathComponent("fixture.zip")
         try writeArchive(to: archive, files: files)
         _ = try await GTFSArchiveInstaller.install(archiveAt: archive, databaseAt: database, generation: 7)
         router = try await TransitRouter(databaseURL: database, walkingProvider: walking,
-            realtimeProvider: realtime, clock: { now })
+            realtimeProvider: realtime, clock: clock ?? { now })
     }
     func remove() { try? FileManager.default.removeItem(at: directory) }
     func query(preferences: RoutingPreferences = .init(), origin: JourneyEndpoint = .stop(id: "a"),

@@ -5,6 +5,7 @@ public actor JourneyResultSession {
     private let router: TransitRouter
     private let store: GTFSStore
     private let feedSnapshot: RoutingSnapshot
+    private let clock: @Sendable () -> Date
     private var request: JourneyPlanningRequest
     private var anchor: Date
     private var generation = UUID()
@@ -29,6 +30,7 @@ public actor JourneyResultSession {
 
     init(router: TransitRouter, snapshot: RoutingSnapshot, databaseURL: URL, request: JourneyPlanningRequest, now: Date, preparationMilliseconds: Double = 0) throws {
         self.feedSnapshot = snapshot
+        self.clock = router.clock
         self.preparationMilliseconds = preparationMilliseconds
         self.router = router; self.store = try GTFSStore(databaseAt: databaseURL)
         self.request = request
@@ -258,6 +260,20 @@ public actor JourneyResultSession {
     }
     private func assess(_ journey: Journey) -> JourneyFeasibility {
         if let failure = JourneyFeedValidator.failure(journey, snapshot: feedSnapshot, preferences: request.preferences) { return .invalid(failure) }
+        let now = clock()
+        for leg in journey.legs {
+            guard case let .transit(ride) = leg, let identity = ride.instance,
+                  let patch = frozenPatches?.first(where: { $0.tripID == ride.tripID && $0.serviceDate == identity.serviceDate }) else { continue }
+            if patch.status != .active { return .invalid(.contradictoryRealtime) }
+            for event in patch.events {
+                for (source, observed) in [(event.arrivalSource, event.arrivalObservedAt), (event.departureSource, event.departureObservedAt)] {
+                    if source != .scheduled, let observed,
+                       now.timeIntervalSince(observed) > RealtimeTimeline.maximumObservationAge || observed.timeIntervalSince(now) > 60 {
+                        return .invalid(.contradictoryRealtime)
+                    }
+                }
+            }
+        }
         let validation = contexts[journey.id] ?? context
         return JourneyPublicationValidator.assess(journey, query: .init(origin: request.origin,
             destination: request.destination, departureTime: validation.anchor,
@@ -265,10 +281,16 @@ public actor JourneyResultSession {
     }
     private func snapshot() -> JourneyPlanningResult {
         var assessments: [JourneySignature: JourneyFeasibility] = [:]
+        let priorInvalidations = invalidated.count
         let valid = journeys.filter { journey in
             let assessment = assess(journey)
             assessments[journey.id] = assessment
+            if assessment.isInvalid { invalidated.insert(journey.id) }
             return !invalidated.contains(journey.id) && !assessment.isInvalid && !journey.hasCancelledTransitLeg
+        }
+        if invalidated.count > priorInvalidations {
+            revision &+= 1
+            diagnostics.counters[.invalidJourneys, default: 0] += invalidated.count - priorInvalidations
         }
         let transitProfile = valid.filter { $0.legs.contains { if case .transit = $0 { true } else { false } } }
         let retained = valid.filter { candidate in

@@ -541,7 +541,7 @@ private enum SnapshotBuilder {
 // MARK: - Session / RAPTOR
 
 public actor TransitRouter {
-    let snapshot: RoutingSnapshot; private let walking: WalkingRouteCache?; private let clock: @Sendable () -> Date; private let realtime: (any RealtimeRoutingProvider)?
+    let snapshot: RoutingSnapshot; private let walking: WalkingRouteCache?; let clock: @Sendable () -> Date; private let realtime: (any RealtimeRoutingProvider)?
     public init(databaseURL: URL, walkingProvider: (any WalkingRoutingProvider)? = nil, realtimeProvider: (any RealtimeRoutingProvider)? = nil, clock: @escaping @Sendable () -> Date = { .now }) async throws { self.clock = clock; self.snapshot = try await Task.detached(priority: .utility) { try SnapshotBuilder.load(databaseURL: databaseURL) }.value; self.walking = walkingProvider.map { WalkingRouteCache(provider: $0) }; self.realtime = realtimeProvider }
     public func makeSession(for query: RouteQuery) throws -> JourneyPlanningSession { guard query.preferences.minimumTransferSeconds >= 0, query.preferences.boardingBufferSeconds >= 0, query.preferences.maximumWalkingSeconds.map({ $0 >= 0 }) ?? true, query.preferences.maxTransfers.map({ $0 >= 0 }) ?? true else { throw JourneyPlannerError.invalidPreferences }; return try JourneyPlanningSession(snapshot: snapshot, query: query, walking: walking, realtime: realtime, clock: clock) }
     /// Feeds a measured pedestrian route back into the cache before a bounded

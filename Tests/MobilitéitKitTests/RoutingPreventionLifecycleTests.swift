@@ -97,6 +97,26 @@ struct RoutingPreventionLifecycleTests {
         }
     }
 
+    @Test func expiredFrozenEvidenceCannotSurviveSnapshotOrPaging() async throws {
+        let files = preventionFiles(trips: "bus,service,primary,,,,\nother,service,backup,,,,\n", times: "primary,08:07:00,08:07:00,a,1\nprimary,08:25:00,08:25:00,d,2\nbackup,08:09:00,08:09:00,a,1\nbackup,08:27:00,08:27:00,d,2\n")
+        let clock = PreventionClock()
+        let fixture = try await RoutingPreventionFixture(files: files, realtime: PreventionMutableRealtime(), clock: { clock.read() }); defer { fixture.remove() }
+        let session = try await fixture.planning()
+        let initial = try await session.calculate(refresh: .forceRefresh)
+        let primary = try #require(initial.journeys.first { $0.firstRide?.tripID == "primary" })
+        clock.advance(120)
+        #expect(await session.result().journeys.contains { $0.id == primary.id })
+        clock.advance(1)
+        let expired = await session.result()
+        #expect(!expired.journeys.contains { $0.id == primary.id })
+        #expect(expired.invalidatedIDs.contains(primary.id))
+        #expect(expired.feasibility[primary.id] == .invalid(.contradictoryRealtime))
+        #expect(expired.journeys.contains { $0.firstRide?.tripID == "backup" })
+        let paged = try await session.calculate(page: .later)
+        #expect(!paged.journeys.contains { $0.id == primary.id })
+        #expect(paged.invalidatedIDs.contains(primary.id))
+    }
+
     @Test func shiftedAnchorRetainsStillCatchableInstances() async throws {
         let fixture = try await RoutingPreventionFixture(files: files()); defer { fixture.remove() }
         let first = try await fixture.profile(fixture.query(anchor: date(hour: 8).addingTimeInterval(1)))
@@ -114,4 +134,11 @@ actor PreventionMutableRealtime: RealtimeRoutingProvider {
             RealtimeStopEventPatch(stopID: "d", effectiveArrival: date(hour: 8, minute: 25).addingTimeInterval(Double(delay)), arrivalSource: .reported, stopSequence: 2, observedAt: date(hour: 8))]
         return .init(patches: [.init(tripID: "primary", serviceDate: try GTFSDate(parsing: "20260904"), status: cancelled ? .cancelled : .active, events: events)], requestedStopIDs: Set(stopIDs), coveredStopIDs: Set(stopIDs))
     }
+}
+
+private final class PreventionClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var instant = date(hour: 8)
+    func read() -> Date { lock.withLock { instant } }
+    func advance(_ seconds: TimeInterval) { lock.withLock { instant.addTimeInterval(seconds) } }
 }
