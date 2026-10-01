@@ -9,6 +9,8 @@ public struct RealtimeStopEventPatch: Hashable, Sendable {
     public let boardingAllowed: Bool?
     public let alightingAllowed: Bool?
     public let observedAt: Date?
+    public let departureObservedAt: Date?
+    public let arrivalObservedAt: Date?
     public let scheduledDeparture: Date?
     public let effectiveDeparture: Date?
     public let departureSource: RealtimeTimingSource
@@ -28,13 +30,15 @@ public struct RealtimeStopEventPatch: Hashable, Sendable {
         stopSequence: Int? = nil,
         boardingAllowed: Bool? = nil,
         alightingAllowed: Bool? = nil,
-        observedAt: Date? = nil
+        observedAt: Date? = nil, departureObservedAt: Date? = nil, arrivalObservedAt: Date? = nil
     ) {
         self.stopID = stopID
         self.stopSequence = stopSequence
         self.boardingAllowed = boardingAllowed
         self.alightingAllowed = alightingAllowed
         self.observedAt = observedAt
+        self.departureObservedAt = departureObservedAt ?? observedAt
+        self.arrivalObservedAt = arrivalObservedAt ?? observedAt
         self.scheduledDeparture = scheduledDeparture
         self.effectiveDeparture = effectiveDeparture
         self.departureSource = departureSource

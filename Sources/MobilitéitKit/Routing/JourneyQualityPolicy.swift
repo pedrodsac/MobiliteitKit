@@ -80,7 +80,18 @@ public enum JourneyQualityPolicy {
         return a.id < b.id
     }
 
-    private static func score(_ journey: Journey, anchor: Date,
+    static func recommendation(_ journeys: [Journey], query: RouteQuery) -> Journey? {
+        let best = journeys.min { ranksBefore($0, $1, anchor: query.departureTime,
+            direction: query.direction, preferences: query.preferences) }
+        guard query.preferences.routePreference == .fastest, query.preferences.preferredMode == nil,
+              !query.preferences.preferWheelchairAccessible,
+              let walk = journeys.filter({ $0.firstRide == nil }).min(by: { $0.effectiveArrival < $1.effectiveArrival }),
+              let best else { return best }
+        if query.direction == .arriveBy { return walk.effectiveDeparture > best.effectiveDeparture ? walk : best }
+        return walk.effectiveArrival < best.effectiveArrival ? walk : best
+    }
+
+    public static func score(_ journey: Journey, anchor: Date,
                               direction: RouteQueryDirection,
                               preferences: RoutingPreferences) -> Double {
         let time = direction == .arriveBy

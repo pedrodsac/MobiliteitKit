@@ -148,6 +148,7 @@ public enum GTFSArchiveInstaller {
                     try importPathways(from: pathwaysURL, ids: ids, into: database)
                 }
 
+                try validateRoutingIntegrity(in: database)
                 debugLog("Materializing service dates and indexes")
                 info = try materializeServiceDates(
                     calendarState,
@@ -581,8 +582,8 @@ private extension GTFSArchiveInstaller {
             try statement.bind(try row.double("length", required: false), at: 6)
             try statement.bind(try row.integer("traversal_time", required: false), at: 7)
             try statement.bind(try row.integer("stair_count", required: false), at: 8)
-            try statement.bind(try row.double("max_slope"), at: 9)
-            try statement.bind(try row.double("min_width"), at: 10)
+            try statement.bind(try row.double("max_slope", required: false), at: 9)
+            try statement.bind(try row.double("min_width", required: false), at: 10)
             try statement.bind(row.optional("signposted_as"), at: 11)
             try statement.bind(row.optional("reversed_signposted_as"), at: 12)
             try statement.step()

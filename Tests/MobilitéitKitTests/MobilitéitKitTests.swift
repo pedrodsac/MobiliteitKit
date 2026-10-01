@@ -190,7 +190,7 @@ import ZIPFoundation
     defer { try? FileManager.default.removeItem(at: folder) }
     let archiveURL = folder.appendingPathComponent("fixture.zip")
     let databaseURL = folder.appendingPathComponent("transit.sqlite")
-    try writeFixtureArchive(to: archiveURL)
+    try writeFixtureArchive(to: archiveURL, includeFrequencies: false)
     _ = try await GTFSArchiveInstaller.install(archiveAt: archiveURL, databaseAt: databaseURL, generation: 9)
 
     var calendar = Calendar(identifier: .gregorian)
@@ -205,7 +205,7 @@ import ZIPFoundation
     #expect(journey.effectiveArrival > anchor)
 }
 
-@Test func gromscheedToHamiliusAppRoutePrintsRealGTFSResults() async throws {
+@Test(.enabled(if: ProcessInfo.processInfo.environment["ROUTING_LIVE_DOWNLOAD_TESTS"] == "1")) func gromscheedToHamiliusAppRoutePrintsRealGTFSResults() async throws {
     let folder = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: folder) }
     let archiveURL = folder.appendingPathComponent("gromscheed-hamilius.zip")
@@ -388,7 +388,7 @@ import ZIPFoundation
     #expect(page.metrics.endpointEgressCandidates > 0)
 }
 
-@Test func genericSameStopTransferCanBeOfferedAsAnExplicitTightAlternative() async throws {
+@Test func genericSameStopMinimumCannotBeBypassed() async throws {
     func run(rule: String, shortfall: Int) async throws -> [Journey] {
         let folder = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: folder) }
@@ -416,15 +416,7 @@ import ZIPFoundation
     let generic = "transfer,transfer,2,450,,\n"
     #expect(try await run(rule: generic, shortfall: 0).isEmpty)
     #expect(try await run(rule: generic, shortfall: 44).isEmpty)
-    let offered = try await run(rule: generic, shortfall: 60)
-    let journey = try #require(offered.first)
-    #expect(transitTripInstanceSequence(journey) == ["incoming", "outgoing"])
-    let rides: [TransitLeg] = journey.legs.compactMap { leg in
-        if case let .transit(ride) = leg { return ride }
-        return nil
-    }
-    #expect(rides[1].requiredTransferSecondsAfterWalking == 450)
-    #expect(rides[1].effectiveDeparture.timeIntervalSince(rides[0].effectiveArrival) == 405)
+    #expect(try await run(rule: generic, shortfall: 60).isEmpty)
     #expect(try await run(rule: "transfer,transfer,2,450,in,out\n", shortfall: 60).isEmpty)
     #expect(try await run(rule: "transfer,transfer,3,,,\n", shortfall: 60).isEmpty)
 }
@@ -643,7 +635,7 @@ import ZIPFoundation
     #expect(await provider.batchCount == 2)
 }
 
-@Test func timeOnlyDominanceDoesNotEraseDirectAlternative() async throws {
+@Test func oneMinuteTransferBenefitDoesNotCrowdOutDirectService() async throws {
     let files = scenarioFiles(
         routes: "direct,operator,D,Direct,3\nfirst,operator,F,First,3\nsecond,operator,S,Second,3\n",
         stops: scenarioStops([("origin", "Origin", 49.600000), ("transfer", "Transfer", 49.605000), ("destination", "Destination", 49.610000)]),
@@ -654,7 +646,7 @@ import ZIPFoundation
     )
     let page = try await routePage(using: files)
     let direct = try #require(page.journeys.first { transitTripInstanceSequence($0) == ["direct-run"] })
-    #expect(page.journeys.contains { transitTripInstanceSequence($0) == ["first-run", "second-run"] })
+    #expect(!page.journeys.contains { transitTripInstanceSequence($0) == ["first-run", "second-run"] })
     #expect(page.recommendedJourneyID == direct.id)
 }
 
@@ -955,7 +947,7 @@ import ZIPFoundation
     defer { try? FileManager.default.removeItem(at: folder) }
     let archiveURL = folder.appendingPathComponent("fixture.zip")
     let databaseURL = folder.appendingPathComponent("transit.sqlite")
-    try writeFixtureArchive(to: archiveURL)
+    try writeFixtureArchive(to: archiveURL, includeFrequencies: false)
     _ = try await GTFSArchiveInstaller.install(archiveAt: archiveURL, databaseAt: databaseURL)
     var calendar = Calendar(identifier: .gregorian)
     calendar.timeZone = TimeZone(identifier: "Europe/Berlin")!
@@ -1163,7 +1155,7 @@ import ZIPFoundation
     #expect(journey.legs.first?.walkingDestinationStopID == "origin")
 }
 
-private func temporaryDirectory() throws -> URL {
+func temporaryDirectory() throws -> URL {
     let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
     try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     return url
@@ -1353,13 +1345,13 @@ private func installedRouter(using files: [String: String], walking: any Walking
     return .init(folder: folder, router: try await TransitRouter(databaseURL: databaseURL, walkingProvider: walking))
 }
 
-private func date(hour: Int, minute: Int = 0) -> Date {
+func date(hour: Int, minute: Int = 0) -> Date {
     var calendar = Calendar(identifier: .gregorian)
     calendar.timeZone = TimeZone(identifier: "Europe/Berlin")!
     return calendar.date(from: DateComponents(year: 2026, month: 9, day: 4, hour: hour, minute: minute))!
 }
 
-private func transitTripInstanceSequence(_ journey: Journey) -> [String] {
+func transitTripInstanceSequence(_ journey: Journey) -> [String] {
     journey.legs.compactMap { if case let .transit(leg) = $0 { return leg.tripID }; return nil }
 }
 
@@ -1452,7 +1444,7 @@ private func liveTransferFixtureFiles() -> [String: String] {
     )
 }
 
-private func scenarioFiles(routes: String, stops: String, trips: String, stopTimes: String) -> [String: String] {
+func scenarioFiles(routes: String, stops: String, trips: String, stopTimes: String) -> [String: String] {
     [
         "agency.txt": "agency_id,agency_name,agency_url,agency_timezone\noperator,Operator,https://example.com,Europe/Berlin\n",
         "calendar_dates.txt": "service_id,date,exception_type\nservice,20260904,1\n",
@@ -1463,11 +1455,11 @@ private func scenarioFiles(routes: String, stops: String, trips: String, stopTim
     ]
 }
 
-private func scenarioStops(_ stops: [(String, String, Double)]) -> String {
+func scenarioStops(_ stops: [(String, String, Double)]) -> String {
     stops.map { "\($0.0),\($0.1),\($0.2),6.100000" }.joined(separator: "\n") + "\n"
 }
 
-private func writeArchive(to url: URL, files: [String: String]) throws {
+func writeArchive(to url: URL, files: [String: String]) throws {
     let archive = try Archive(url: url, accessMode: .create)
     for (path, content) in files {
         let data = Data(content.utf8)
@@ -1506,8 +1498,8 @@ private func nextWeekday(at hour: Int, onOrAfter date: GTFSDate, calendar: Calen
     return nil
 }
 
-private func writeFixtureArchive(to url: URL) throws {
-    let files: [String: String] = [
+private func writeFixtureArchive(to url: URL, includeFrequencies: Bool = true) throws {
+    var files: [String: String] = [
         "agency.txt": "agency_id,agency_name,agency_url,agency_timezone,agency_lang,agency_phone\noperator,Transit Operator,https://example.com,Europe/Berlin,fr,+352\n",
         "calendar.txt": "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\nweekday,0,1,1,0,0,0,0,20260901,20260903\n",
         "calendar_dates.txt": "service_id,date,exception_type\nweekday,20260902,2\nweekday,20260903,1\n",
@@ -1519,6 +1511,7 @@ private func writeFixtureArchive(to url: URL) throws {
         "frequencies.txt": "trip_id,start_time,end_time,headway_secs,exact_times\ntrip-1,05:00:00,06:00:00,600,1\n",
         "transfers.txt": "from_stop_id,to_stop_id,transfer_type,min_transfer_time,from_route_id,to_route_id,from_trip_id,to_trip_id\nstop-a,stop-b,2,180,route-1,,,,\n",
     ]
+    if !includeFrequencies { files["frequencies.txt"] = nil }
     let archive = try Archive(url: url, accessMode: .create)
     for (path, content) in files {
         let data = Data(content.utf8)

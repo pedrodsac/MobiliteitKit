@@ -38,7 +38,7 @@ public actor JourneyPlanner {
                                     now: Date = .now) async throws -> JourneyResultSession {
         let started = ContinuousClock.now
         let router = try await router(for: databaseURL)
-        return try JourneyResultSession(router: router, databaseURL: databaseURL, request: request, now: now,
+        return try JourneyResultSession(router: router, snapshot: await router.snapshot, databaseURL: databaseURL, request: request, now: now,
             preparationMilliseconds: RoutingDiagnostics.elapsed(since: started))
     }
 

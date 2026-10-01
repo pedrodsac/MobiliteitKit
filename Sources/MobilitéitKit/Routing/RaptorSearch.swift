@@ -56,7 +56,7 @@ extension Raptor {
         var maximumWorkerCount = 1
         var roundMetrics: [RoutingRoundMetrics] = []
         let egressStops = Set(egress.map(\.stop))
-        let destinationReachability = maxRounds <= 8
+        let destinationReachability = maxRounds <= 8 && !snapshot.hasContinuations
             ? DestinationReachability(snapshot: snapshot, egressStops: egressStops, maxRides: maxRounds)
             : nil
         var finalRoundAlightStops = egressStops
@@ -254,6 +254,12 @@ extension Raptor {
                 }
             }
 
+            if snapshot.hasContinuations {
+                try relaxContinuations(snapshot: snapshot, query: query, serviceDays: relevantServiceDays,
+                    patches: patchesByInstance, searchStart: searchStart, scheduledLowerBound: scheduledLowerBound,
+                    upperBound: profileUpperBound, labels: &next, nextLabelID: &nextLabelID)
+            }
+
             let mergeMilliseconds = Int(RoutingDiagnostics.elapsed(since: mergeStarted))
             roundMetrics.append(.init(
                 tripPreparationMilliseconds: preparationMilliseconds,
@@ -272,19 +278,19 @@ extension Raptor {
             ))
             if verifyKernel {
                 var reference = next, referenceID = nextLabelID
-                relaxPathways(snapshot: snapshot, labels: &reference, nextLabelID: &referenceID, skipEmptySources: false)
-                relaxPathways(snapshot: snapshot, labels: &next, nextLabelID: &nextLabelID)
+                relaxPathways(snapshot: snapshot, labels: &reference, nextLabelID: &referenceID, skipEmptySources: false, preferences: query.preferences)
+                relaxPathways(snapshot: snapshot, labels: &next, nextLabelID: &nextLabelID, preferences: query.preferences)
                 precondition(referenceID == nextLabelID && reference.keys.sorted() == next.keys.sorted(), "Pathway pruning mismatch")
                 for stop in next.keys {
                     precondition(next[stop]!.ordered.map { String(reflecting: $0.legs) } == reference[stop]!.ordered.map { String(reflecting: $0.legs) }, "Pathway result mismatch")
                     precondition(next[stop]!.ordered.map(\.id) == reference[stop]!.ordered.map(\.id), "Pathway ID mismatch")
                 }
             } else {
-                relaxPathways(snapshot: snapshot, labels: &next, nextLabelID: &nextLabelID)
+                relaxPathways(snapshot: snapshot, labels: &next, nextLabelID: &nextLabelID, preferences: query.preferences)
             }
             cpuSeconds += RoutingDiagnostics.elapsed(since: cpuStarted) / 1_000
             let walkingStarted = ContinuousClock.now
-            walkingTransferPairs += try await relaxWalkingTransfers(snapshot: snapshot, labels: &next, nextLabelID: &nextLabelID, walking: walking)
+            if query.preferences.wheelchair != .required { walkingTransferPairs += try await relaxWalkingTransfers(snapshot: snapshot, labels: &next, nextLabelID: &nextLabelID, walking: walking) }
             walkingTransferSeconds += RoutingDiagnostics.elapsed(since: walkingStarted) / 1_000
             for e in egress { for label in next[e.stop]?.ordered ?? [] where label.firstDeparture != nil { destination.append(.init(legs: label.legs, firstStop: label.firstStop, lastStop: e.stop, firstDeparture: label.firstDeparture!, lastArrival: label.time, minimumTransferSlack: label.minimumSlack, totalTransferSlack: label.totalSlack, pathwaySeconds: label.pathwaySeconds, pathwayDistance: label.pathwayDistance)) } }
             labels = next; if labels.isEmpty { break }

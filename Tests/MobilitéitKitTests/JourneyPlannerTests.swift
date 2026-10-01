@@ -241,7 +241,7 @@ struct JourneyPlannerTests {
               case let .bestEffort(later, _) = JourneyPlanningPage.later.realtimePolicy(.useCache) else { return }
         #expect(initial.scheduledLookbackSeconds == 1_200)
         #expect(later.scheduledLookbackSeconds == 600)
-        #expect(RoutingPreferences(preferredMode: nil, avoidTightTransfers: false).sameStopTransferShortfallSeconds == 180)
+        #expect(RoutingPreferences(preferredMode: nil, avoidTightTransfers: false).sameStopTransferShortfallSeconds == 0)
         #expect(JourneyPlanningPage.initial.realtimePolicy(.scheduleOnly) == .disabled)
     }
 }

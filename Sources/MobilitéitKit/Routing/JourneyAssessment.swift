@@ -50,7 +50,7 @@ public enum JourneyItineraryValidator {
             let slack = gap - movement - Double(outgoing.1.requiredTransferSecondsAfterWalking)
             let sameStop = incoming.1.alight.stop.id == outgoing.1.board.stop.id && movement == 0
             if slack < 0 {
-                risks[outgoing.0] = sameStop && slack >= -Double(context.sameStopTransferShortfallSeconds) ? .tight : .missed
+                risks[outgoing.0] = .missed
             } else if sameStop && gap < 120 { risks[outgoing.0] = .tight }
         }
         return risks
@@ -73,7 +73,6 @@ public enum JourneyItineraryValidator {
         }
         let rides = itinerary.enumerated().filter { $0.element.kind == .transit }
         var minimum: TimeInterval?
-        var shortfall: TimeInterval?
         for (incoming, outgoing) in zip(rides, rides.dropFirst()) {
             let between = itinerary[(incoming.offset + 1)..<outgoing.offset]
             if between.contains(where: { $0.kind == .continuation }) { continue }
@@ -89,18 +88,9 @@ public enum JourneyItineraryValidator {
             }
             let required = outgoing.element.requiredTransferSeconds ?? context.minimumTransferSeconds
             let slack = departure.timeIntervalSince(arrival) - movement - Double(required)
-            if slack < 0 {
-                let sameStop = incoming.element.destinationStopID != nil
-                    && incoming.element.destinationStopID == outgoing.element.originStopID
-                guard sameStop, walks.isEmpty,
-                      slack >= -Double(context.sameStopTransferShortfallSeconds) else {
-                    return .invalid(.missedTransfer)
-                }
-                shortfall = min(shortfall ?? slack, slack)
-            }
+            if slack < 0 { return .invalid(.missedTransfer) }
             minimum = min(minimum ?? slack, slack)
         }
-        if let shortfall { return .atRisk(minimumTransferSlack: shortfall) }
         return .feasible(minimumTransferSlack: minimum)
     }
 }
@@ -122,7 +112,7 @@ public struct JourneyStatusEvidence: Codable, Hashable, Sendable {
     public func status(at now: Date, feasibility: JourneyFeasibility? = nil) -> JourneyStatus {
         if feasibility?.isInvalid == true { return .connectionMayBeMissed }
         if cancelled { return .cancelled }
-        if let firstBoarding, firstBoarding.addingTimeInterval(30) < now { return .missed }
+        if let firstBoarding, firstBoarding < now { return .missed }
         if connectionMiss { return .connectionMayBeMissed }
         if case .atRisk = feasibility { return .atRisk }
         if tightTransfer { return .atRisk }
@@ -143,7 +133,7 @@ extension Journey {
             (live.count == rides.count ? .live : .partial)
         let tight = JourneyItineraryValidator.transferRisks(self, context: .init(
             anchor: effectiveDeparture, arriveBy: false, minimumTransferSeconds: 120)).values.contains(.tight)
-        return .init(firstBoarding: rides.first?.effectiveDeparture,
+        return .init(firstBoarding: rides.first?.boardingDeadline ?? rides.first?.effectiveDeparture,
                      cancelled: rides.contains { $0.status == .cancelled },
                      delayed: live.contains { $0.effectiveDeparture > $0.scheduledDeparture },
                      tightTransfer: tight, coverage: coverage)
@@ -151,7 +141,7 @@ extension Journey {
     public var transitFingerprint: String {
         legs.map {
             switch $0 {
-            case let .transit(t): "\(t.tripID)|\(t.board.stop.id)|\(t.alight.stop.id)|\(t.effectiveDeparture.timeIntervalSince1970)|\(t.effectiveArrival.timeIntervalSince1970)"
+            case let .transit(t): "\(t.instance?.stableKey ?? t.tripID)|\(t.boardSequence ?? -1)|\(t.alightSequence ?? -1)|\(t.board.stop.id)|\(t.alight.stop.id)|\(t.effectiveDeparture.timeIntervalSince1970)|\(t.effectiveArrival.timeIntervalSince1970)"
             case let .inSeatContinuation(c): "continuation|\(c.fromTripID)|\(c.toTripID)"
             case .walk: ""
             }

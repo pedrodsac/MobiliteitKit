@@ -3,6 +3,11 @@ import Foundation
 extension JourneyPlanningSession {
     func acquireRealtime(access: [Edge], egress: [Edge], anchor: Date,
                                  searchHorizon: TimeInterval, force: Bool) async throws -> [RealtimeTripPatch] {
+        if !force, let frozenPatches {
+            state = frozenPatches.isEmpty ? .unavailable : .partial
+            latestPatchesByInstance = Dictionary(frozenPatches.map { (RealtimePatchKey(tripID: $0.tripID, serviceDate: $0.serviceDate), $0) }, uniquingKeysWith: { _, latest in latest })
+            return frozenPatches
+        }
         guard case let .bestEffort(configuration, requestedRefresh) = query.realtimePolicy,
               let realtimeProvider else { return [] }
         let from = query.direction == .arriveBy
@@ -11,7 +16,7 @@ extension JourneyPlanningSession {
         let through = query.direction == .arriveBy ? anchor
             : anchor.addingTimeInterval(min(searchHorizon, Double(configuration.minimumForwardHorizonSeconds)))
         if !force, let cachedRealtimeBatch, let fetchedAt = cachedRealtimeBatch.fetchedAt,
-           Date().timeIntervalSince(fetchedAt) < 60 {
+           clock().timeIntervalSince(fetchedAt) < 60 {
             metrics.hafasCacheHits += 1
             return cachedRealtimeBatch.patches
         }

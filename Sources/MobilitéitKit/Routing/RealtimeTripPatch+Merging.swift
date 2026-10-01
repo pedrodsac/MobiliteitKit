@@ -25,15 +25,22 @@ extension RealtimeTripPatch {
         for update in incoming.events {
             let key = EventKey(stopID: update.stopID, sequence: update.stopSequence)
             guard let old = merged[key] else { merged[key] = update; continue }
-            func prefer(_ source: RealtimeTimingSource, over prior: RealtimeTimingSource) -> Bool {
+            func prefer(_ source: RealtimeTimingSource, over prior: RealtimeTimingSource, observation: Date?, priorObservation: Date?) -> Bool {
                 func rank(_ value: RealtimeTimingSource) -> Int {
                     switch value { case .scheduled: 0; case .estimated: 1; case .reported: 2 }
                 }
+                let age = (observation ?? .distantPast).timeIntervalSince(priorObservation ?? .distantPast)
+                // Within the freshness window, direct observations outrank
+                // extrapolations regardless of concurrent board completion order.
+                if rank(source) != rank(prior), abs(age) <= RealtimeTimeline.maximumObservationAge {
+                    return rank(source) > rank(prior)
+                }
+                if observation != priorObservation { return age > 0 }
                 if rank(source) != rank(prior) { return rank(source) > rank(prior) }
                 return (update.observedAt ?? .distantPast) >= (old.observedAt ?? .distantPast)
             }
-            let departure = prefer(update.departureSource, over: old.departureSource)
-            let arrival = prefer(update.arrivalSource, over: old.arrivalSource)
+            let departure = update.effectiveDeparture != nil && prefer(update.departureSource, over: old.departureSource, observation: update.departureObservedAt, priorObservation: old.departureObservedAt)
+            let arrival = update.effectiveArrival != nil && prefer(update.arrivalSource, over: old.arrivalSource, observation: update.arrivalObservedAt, priorObservation: old.arrivalObservedAt)
             let latest = (update.observedAt ?? .distantPast) >= (old.observedAt ?? .distantPast)
             let platform: String? = latest ? (update.platform ?? old.platform) : (old.platform ?? update.platform)
             let boarding: Bool? = latest ? (update.boardingAllowed ?? old.boardingAllowed)
@@ -50,7 +57,9 @@ extension RealtimeTripPatch {
                                 arrivalSource: arrival ? update.arrivalSource : old.arrivalSource,
                                 platform: platform, stopSequence: old.stopSequence,
                                 boardingAllowed: boarding, alightingAllowed: alighting,
-                                observedAt: observation)
+                                observedAt: observation,
+                                departureObservedAt: departure ? update.departureObservedAt : old.departureObservedAt,
+                                arrivalObservedAt: arrival ? update.arrivalObservedAt : old.arrivalObservedAt)
         }
         let oldDate = events.compactMap(\.observedAt).max() ?? .distantPast
         let newDate = incoming.events.compactMap(\.observedAt).max() ?? .distantPast

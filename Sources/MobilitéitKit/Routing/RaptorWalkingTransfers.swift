@@ -1,7 +1,7 @@
 import Foundation
 
 extension Raptor {
-    static func relaxPathways(snapshot: RoutingSnapshot, labels: inout [Int: LabelProfile], nextLabelID: inout Int, skipEmptySources: Bool = true) {
+    static func relaxPathways(snapshot: RoutingSnapshot, labels: inout [Int: LabelProfile], nextLabelID: inout Int, skipEmptySources: Bool = true, preferences: RoutingPreferences = .init()) {
         // A stop without outgoing pathways cannot insert a label or consume an
         // ID. Excluding these no-op sources preserves queue and merge order.
         var queue = labels.keys.sorted().filter { !skipEmptySources || !snapshot.pathsByFrom[$0].isEmpty }.flatMap { stop in
@@ -12,7 +12,7 @@ extension Raptor {
             let source = queue[queueIndex]
             queueIndex += 1
             for path in snapshot.pathsByFrom[source.stop] {
-                guard !source.label.walkingStopsVisited.contains(path.to) else { continue }
+                guard pathwayAllowed(path, preferences: preferences), !source.label.walkingStopsVisited.contains(path.to) else { continue }
                 let arrival = source.label.time.addingTimeInterval(TimeInterval(path.seconds))
                 let leg = PathwayLeg(from: path.from, to: path.to, seconds: path.seconds, distance: path.distance, mode: path.mode, stairCount: path.stairCount, maxSlope: path.maxSlope, minWidth: path.minWidth, departure: source.label.time, arrival: arrival)
                 let label = Label(id: nextLabelID, time: arrival, prior: source.label, appendedLeg: .pathway(leg), firstStop: source.label.firstStop, firstDeparture: source.label.firstDeparture, lastTransit: source.label.lastTransit, minimumSlack: source.label.minimumSlack, totalSlack: source.label.totalSlack, accessSeconds: source.label.accessSeconds, accessDistance: source.label.accessDistance, pathwaySeconds: source.label.pathwaySeconds + path.seconds, pathwayDistance: source.label.pathwayDistance + path.distance, transferWalkSeconds: source.label.transferWalkSeconds + path.seconds, containsPreferredMode: source.label.containsPreferredMode, walkingStopsVisited: source.label.walkingStopsVisited.adding(path.to), tripKey: source.label.tripKey)

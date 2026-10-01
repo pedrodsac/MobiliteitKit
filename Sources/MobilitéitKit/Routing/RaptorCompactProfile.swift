@@ -15,6 +15,7 @@ extension Raptor {
         let prefixRank: Int
         let incomingTrip: Int
         let serviceDate: GTFSDate
+        var alightPosition: Int = 1
 
         @inline(__always) func sameTrips(as other: Self) -> Bool {
             prefixRank == other.prefixRank && incomingTrip == other.incomingTrip && serviceDate == other.serviceDate
@@ -37,7 +38,7 @@ extension Raptor {
         @inline(__always) func dominates(_ other: Self) -> Bool {
             // Every record here alights at this profile's stop, has no transfer
             // walk, and resets its walking visits to that single stop.
-            incomingTrip == other.incomingTrip && preferred == other.preferred
+            sameTrips(as: other) && alightPosition == other.alightPosition && preferred == other.preferred
                 && minimumSlack >= other.minimumSlack && totalSlack >= other.totalSlack
                 && doorDeparture >= other.doorDeparture && arrival <= other.arrival
                 && walkingSeconds <= other.walkingSeconds
@@ -59,6 +60,7 @@ extension Raptor {
         let boardTime: Date
         let alightTime: Date
         let requiredTransferSeconds: Int
+        var boardingDeadline: Date? = nil
     }
 
     struct CompactProfile: Sendable {

@@ -15,7 +15,7 @@ enum Raptor {
     #endif
     static let fullProfileHorizon: TimeInterval = 86_400
     struct TripInstance: Hashable, Sendable { let trip: Int; let day: GTFSDate }
-    struct TransitLeg: Sendable { let trip: Int; let board: Int; let alight: Int; let boardPos: Int; let alightPos: Int; let day: GTFSDate; let scheduledBoard: Date; let scheduledAlight: Date; let boardTime: Date; let alightTime: Date; let requiredTransferSecondsAfterWalking: Int }
+    struct TransitLeg: Sendable { let trip: Int; let board: Int; let alight: Int; let boardPos: Int; let alightPos: Int; let day: GTFSDate; let scheduledBoard: Date; let scheduledAlight: Date; let boardTime: Date; let alightTime: Date; let requiredTransferSecondsAfterWalking: Int; var continuesFromPrevious = false; var boardingDeadline: Date? = nil }
     struct PathwayLeg: Sendable { let from: Int; let to: Int; let seconds: Int; let distance: Double; let mode: Int; let stairCount: Int?; let maxSlope: Double?; let minWidth: Double?; let departure: Date; let arrival: Date }
     struct WalkingTransferLeg: Sendable { let from: Int; let to: Int; let route: WalkingRoute; let departure: Date; let arrival: Date }
     enum Leg: Sendable { case transit(TransitLeg); case pathway(PathwayLeg); case walkingTransfer(WalkingTransferLeg) }
@@ -202,6 +202,7 @@ enum Raptor {
         let scheduledArrivals: [Date?]
         let effectiveDepartures: [Date?]
         let effectiveArrivals: [Date?]
+        let conservativeDepartures: [Date?]
         let boardingAllowed: [Bool]
         let alightingAllowed: [Bool]
     }
@@ -265,6 +266,7 @@ enum Raptor {
     }
     struct TransferDecisionKey: Hashable, Sendable {
         let incomingTrip: Int
+        let incomingStop: Int
         let stop: Int
         let outgoingTrip: Int
     }

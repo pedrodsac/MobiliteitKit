@@ -43,7 +43,7 @@ extension RoutingPreferences {
     /// The rider-facing transfer choice; mode preference remains soft.
     public init(preferredMode: TransitModeMask?, avoidTightTransfers: Bool) {
         self.init(maxTransfers: 3, minimumTransferSeconds: avoidTightTransfers ? 180 : 120,
-                  sameStopTransferShortfallSeconds: avoidTightTransfers ? 0 : 180,
+                  sameStopTransferShortfallSeconds: 0,
                   preferredMode: preferredMode)
     }
 }
@@ -51,13 +51,17 @@ extension RoutingPreferences {
 public enum JourneyInfeasibility: String, Codable, Hashable, Sendable {
     case missingTime, negativeDuration, overlappingLegs, departureBeforeAnchor
     case missedTransfer, unverifiedTransferWalk, arrivalAfterDeadline
+    case invalidIdentity, invalidOccurrence, inactiveService, forbiddenAction, disconnectedLegs
+    case invalidMovement, constraintViolation, repeatedTripInstance, invalidContinuation, contradictoryRealtime
 }
 
 public enum JourneyFeasibility: Codable, Hashable, Sendable {
     case feasible(minimumTransferSlack: TimeInterval?)
     case atRisk(minimumTransferSlack: TimeInterval)
     case invalid(JourneyInfeasibility)
-    public var isInvalid: Bool { if case .invalid = self { true } else { false } }
+    public var isInvalid: Bool {
+        switch self { case .invalid: true; case let .atRisk(slack): slack < 0; case .feasible: false }
+    }
 }
 
 public struct JourneyValidationContext: Hashable, Sendable {
@@ -115,7 +119,17 @@ public struct JourneyWalkingRefinement: Sendable {
     }
 }
 
+/// Opaque session/query generation plus an effective chronological boundary.
+public struct JourneyPlanningCursor: Hashable, Sendable {
+    public let generation: UUID
+    public let feedGeneration: Int
+    public let departure: Date
+    public let journeyID: JourneySignature?
+}
+
 public struct JourneyPlanningResult: Sendable {
+    public var earlierCursor: JourneyPlanningCursor? = nil
+    public var laterCursor: JourneyPlanningCursor? = nil
     public let journeys: [Journey]
     public let recommendedJourneyID: JourneySignature?
     public let invalidatedIDs: Set<JourneySignature>
@@ -131,5 +145,5 @@ public struct JourneyPlanningResult: Sendable {
 }
 
 public enum JourneyPlanningError: Error, Sendable {
-    case noRouteFound, supersededRequest, staleRefinement, invalidRefinement
+    case noRouteFound, supersededRequest, staleRefinement, invalidRefinement, stalePage
 }

@@ -12,7 +12,9 @@ public struct RoutingDiagnostics: Hashable, Sendable {
         case networkRequests, boardCacheHits, responseBytes, walkingRequests, walkingCacheHits
         case predictedEvents, delayedPastBoardings
         case boardsCovered, incompleteBoards, workers, candidates, retainedAlternatives
+        case invalidJourneys, duplicatesSuppressed, sharedFirstVehicleGroups, recommendationSwitches, pageNewJourneys
     }
+    public var rejections: [JourneyInfeasibility: Int] = [:]
     public var counters: [Counter: Int] = [:]
     public var rounds: [RoutingRoundMetrics] = []
     public let requestID: UUID

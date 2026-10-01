@@ -89,12 +89,12 @@ extension Raptor {
                 let effectiveArrivals = instance.effectiveArrivals
                 let eligibleAlights = trip.times.indices.filter { position in
                     let stopTime = trip.times[position]
-                    return stopTime.dropoff == 0
+                    return transitAllowed(snapshot: snapshot, trip: tripIndex, stop: stopTime.stop, preferences: query.preferences, stayingAboard: snapshot.hasContinuations && position == trip.times.count - 1) && (stopTime.dropoff == 0 || (snapshot.hasContinuations && position == trip.times.count - 1))
                         && instance.alightingAllowed[position]
                         && scheduledArrivals[position] != nil
                         && effectiveArrivals[position] != nil
                         && reachableStops?[stopTime.stop] != false
-                        && (round + 1 < maxRounds || finalRoundAlightStops.contains(stopTime.stop))
+                        && (snapshot.hasContinuations || round + 1 < maxRounds || finalRoundAlightStops.contains(stopTime.stop))
                 }
 
                 for boardPos in startPosition..<trip.times.count {
@@ -104,11 +104,11 @@ extension Raptor {
                               let effective = effectiveDepartures[boardPos],
                               boardTime.pickup == 0,
                               instance.boardingAllowed[boardPos],
+                              transitAllowed(snapshot: snapshot, trip: tripIndex, stop: boardTime.stop, preferences: query.preferences),
                               let sources = previousLabels[boardTime.stop]?.ordered
                         else { continue }
-                        let latestPossibleArrival = effective.addingTimeInterval(
-                            TimeInterval(max(0, query.preferences.sameStopTransferShortfallSeconds))
-                        )
+                        let deadline = instance.conservativeDepartures[boardPos] ?? effective
+                        let latestPossibleArrival = deadline
 
                         for source in sources {
                             boardingChecks += 1
@@ -124,14 +124,14 @@ extension Raptor {
                             ) else { continue }
                             let additionalTransferSeconds = source.lastTransit == nil
                                 ? 0
-                                : max(0, transfer.requiredSeconds - source.transferWalkSeconds)
+                                : max(query.preferences.boardingBufferSeconds, transfer.requiredSeconds - source.transferWalkSeconds)
                             let allowedShortfall = source.transferWalkSeconds == 0
                                 ? transfer.allowedShortfallSeconds : 0
-                            guard effective >= source.time.addingTimeInterval(
+                            guard deadline >= source.time.addingTimeInterval(
                                 TimeInterval(additionalTransferSeconds - allowedShortfall)
                             ) else { continue }
                             feasibleBoardings += 1
-                            let slack = Int(effective.timeIntervalSince(source.time))
+                            let slack = Int(deadline.timeIntervalSince(source.time))
                                 - additionalTransferSeconds
                             let minimumSlack = source.lastTransit == nil
                                 ? source.minimumSlack
@@ -151,7 +151,8 @@ extension Raptor {
                                     tripIndex: tripIndex,
                                     day: day,
                                     alightStop: alightTime.stop,
-                                    departure: effective,
+                                    alightPosition: alightPos,
+                                    departure: source.firstDeparture ?? deadline,
                                     arrival: effectiveArrival,
                                     minimumSlack: minimumSlack,
                                     totalSlack: totalSlack,
@@ -164,7 +165,8 @@ extension Raptor {
                                     next[alightTime.stop], source: source,
                                     tripIndex: tripIndex, day: day, candidateID: candidateID,
                                     alightStop: alightTime.stop,
-                                    departure: effective, arrival: effectiveArrival,
+                                    alightPosition: alightPos,
+                                    departure: source.firstDeparture ?? deadline, arrival: effectiveArrival,
                                     minimumSlack: minimumSlack, totalSlack: totalSlack,
                                     containsPreferredMode: source.containsPreferredMode || tripMatchesPreferredMode
                                 ) {
@@ -182,14 +184,15 @@ extension Raptor {
                                     scheduledAlight: scheduledArrival,
                                     boardTime: effective,
                                     alightTime: effectiveArrival,
-                                    requiredTransferSecondsAfterWalking: additionalTransferSeconds
+                                    requiredTransferSecondsAfterWalking: additionalTransferSeconds,
+                                    boardingDeadline: deadline
                                 )
                                 let label = Label(
                                     id: candidateID,
                                     time: effectiveArrival,
                                     prior: source, appendedLeg: .transit(leg),
                                     firstStop: source.firstStop,
-                                    firstDeparture: source.firstDeparture ?? effective,
+                                    firstDeparture: source.firstDeparture ?? deadline,
                                     lastTransit: leg,
                                     minimumSlack: minimumSlack,
                                     totalSlack: totalSlack,

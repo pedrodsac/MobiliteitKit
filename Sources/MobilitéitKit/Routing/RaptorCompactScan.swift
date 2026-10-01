@@ -78,11 +78,11 @@ extension Raptor {
                 // This eligibility is invariant for every boarding on the instance.
                 let alights = trip.times.indices.compactMap { position -> (position: Int, stop: Int, arrival: Double)? in
                     let time = trip.times[position]
-                    guard time.dropoff == 0, instance.alightingAllowed[position],
+                    guard transitAllowed(snapshot: snapshot, trip: tripIndex, stop: time.stop, preferences: query.preferences, stayingAboard: snapshot.hasContinuations && position == trip.times.count - 1), (time.dropoff == 0 || (snapshot.hasContinuations && position == trip.times.count - 1)), instance.alightingAllowed[position],
                           instance.scheduledArrivals[position] != nil,
                           let arrival = instance.effectiveArrivals[position],
                           reachableStops?[time.stop] != false,
-                          round + 1 < maxRounds || finalRoundAlightStops.contains(time.stop)
+                          snapshot.hasContinuations || round + 1 < maxRounds || finalRoundAlightStops.contains(time.stop)
                     else { return nil }
                     return (position, time.stop, arrival.timeIntervalSinceReferenceDate)
                 }
@@ -93,11 +93,13 @@ extension Raptor {
                     let board = trip.times[boardPos]
                     guard let scheduled = instance.scheduledDepartures[boardPos],
                           let effective = instance.effectiveDepartures[boardPos],
-                          board.pickup == 0, instance.boardingAllowed[boardPos]
+                          board.pickup == 0, instance.boardingAllowed[boardPos],
+                          transitAllowed(snapshot: snapshot, trip: tripIndex, stop: board.stop, preferences: query.preferences)
                     else { continue }
-                    let departure = effective.timeIntervalSinceReferenceDate
+                    let deadline = instance.conservativeDepartures[boardPos] ?? effective
+                    let departure = deadline.timeIntervalSinceReferenceDate
                     let eligible = boardings.eligibleSources(at: board.stop,
-                        through: departure + Double(max(0, query.preferences.sameStopTransferShortfallSeconds)))
+                        through: departure)
                     // Counts include the excluded arrivals for compatibility with
                     // the reference's logical work counters.
                     boardingChecks += boardings.profiles[board.stop]?.range.count ?? 0
@@ -111,7 +113,7 @@ extension Raptor {
                                 at: board.stop, outgoing: tripIndex, preferences: query.preferences, cache: &decisions)
                         else { continue }
                         let additional = source.lastTransit == nil ? 0
-                            : max(0, transfer.requiredSeconds - source.transferWalkSeconds)
+                            : max(query.preferences.boardingBufferSeconds, transfer.requiredSeconds - source.transferWalkSeconds)
                         let shortfall = source.transferWalkSeconds == 0 ? transfer.allowedShortfallSeconds : 0
                         guard departure >= source.timeSeconds + Double(additional - shortfall) else { continue }
                         feasibleBoardings += 1
@@ -129,6 +131,7 @@ extension Raptor {
                             let alightPos = alight.position
                             let stop = alight.stop
                             alightingChecks += 1
+                            key.alightPosition = alightPos
                             key.arrival = alight.arrival
                             key.id = nextID
                             if consider(key, profile: &next[stop], nextID: &nextID, attempts: &attempts,
@@ -136,7 +139,7 @@ extension Raptor {
                                     .init(sourceIndex: sourceIndex, trip: tripIndex, board: board.stop, alight: stop,
                                         boardPos: boardPos, alightPos: alightPos, day: day, scheduledBoard: scheduled,
                                         scheduledAlight: instance.scheduledArrivals[alightPos]!, boardTime: effective,
-                                        alightTime: instance.effectiveArrivals[alightPos]!, requiredTransferSeconds: additional)
+                                        alightTime: instance.effectiveArrivals[alightPos]!, requiredTransferSeconds: additional, boardingDeadline: deadline)
                                 }) { retained += 1 }
                         }
                     }
@@ -165,9 +168,9 @@ extension Raptor {
                     boardPos: path.boardPos, alightPos: path.alightPos, day: path.day,
                     scheduledBoard: path.scheduledBoard, scheduledAlight: path.scheduledAlight,
                     boardTime: path.boardTime, alightTime: path.alightTime,
-                    requiredTransferSecondsAfterWalking: path.requiredTransferSeconds)
+                    requiredTransferSecondsAfterWalking: path.requiredTransferSeconds, boardingDeadline: path.boardingDeadline)
                 let label = Label(id: key.id, time: path.alightTime, prior: source, appendedLeg: .transit(leg),
-                    firstStop: source.firstStop, firstDeparture: source.firstDeparture ?? path.boardTime,
+                    firstStop: source.firstStop, firstDeparture: source.firstDeparture ?? path.boardingDeadline ?? path.boardTime,
                     lastTransit: leg, minimumSlack: key.minimumSlack, totalSlack: key.totalSlack,
                     accessSeconds: source.accessSeconds, accessDistance: source.accessDistance,
                     pathwaySeconds: source.pathwaySeconds, pathwayDistance: source.pathwayDistance,

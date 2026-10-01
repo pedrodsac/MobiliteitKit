@@ -25,12 +25,12 @@ struct JourneyAssessmentTests {
         let estimate = [leg(.transit, 0, 600), leg(.walk, 600, 900, evidence: .estimate), leg(.transit, 1_200, 2_400)]
         #expect(JourneyItineraryValidator.assess(estimate, context: context) == .invalid(.unverifiedTransferWalk))
     }
-    @Test func sameStopToleranceIsExplicit() {
+    @Test func legacySameStopToleranceCannotViolateMinima() {
         let itinerary = [leg(.transit, 0, 600, to: "platform"), leg(.transit, 615, 1_200, from: "platform")]
         #expect(JourneyItineraryValidator.assess(itinerary, context: context) == .invalid(.missedTransfer))
         let tolerant = JourneyValidationContext(anchor: start, arriveBy: false,
             minimumTransferSeconds: 180, sameStopTransferShortfallSeconds: 180)
-        #expect(JourneyItineraryValidator.assess(itinerary, context: tolerant) == .atRisk(minimumTransferSlack: -165))
+        #expect(JourneyItineraryValidator.assess(itinerary, context: tolerant) == .invalid(.missedTransfer))
     }
     @Test func continuationDoesNotRequireBoardingAgain() {
         let itinerary = [leg(.transit, 0, 600), JourneyTimingLeg(kind: .continuation, departure: nil, arrival: nil),
@@ -50,7 +50,7 @@ struct JourneyAssessmentTests {
         #expect(live.status(at: start) == .viable)
         #expect(live.status(at: start.addingTimeInterval(31)) == .missed)
         #expect(live.status(at: start, feasibility: .invalid(.missedTransfer)) == .connectionMayBeMissed)
-        #expect(live.status(at: start, feasibility: .atRisk(minimumTransferSlack: -10)) == .atRisk)
+        #expect(live.status(at: start, feasibility: .atRisk(minimumTransferSlack: -10)) == .connectionMayBeMissed)
         let delayed = JourneyStatusEvidence(firstBoarding: start, cancelled: false, delayed: true,
                                             tightTransfer: false, coverage: .partial)
         #expect(delayed.status(at: start) == .delayed)

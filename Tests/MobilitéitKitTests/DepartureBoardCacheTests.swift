@@ -12,7 +12,8 @@ private actor FetchCount {
         HafasDepartureBoard.self,
         from: Data(#"{"Departure":[]}"#.utf8)
     )
-    let cache = DepartureBoardCache(lifetime: 0.2)
+    let clock = BoardCacheClock()
+    let cache = DepartureBoardCache(lifetime: 0.2, now: { clock.read() })
     let count = FetchCount()
     let fetch: @Sendable () async throws -> HafasDepartureBoard = {
         await count.increment()
@@ -29,7 +30,7 @@ private actor FetchCount {
     _ = try await cache.value(for: "stop-b", fetch: fetch)
     #expect(await count.value == 2)
 
-    try await Task.sleep(for: .milliseconds(250))
+    clock.advance(0.25)
     _ = try await cache.value(for: "stop-a", fetch: fetch)
     #expect(await count.value == 3)
 }
@@ -161,4 +162,11 @@ private final class BoardProtocol: URLProtocol {
     #expect(first.networkRequests == 1)
     #expect(second.cacheHits == 1)
     #expect(first.fetchedAt == second.fetchedAt)
+}
+
+private final class BoardCacheClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var instant = Date(timeIntervalSince1970: 1_000)
+    func read() -> Date { lock.withLock { instant } }
+    func advance(_ seconds: TimeInterval) { lock.withLock { instant.addTimeInterval(seconds) } }
 }

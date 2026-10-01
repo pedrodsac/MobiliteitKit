@@ -4,6 +4,7 @@ import Foundation
 public actor JourneyResultSession {
     private let router: TransitRouter
     private let store: GTFSStore
+    private let feedSnapshot: RoutingSnapshot
     private var request: JourneyPlanningRequest
     private var anchor: Date
     private var generation = UUID()
@@ -12,6 +13,10 @@ public actor JourneyResultSession {
     private var journeys: [Journey] = []
     private var contexts: [JourneySignature: JourneyValidationContext] = [:]
     private var invalidated: Set<JourneySignature> = []
+    private var exploredBefore: JourneyPageBoundary?
+    private var exploredAfter: JourneyPageBoundary?
+    private var frozenPatches: [RealtimeTripPatch]?
+    private var previousRecommendation: JourneySignature?
     private var hasEarlier = true
     private var hasLater = true
     private var metrics = RoutingMetrics()
@@ -22,7 +27,8 @@ public actor JourneyResultSession {
 
     public var replacementSearchCount: Int { replacementSearches }
 
-    init(router: TransitRouter, databaseURL: URL, request: JourneyPlanningRequest, now: Date, preparationMilliseconds: Double = 0) throws {
+    init(router: TransitRouter, snapshot: RoutingSnapshot, databaseURL: URL, request: JourneyPlanningRequest, now: Date, preparationMilliseconds: Double = 0) throws {
+        self.feedSnapshot = snapshot
         self.preparationMilliseconds = preparationMilliseconds
         self.router = router; self.store = try GTFSStore(databaseAt: databaseURL)
         self.request = request
@@ -42,23 +48,28 @@ public actor JourneyResultSession {
     }
 
     public func calculate(page: JourneyPlanningPage = .initial,
-                          refresh: JourneyRefreshPolicy = .useCache) async throws -> JourneyPlanningResult {
+                          refresh: JourneyRefreshPolicy = .useCache, now: Date? = nil) async throws -> JourneyPlanningResult {
+        let priorIDs = Set(journeys.map(\.id))
         let operationStarted = ContinuousClock.now
         operation &+= 1
         let currentOperation = operation
-        let effectivePage = resolved(page)
+        let isInitial = page == .initial || refresh == .forceRefresh
+        if isInitial, case .now = request.time, let now { anchor = now }
+        let effectivePage = resolved(isInitial ? .initial : page)
         let query = makeQuery(page: effectivePage, refresh: refresh)
-        if page == .initial {
+        if isInitial {
             generation = UUID(); didReplan = false; replacementSearches = 0
+            exploredBefore = nil; exploredAfter = nil; frozenPatches = nil
             invalidated = []; journeys = []; contexts = [:]; hasEarlier = true; hasLater = true
         }
         let session = try await router.makeSession(for: query)
+        if let frozenPatches { await session.setFrozenPatches(frozenPatches) }
         let raw: JourneyPage
         switch effectivePage {
         case let .before(date, id, count):
-            raw = try await session.boundedPage(before: date, beforeID: id, count: count)
+            raw = try await session.boundedPage(before: date, beforeID: id, count: count, excludingIDs: Set(journeys.map(\.id)))
         case let .after(date, id, count):
-            raw = try await session.boundedPage(after: date, afterID: id, count: count)
+            raw = try await session.boundedPage(after: date, afterID: id, count: count, excludingIDs: Set(journeys.map(\.id)))
         default:
             raw = direction == .arriveBy
                 ? try await session.expanded(count: 5)
@@ -69,6 +80,12 @@ public actor JourneyResultSession {
         let enriched = await JourneyGeometry.enrich(raw.journeys, store: store)
         try Task.checkCancellation()
         guard operation == currentOperation else { throw JourneyPlanningError.supersededRequest }
+        frozenPatches = await session.currentPatches()
+        switch effectivePage {
+        case .before: if let boundary = raw.exploredBefore { exploredBefore = boundary }
+        case .after: if let boundary = raw.exploredAfter { exploredAfter = boundary }
+        default: exploredBefore = raw.exploredBefore; exploredAfter = raw.exploredAfter
+        }
         metrics = raw.metrics
         diagnostics = raw.diagnostics
         diagnostics.milliseconds[.snapshotPreparation] = preparationMilliseconds
@@ -92,9 +109,26 @@ public actor JourneyResultSession {
         diagnostics.record(.resultAssembly, since: assemblyStarted)
         diagnostics.totalMilliseconds = RoutingDiagnostics.elapsed(since: operationStarted)
             + (diagnostics.milliseconds[.snapshotPreparation] ?? 0)
+        if isInitial { invalidated.formUnion(priorIDs.subtracting(Set(journeys.map(\.id)))) }
+        diagnostics.counters[.pageNewJourneys] = Set(journeys.map(\.id)).subtracting(priorIDs).count
         let result = snapshot()
         if page == .initial && result.journeys.isEmpty { throw JourneyPlanningError.noRouteFound }
         return result
+    }
+
+    public func calculate(before cursor: JourneyPlanningCursor, count: Int = 3,
+                          refresh: JourneyRefreshPolicy = .useCache) async throws -> JourneyPlanningResult {
+        try validate(cursor)
+        return try await calculate(page: .before(cursor.departure, cursor.journeyID, count), refresh: refresh)
+    }
+    public func calculate(after cursor: JourneyPlanningCursor, count: Int = 3,
+                          refresh: JourneyRefreshPolicy = .useCache) async throws -> JourneyPlanningResult {
+        try validate(cursor)
+        return try await calculate(page: .after(cursor.departure, cursor.journeyID, count), refresh: refresh)
+    }
+    private func validate(_ cursor: JourneyPlanningCursor) throws {
+        guard cursor.generation == generation, cursor.feedGeneration == feedSnapshot.info.generation
+        else { throw JourneyPlanningError.stalePage }
     }
 
     public func refreshRealtime(now: Date = .now) async throws -> JourneyPlanningResult {
@@ -103,6 +137,7 @@ public actor JourneyResultSession {
     }
 
     public func updatePreferences(_ preferences: RoutingPreferences) async throws -> JourneyPlanningResult {
+        previousRecommendation = nil
         request.preferences = preferences
         return try await calculate(refresh: .useCache)
     }
@@ -141,6 +176,7 @@ public actor JourneyResultSession {
             placeholder.nativeRange = position..<(position + 1)
             legs[position] = .walk(placeholder)
         }
+        legs = JourneyTransferArithmetic.recalculating(legs, boardingBufferSeconds: request.preferences.boardingBufferSeconds)
         let corrected = journey.replacing(legs: legs)
         journeys[index] = corrected
         await router.correctWalkingRoute(update.route, for: .init(
@@ -151,7 +187,7 @@ public actor JourneyResultSession {
               !invalidated.contains(corrected.id) else { throw JourneyPlanningError.staleRefinement }
         // Cache correction suspends this actor; independent spans may have finished
         // meanwhile. Validate their combined current itinerary, never an old copy.
-        if JourneyItineraryValidator.assess(current, context: contexts[current.id] ?? context).isInvalid {
+        if assess(current).isInvalid {
             invalidated.insert(corrected.id)
             journeys.removeAll { $0.id == corrected.id }
             if !didReplan, corrected.legs.contains(where: { if case .transit = $0 { true } else { false } }) {
@@ -178,14 +214,12 @@ public actor JourneyResultSession {
     }
 
     private func resolved(_ page: JourneyPlanningPage) -> JourneyPlanningPage {
-        let transit = snapshot().journeys.filter { $0.legs.contains { if case .transit = $0 { true } else { false } } }
-            .sorted { ($0.effectiveDeparture, $0.id) < ($1.effectiveDeparture, $1.id) }
         switch page {
         case .earlier:
-            if let first = transit.first { return .before(first.effectiveDeparture, first.id, 3) }
+            if let first = exploredBefore { return .before(first.departure, first.id, 3) }
             return .before(anchor, nil, 3)
         case .later:
-            if let last = transit.last { return .after(last.effectiveDeparture, last.id, 3) }
+            if let last = exploredAfter { return .after(last.departure, last.id, 3) }
             return .after(anchor, nil, 3)
         default: return page
         }
@@ -222,10 +256,17 @@ public actor JourneyResultSession {
         }
         journeys = Array(values.values)
     }
+    private func assess(_ journey: Journey) -> JourneyFeasibility {
+        if let failure = JourneyFeedValidator.failure(journey, snapshot: feedSnapshot, preferences: request.preferences) { return .invalid(failure) }
+        let validation = contexts[journey.id] ?? context
+        return JourneyPublicationValidator.assess(journey, query: .init(origin: request.origin,
+            destination: request.destination, departureTime: validation.anchor,
+            direction: direction, preferences: request.preferences))
+    }
     private func snapshot() -> JourneyPlanningResult {
         var assessments: [JourneySignature: JourneyFeasibility] = [:]
         let valid = journeys.filter { journey in
-            let assessment = JourneyItineraryValidator.assess(journey, context: contexts[journey.id] ?? context)
+            let assessment = assess(journey)
             assessments[journey.id] = assessment
             return !invalidated.contains(journey.id) && !assessment.isInvalid && !journey.hasCancelledTransitLeg
         }
@@ -234,22 +275,32 @@ public actor JourneyResultSession {
             // The engine keeps an all-the-way walk as a comparison outside transit slots.
             guard transitProfile.contains(where: { $0.id == candidate.id }) else { return true }
             return !transitProfile.contains { $0.id != candidate.id && JourneyQualityPolicy.dominates($0, candidate) }
-        }.sorted { ($0.effectiveDeparture, $0.id) < ($1.effectiveDeparture, $1.id) }
-        let transit = retained.filter { $0.legs.contains { if case .transit = $0 { true } else { false } } }
-        let recommended = transit.min {
-            JourneyQualityPolicy.ranksBefore($0, $1, anchor: anchor, direction: direction,
-                                            preferences: request.preferences)
-        } ?? retained.first
+        }.sorted { JourneyQualityPolicy.chronologicalOrder($0, $1, query: .init(origin: request.origin, destination: request.destination, departureTime: anchor, direction: direction, preferences: request.preferences)) }
+        let selectionQuery = RouteQuery(origin: request.origin, destination: request.destination,
+            departureTime: anchor, direction: direction, preferences: request.preferences)
+        var recommended = JourneyQualityPolicy.recommendation(retained, query: selectionQuery)
+        if let previousRecommendation, let previous = retained.first(where: { $0.id == previousRecommendation }),
+           let proposed = recommended, proposed.id != previous.id {
+            let improvement = JourneyQualityPolicy.score(previous, anchor: anchor, direction: direction, preferences: request.preferences)
+                - JourneyQualityPolicy.score(proposed, anchor: anchor, direction: direction, preferences: request.preferences)
+            if improvement < Double(request.preferences.suggestionPolicy.recommendationSwitchingMarginSeconds) { recommended = previous }
+        }
+        diagnostics.counters[.recommendationSwitches] = previousRecommendation != nil && previousRecommendation != recommended?.id ? 1 : 0
+        diagnostics.counters[.sharedFirstVehicleGroups] = Dictionary(grouping: retained.compactMap(\.firstVehicleKey), by: { $0 }).values.filter { $0.count > 1 }.count
+        previousRecommendation = recommended?.id
         let tokens = Dictionary(uniqueKeysWithValues: retained.map {
             ($0.id, JourneyRefinementToken(generation: generation, journeyID: $0.id,
                                           transitFingerprint: $0.transitFingerprint))
         })
-        return .init(journeys: retained, recommendedJourneyID: recommended?.id,
+        var result = JourneyPlanningResult(journeys: retained, recommendedJourneyID: recommended?.id,
             invalidatedIDs: invalidated, feasibility: assessments,
             transferRisks: Dictionary(uniqueKeysWithValues: retained.map {
                 ($0.id, JourneyItineraryValidator.transferRisks($0, context: contexts[$0.id] ?? context))
             }), refinementTokens: tokens,
             hasEarlier: hasEarlier, hasLater: hasLater, revision: revision, metrics: metrics,
             diagnostics: diagnostics, validationContext: context)
+        result.earlierCursor = exploredBefore.map { .init(generation: generation, feedGeneration: feedSnapshot.info.generation, departure: $0.departure, journeyID: $0.id) }
+        result.laterCursor = exploredAfter.map { .init(generation: generation, feedGeneration: feedSnapshot.info.generation, departure: $0.departure, journeyID: $0.id) }
+        return result
     }
 }

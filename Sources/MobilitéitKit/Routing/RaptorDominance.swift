@@ -3,7 +3,7 @@ import Foundation
 extension Raptor {
     @inline(__always) static func cannotEnterFullProfile(
         _ profile: LabelProfile?, source: Label,
-        tripIndex: Int, day: GTFSDate, candidateID: Int, alightStop: Int,
+        tripIndex: Int, day: GTFSDate, candidateID: Int, alightStop: Int, alightPosition: Int = 1,
         departure: Date, arrival: Date,
         minimumSlack: Int, totalSlack: Int,
         containsPreferredMode: Bool
@@ -54,7 +54,9 @@ extension Raptor {
         // removable, let the original check decide rather than risk pruning it.
         let doorDeparture = firstDeparture.addingTimeInterval(-TimeInterval(source.accessSeconds))
         for peer in profile.byIncomingTrip[tripIndex] ?? [] {
-            guard peer.lastTransit?.alight == alightStop,
+            guard peer.tripKey == source.tripKey.appending(candidateTrip),
+                  peer.lastTransit?.alightPos == alightPosition,
+                  peer.lastTransit?.alight == alightStop,
                   peer.transferWalkSeconds == 0,
                   peer.containsPreferredMode == containsPreferredMode,
                   peer.walkingStopsVisited.count == 1,
@@ -77,6 +79,7 @@ extension Raptor {
         tripIndex: Int,
         day: GTFSDate,
         alightStop: Int,
+        alightPosition: Int = 1,
         departure: Date,
         arrival: Date,
         minimumSlack: Int,
@@ -89,7 +92,9 @@ extension Raptor {
         let walk = source.walkingSeconds
         let lastTrip = TripInstance(trip: tripIndex, day: day)
         return (profile.byIncomingTrip[tripIndex] ?? []).contains { existing in
-            guard existing.lastTransit?.trip == tripIndex,
+            guard existing.tripKey == source.tripKey.appending(lastTrip),
+                  existing.lastTransit?.alightPos == alightPosition,
+                  existing.lastTransit?.trip == tripIndex,
                   existing.lastTransit?.alight == alightStop,
                   existing.transferWalkSeconds == 0,
                   existing.containsPreferredMode == containsPreferredMode,
@@ -118,7 +123,10 @@ extension Raptor {
     @inline(__always) static func dominates(_ lhs: Label, _ rhs: Label) -> Bool {
         // Transfer rules inspect the incoming trip and the station where it
         // alighted. Walking allowance is also part of future boardability.
-        guard lhs.lastTransit?.trip == rhs.lastTransit?.trip,
+        guard lhs.tripKey == rhs.tripKey,
+              lhs.lastTransit?.alightPos == rhs.lastTransit?.alightPos,
+              lhs.lastTransit?.day == rhs.lastTransit?.day,
+              lhs.lastTransit?.trip == rhs.lastTransit?.trip,
               lhs.lastTransit?.alight == rhs.lastTransit?.alight,
               lhs.transferWalkSeconds == rhs.transferWalkSeconds,
               lhs.containsPreferredMode == rhs.containsPreferredMode,
