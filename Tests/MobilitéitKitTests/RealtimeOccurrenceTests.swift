@@ -3,6 +3,53 @@ import Testing
 @testable import MobiliteitKit
 
 @Suite struct RealtimeOccurrenceTests {
+    @Test(arguments: ["08:00:00", "07:59:00"], [false, true])
+    func departureOnlyPredictionBeforeGTFSArrivalRemainsLive(prediction: String, hasPrecedingDelay: Bool) async throws {
+        // ATP rounds this on-time departure to a minute; GTFS includes seconds.
+        // The unreported arrival at the same stop cannot invalidate its departure.
+        let times = hasPrecedingDelay
+            ? "trip,07:50:25,07:50:25,b,1\ntrip,08:00:25,08:00:25,a,2\ntrip,08:20:25,08:20:25,c,3\n"
+            : "trip,08:00:25,08:00:25,a,1\ntrip,08:10:25,08:10:25,b,2\ntrip,08:20:25,08:20:25,c,3\n"
+        let fixture = try await RealtimeTestFixture(stopTimes: times)
+        defer { fixture.remove() }
+        let previous = hasPrecedingDelay
+            ? liveStop("b", planned: "07:50:00", predicted: "07:55:00") + "," : ""
+        let body = liveBoard(stops: previous + liveStop("a", planned: "08:00:00", predicted: prediction) + ","
+            + liveStop("c", planned: "08:20:00", predicted: "08:20:00", arrival: "08:20:00"),
+            realtime: prediction)
+        let (client, host) = RealtimeBoardProtocol.client { _ in body }
+        defer { RealtimeBoardProtocol.remove(host) }
+        let provider = try HafasRealtimeRoutingProvider(databaseURL: fixture.database, client: client)
+        let batch = try await provider.patches(for: ["a"], from: RealtimeTestFixture.date("07:55:00"),
+            through: RealtimeTestFixture.date("08:30:00"), refreshPolicy: .useCache)
+        let patch = try #require(batch.patches.first)
+        let board = try #require(patch.events.first { $0.stopID == "a" })
+        #expect(board.arrivalSource == .estimated)
+        #expect(board.effectiveArrival == RealtimeTestFixture.date(prediction))
+        #expect(board.departureSource == .reported)
+        #expect(board.scheduledArrival == RealtimeTestFixture.date("08:00:25"))
+
+        let router = try await TransitRouter(databaseURL: fixture.database, realtimeProvider: provider)
+        let session = try await router.makeSession(for: .init(origin: .stop(id: "a"), destination: .stop(id: "c"),
+            departureTime: RealtimeTestFixture.date("07:55:00"), realtimePolicy: .bestEffort()))
+        let journey = try #require(try await session.initial().journeys.first)
+        #expect(journey.statusEvidence.coverage == .live)
+        #expect(journey.effectiveDeparture == RealtimeTestFixture.date(prediction))
+        #expect(journey.effectiveArrival == RealtimeTestFixture.date("08:20:00"))
+    }
+
+    @Test func conflictingReportedArrivalAndDepartureRemainRejected() async throws {
+        let fixture = try await RealtimeTestFixture(); defer { fixture.remove() }
+        let body = liveBoard(stops: liveStop("a", planned: "08:00:00", predicted: "08:00:00", arrival: "08:01:00"),
+                             realtime: "08:00:00")
+        let (client, host) = RealtimeBoardProtocol.client { _ in body }
+        defer { RealtimeBoardProtocol.remove(host) }
+        let provider = try HafasRealtimeRoutingProvider(databaseURL: fixture.database, client: client)
+        let batch = try await provider.patches(for: ["a"], from: RealtimeTestFixture.date("07:55:00"),
+            through: RealtimeTestFixture.date("08:30:00"), refreshPolicy: .useCache)
+        #expect(batch.patches.isEmpty)
+    }
+
     @Test func skippedStopPreventsAlightingButDoesNotCancelTheVehicle() async throws {
         let fixture = try await RealtimeTestFixture(); defer { fixture.remove() }
         let body = liveBoard(stops: [liveStop("a", planned: "08:00:00", predicted: "08:08:00"),

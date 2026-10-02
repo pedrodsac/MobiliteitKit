@@ -7,6 +7,20 @@ enum RealtimeTimeline {
     static let maximumDelay: TimeInterval = 2 * 60 * 60
     static let maximumPropagation: TimeInterval = 2 * 60 * 60
 
+    /// A departure proves the vehicle has already arrived at that same stop.
+    /// Sparse ATP boards omit the boarding arrival, and minute precision can
+    /// put an on-time report before GTFS's scheduled seconds. Constrain only an
+    /// unreported arrival; conflicting direct observations remain invalid.
+    static func consistentArrival(
+        _ arrival: (Date?, RealtimeTimingSource),
+        departure: (Date?, RealtimeTimingSource)
+    ) -> (Date?, RealtimeTimingSource) {
+        guard arrival.1 != .reported, departure.1 == .reported,
+              let arrivalTime = arrival.0, let departureTime = departure.0,
+              arrivalTime > departureTime else { return arrival }
+        return (departureTime, .estimated)
+    }
+
     static func resolved(_ patch: RealtimeTripPatch, snapshot: RoutingSnapshot, now: Date) -> RealtimeTripPatch {
         guard patch.status == .active, let index = snapshot.tripByID[patch.tripID] else { return patch }
         let trip = snapshot.trips[index]
@@ -64,8 +78,9 @@ enum RealtimeTimeline {
                 }
                 return (scheduled, .scheduled)
             }
-            let a = timing(arrival, prediction: event?.effectiveArrival, source: event?.arrivalSource ?? .scheduled, observed: event?.arrivalObservedAt)
+            let arrivalTiming = timing(arrival, prediction: event?.effectiveArrival, source: event?.arrivalSource ?? .scheduled, observed: event?.arrivalObservedAt)
             let d = timing(departure, prediction: event?.effectiveDeparture, source: event?.departureSource ?? .scheduled, observed: event?.departureObservedAt)
+            let a = consistentArrival(arrivalTiming, departure: d)
             if failed { return rejected() }
             events.append(.init(stopID: stopID, scheduledDeparture: departure, effectiveDeparture: d.0,
                 departureSource: d.1, scheduledArrival: arrival, effectiveArrival: a.0, arrivalSource: a.1,

@@ -79,6 +79,12 @@ unobserved stops stay scheduled. Per-stop cancellations and boarding/alighting
 restrictions disable that stop event while keeping the vehicle available
 elsewhere; whole-journey cancellations and unreachable journeys mask the trip.
 
+At a stop with a reported departure but no reported arrival, an arrival later
+than that departure is constrained to the departure and marked estimated.
+This handles ATP minute precision versus GTFS seconds and sparse delay recovery
+without discarding a valid report. Scheduled times remain intact, and conflicting
+reported arrival/departure times are still rejected.
+
 Overlapping boards merge by trip, service date and stop sequence, preferring
 reported predictions over estimates, then newer observations. Non-monotonic
 active predictions and ambiguous matches are ignored. `RoutingMetrics` includes

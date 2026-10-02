@@ -90,11 +90,12 @@ extension HafasRealtimeRoutingProvider {
                 }
                 return (scheduled, .scheduled)
             }
-            let arrivalTiming = timing(arrival, prediction: reportedArrival)
+            let initialArrivalTiming = timing(arrival, prediction: reportedArrival)
             if let arrival, let reportedArrival {
                 precedingDelay = (reportedArrival.timeIntervalSince(arrival), arrival)
             }
             let departureTiming = timing(departure, prediction: reportedDeparture)
+            let arrivalTiming = RealtimeTimeline.consistentArrival(initialArrivalTiming, departure: departureTiming)
             if let departure, let reportedDeparture {
                 precedingDelay = (reportedDeparture.timeIntervalSince(departure), departure)
             }
