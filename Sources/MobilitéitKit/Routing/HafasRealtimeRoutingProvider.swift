@@ -108,10 +108,16 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
         }
         let localDeadline = ContinuousClock.now.advanced(by: min(request.timeout, requestTimeout))
         let deadline = request.deadline.map { min($0, localDeadline) } ?? localDeadline
+        // A slow later slice must not consume the time needed to match boards
+        // that already arrived. Keep matching inside the original deadline and
+        // preserve partial evidence when acquisition reaches its earlier cutoff.
+        let remaining = max(.zero, ContinuousClock.now.duration(to: deadline))
+        let matchingReserve = min(.milliseconds(500), remaining / 4)
+        let acquisitionDeadline = deadline.advanced(by: .zero - matchingReserve)
         let matchingFrom = request.from.addingTimeInterval(-Double(request.scheduledLookbackSeconds))
         async let schedules = prepareSchedules(for: stopIDs, from: matchingFrom, through: request.through, deadline: deadline)
         let started = ContinuousClock.now
-        let fetched = await boards(for: stopIDs, request: request, deadline: deadline)
+        let fetched = await boards(for: stopIDs, request: request, deadline: acquisitionDeadline)
         let fetchMilliseconds = Self.milliseconds(started.duration(to: .now))
         let prepared = await schedules
         try Task.checkCancellation()

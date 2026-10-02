@@ -39,15 +39,22 @@ struct RealtimeTestFixture {
 
 /// URLProtocol fixtures never contact the network. Each host owns its response
 /// closure and request history, so parallel Swift Testing cases stay isolated.
-final class RealtimeBoardProtocol: URLProtocol {
+final class RealtimeBoardProtocol: URLProtocol, @unchecked Sendable {
     typealias Response = @Sendable (URLRequest) -> String
-    private struct State { let response: Response; var requests: [URLRequest] = [] }
+    private struct State: Sendable {
+        let response: Response
+        let responseDelay: @Sendable (URLRequest) -> Duration
+        var requests: [URLRequest] = []
+    }
     private static let lock = NSLock()
     private nonisolated(unsafe) static var states: [String: State] = [:]
+    private let taskLock = NSLock()
+    private var responseTask: Task<Void, Never>?
 
-    static func client(_ response: @escaping Response) -> (MobiliteitAPIClient, String) {
+    static func client(responseDelay: @escaping @Sendable (URLRequest) -> Duration = { _ in .zero },
+                       _ response: @escaping Response) -> (MobiliteitAPIClient, String) {
         let host = "live-\(UUID().uuidString.lowercased()).invalid"
-        lock.withLock { states[host] = .init(response: response) }
+        lock.withLock { states[host] = .init(response: response, responseDelay: responseDelay) }
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [RealtimeBoardProtocol.self]
         return (.init(apiKey: "fixture", baseURL: URL(string: "https://\(host)")!,
@@ -60,18 +67,31 @@ final class RealtimeBoardProtocol: URLProtocol {
     }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
-        guard let host = request.url?.host(), let response = Self.lock.withLock({
+        guard let host = request.url?.host(), let state = Self.lock.withLock({
             Self.states[host]?.requests.append(request)
-            return Self.states[host]?.response
+            return Self.states[host]
         }) else { return }
-        let data = Data(response(request).utf8)
+        let delay = state.responseDelay(request)
+        if delay > .zero {
+            let pendingRequest = request
+            taskLock.withLock {
+                responseTask = Task.detached { @Sendable [self, state, pendingRequest] in
+                    do { try await Task.sleep(for: delay) } catch { return }
+                    guard !Task.isCancelled else { return }
+                    deliver(state.response(pendingRequest))
+                }
+            }
+        } else { deliver(state.response(request)) }
+    }
+    private func deliver(_ response: String) {
+        let data = Data(response.utf8)
         let http = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
                                    headerFields: ["Content-Type": "application/json"])!
         client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: data)
         client?.urlProtocolDidFinishLoading(self)
     }
-    override func stopLoading() {}
+    override func stopLoading() { taskLock.withLock { responseTask?.cancel() } }
 }
 
 func liveBoard(stops: String, time: String = "08:00:00", realtime: String? = "08:08:00",

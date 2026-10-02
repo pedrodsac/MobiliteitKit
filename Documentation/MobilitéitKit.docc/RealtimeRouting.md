@@ -43,6 +43,12 @@ avoiding repeated scans of prior waves. It stops after four waves, 24 stop targe
 deadline; at most four requests run concurrently. Coverage outside those bounds
 remains partial.
 
+Each provider wave reserves a quarter of its remaining time (up to 500 ms)
+for matching completed boards to GTFS. Board acquisition stops at that earlier
+cutoff, retaining completed slices and marking unfinished coverage partial.
+A slow later slice therefore does not discard predictions or cancellations
+that already arrived. Matching still stops at the original shared deadline.
+
 The shared request cache coalesces in-flight requests, lets waiters cancel
 independently, and expires after 60 seconds. The provider's bounded caches reuse
 only complete intervals that contain the request. Pass `.forceRefresh` to
