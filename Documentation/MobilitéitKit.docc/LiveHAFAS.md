@@ -58,6 +58,28 @@ HAFAS sometimes encodes one object and sometimes an array for the same JSON
 field. ``OneOrMany`` normalizes both forms to `values`, including nested notes,
 pass-list stops, products, and nearby-stop products.
 
+## Reuse acquisition evidence
+
+`departureBoard` remains available. `departureBoardSnapshot` additionally exposes
+`board`, `fetchedAt`, `requestedInterval`, and `isComplete`. Use
+`observedAt(for:)` for a row's original timestamp when a board combines cached
+coverage with newly fetched gaps. A cache hit never renews its freshness.
+
+```swift
+let snapshot = try await client.departureBoardSnapshot(request)
+for departure in snapshot.board.departures.values {
+    let acquiredAt = snapshot.observedAt(for: departure)
+    // Map the departure using acquiredAt, even on a cache hit.
+}
+```
+
+Compatible complete intervals are shared for 60 seconds between clients and
+routing. Set `maximumJourneys: -1` for unrestricted boards. Filtered boards are
+isolated from unrestricted consumers, and saturated finite boards cannot prove
+complete coverage. Configure a shared client `language` to allow route and
+stop-board consumers to reuse the same evidence. Explicit request languages
+still override that default.
+
 ## Product filters
 
 The API's `products` parameter is a bitmask. Combine the raw values of

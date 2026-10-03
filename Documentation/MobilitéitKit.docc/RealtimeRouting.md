@@ -33,15 +33,17 @@ let router = try await TransitRouter(
 )
 ```
 
-Boards request `SERVER_DEFAULT` and `passlist=1`. Acquisition covers up to
-90 minutes in 30-minute slices with at most 50 journeys each. Full slices are
-split, up to eight requests per stop; exhausted slices are explicitly incomplete.
-Destination-aware discovery queries access stops and reachable outgoing trips,
-including delayed departures absent from static winners, before a final RAPTOR
-scan. Discovery carries its optimistic envelope forward one ride per wave,
-avoiding repeated scans of prior waves. It stops after four waves, 24 stop targets, or one shared four-second
-deadline; at most four requests run concurrently. Coverage outside those bounds
-remains partial.
+Boards request `SERVER_DEFAULT`, `passlist=1`, and `maxJourneys=-1`.
+Acquisition targets reachable boarding occurrences and their effective departure
+windows for the current search or page. Adjacent windows merge into unrestricted
+boards; only ATP's 1,439-minute duration limit requires splitting. A report from
+another stop does not cover an occurrence that still lacks a fresh departure
+prediction. Destination-aware discovery includes delayed departures and transfers
+absent from scheduled winners, then applies all acquired predictions before the
+final RAPTOR scan. It stops after four waves, 24 stop targets, or the shared
+acquisition deadline; at most four stop acquisitions run concurrently. The
+package's default deadline is four seconds; the host can select two seconds.
+Unchecked occurrences remain scheduled.
 
 Each provider wave reserves a quarter of its remaining time (up to 500 ms)
 for matching completed boards to GTFS. Board acquisition stops at that earlier
@@ -49,12 +51,22 @@ cutoff, retaining completed slices and marking unfinished coverage partial.
 A slow later slice therefore does not discard predictions or cancellations
 that already arrived. Matching still stops at the original shared deadline.
 
-The shared request cache coalesces in-flight requests, lets waiters cancel
-independently, and expires after 60 seconds. The provider's bounded caches reuse
-only complete intervals that contain the request. Pass `.forceRefresh` to
-bypass both caches when starting or refreshing a calculation. GTFS candidate
-and matched journey-reference caches avoid repeated preparation and matching;
-a reference never suppresses a later, better observation of the same vehicle.
+The shared departure-board cache reuses fresh compatible interval coverage
+across stop boards and routing, fetches uncovered gaps, coalesces overlapping
+in-flight requests, and permits independent caller cancellation. Entries expire
+60 seconds after their original acquisition and are evicted within a bounded
+capacity. Endpoint, credentials, station, language, filters, realtime mode and
+passlist availability isolate coverage. Truncated boards do not provide complete
+unrestricted coverage. An explicit refresh bypasses completed evidence and older
+responses cannot replace refreshed coverage.
+
+Normal searches use `.useCache`. Pass `.forceRefresh` for an explicit refresh.
+`RealtimeRoutingRequest.targets` optionally supplies per-stop windows; providers
+implementing only the original method continue receiving its global bounds.
+Paging retains fresh observations and checks missing coverage for newly explored
+occurrences. New evidence revalidates accumulated results within the active
+planning generation, including cancellations, transfers, timings and ranking.
+Cancelled or superseded operations cannot publish results.
 
 ```swift
 let query = RouteQuery(
@@ -89,6 +101,8 @@ Overlapping boards merge by trip, service date and stop sequence, preferring
 reported predictions over estimates, then newer observations. Non-monotonic
 active predictions and ambiguous matches are ignored. `RoutingMetrics` includes
 network requests, cache hits, bytes, coverage, and reported-event counts.
+`RoutingDiagnostics.realtimeMatchingRejections` separates unmatched, ambiguous,
+invalid and expired matching attempts from missing acquisition.
 
 RAPTOR evaluates walking access and transfers against effective times. This
 means a vehicle scheduled before a rider reaches a stop can still be boarded

@@ -557,6 +557,7 @@ public actor JourneyPlanningSession {
     private var directWalking: Journey?
     private var cachedEndpointEdges: (access: [Edge], egress: [Edge])?
     var cachedRealtimeBatch: RealtimePatchBatch?
+    var cachedRealtimeInterval: DateInterval?
     var frozenPatches: [RealtimeTripPatch]?
     var latestPatchesByInstance: [RealtimePatchKey: RealtimeTripPatch] = [:]
     fileprivate struct BuiltJourney {

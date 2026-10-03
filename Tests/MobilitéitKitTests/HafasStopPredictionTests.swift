@@ -78,7 +78,7 @@ import Testing
         #expect(RealtimeBoardProtocol.requests(host).count == 3)
     }
 
-    @Test func fullBoardsAreSplitAndRemainPartialWhenTheBudgetIsExhausted() async throws {
+    @Test func unrestrictedBoardsAvoidTheOldFiftyJourneySplit() async throws {
         let fixture = try await RealtimeTestFixture(); defer { fixture.remove() }
         let row = #"{"Product":{"line":"201"},"time":"08:00:00","date":"2026-09-30","rtTime":"08:08:00"}"#
         let body = "{\"Departure\":[" + Array(repeating: row, count: 50).joined(separator: ",") + "]}"
@@ -86,9 +86,9 @@ import Testing
         let provider = try HafasRealtimeRoutingProvider(databaseURL: fixture.database, client: client)
         let batch = try await provider.patches(for: ["a"], from: RealtimeTestFixture.date("08:00:00"),
             through: RealtimeTestFixture.date("08:30:00"), refreshPolicy: .forceRefresh)
-        #expect(batch.incompleteStopIDs == ["a"])
-        #expect(batch.networkRequests == 8)
-        #expect(RealtimeBoardProtocol.requests(host).count == 8)
+        #expect(batch.incompleteStopIDs.isEmpty)
+        #expect(batch.networkRequests == 1)
+        #expect(RealtimeBoardProtocol.requests(host).count == 1)
     }
 
     @Test func ambiguousTripsAndNonMonotonicPredictionsAreIgnored() async throws {

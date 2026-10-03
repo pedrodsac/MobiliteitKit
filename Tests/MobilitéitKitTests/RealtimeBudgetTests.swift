@@ -19,8 +19,10 @@ import Testing
         let provider = try HafasRealtimeRoutingProvider(databaseURL: fixture.database, client: client)
         let started = ContinuousClock.now
         let batch = try await provider.patches(for: .init(stopIDs: ["a"],
-            from: RealtimeTestFixture.date("08:00:00"), through: RealtimeTestFixture.date("09:00:00"),
-            timeout: .seconds(1), deadline: started.advanced(by: .seconds(1))))
+            from: RealtimeTestFixture.date("08:00:00"), through: RealtimeTestFixture.date("09:30:00"),
+            timeout: .seconds(1), deadline: started.advanced(by: .seconds(1)), targets: [
+                .init(stopID: "a", from: RealtimeTestFixture.date("08:00:00"), through: RealtimeTestFixture.date("08:30:00")),
+                .init(stopID: "a", from: RealtimeTestFixture.date("09:00:00"), through: RealtimeTestFixture.date("09:30:00"))]))
         let patch = try #require(batch.patches.first)
         #expect(patch.tripID == "trip")
         #expect(patch.status == (cancelled ? .cancelled : .active))
@@ -67,17 +69,17 @@ import Testing
         let from = RealtimeTestFixture.date("08:05:00")
         let through = RealtimeTestFixture.date("09:35:00")
         let first = try await provider.patches(for: ["a"], from: from, through: through, refreshPolicy: .useCache)
-        #expect(first.networkRequests == 4)
+        #expect(first.networkRequests == 1)
         let moved = try await provider.patches(for: ["a"], from: from.addingTimeInterval(10),
                                               through: through.addingTimeInterval(10), refreshPolicy: .useCache)
         #expect(moved.networkRequests == 0)
-        #expect(moved.cacheHits == 4)
+        #expect(moved.cacheHits == 1)
         let extended = try await provider.patches(for: ["a"], from: from.addingTimeInterval(30 * 60),
                                                  through: through.addingTimeInterval(30 * 60), refreshPolicy: .useCache)
         #expect(extended.networkRequests == 1)
-        #expect(extended.cacheHits == 3)
+        #expect(extended.cacheHits == 1)
         let refreshed = try await provider.patches(for: ["a"], from: from, through: through, refreshPolicy: .forceRefresh)
-        #expect(refreshed.networkRequests == 4)
+        #expect(refreshed.networkRequests == 1)
     }
 
     @Test func expiredDeadlineDoesNotUseCachedEvidenceAsComplete() async throws {
@@ -110,15 +112,17 @@ import Testing
             return value
         }
         let data = try JSONSerialization.data(withJSONObject: ["Departure": rows])
-        let board = try JSONDecoder().decode(HafasDepartureBoard.self, from: data)
-        let (client, host) = RealtimeBoardProtocol.client { _ in "{\"Departure\":[]}" }
+        let payload = String(decoding: data, as: UTF8.self)
+        let (client, host) = RealtimeBoardProtocol.client { _ in payload }
         defer { RealtimeBoardProtocol.remove(host) }
         let provider = try HafasRealtimeRoutingProvider(databaseURL: fixture.database, client: client)
         let from = RealtimeTestFixture.date("08:00:00"), through = RealtimeTestFixture.date("08:30:00")
         _ = await provider.prepareSchedules(for: ["a"], from: from.addingTimeInterval(-7_200),
                                            through: through, deadline: ContinuousClock.now.advanced(by: .seconds(4)))
         _ = await provider.cachedStopTimes(forTripID: "trip")
-        await provider.seedCompleteMatchingBoard(board, from: from, through: through)
+        _ = try await client.departureBoardSnapshot(.init(stationID: "a", language: "en",
+            date: try GTFSDate(parsing: "20260930"), time: ServiceTime(rawValue: 8 * 3_600),
+            durationMinutes: 30, maximumJourneys: -1, realtimeMode: .serverDefault, includePasslist: true))
         let started = ContinuousClock.now
         let batch = try await provider.patches(for: .init(stopIDs: ["a"], from: from, through: through,
             timeout: .milliseconds(100), deadline: started.advanced(by: .milliseconds(100))))
@@ -126,15 +130,7 @@ import Testing
         #expect(batch.incompleteStopIDs == ["a"])
         #expect(batch.boardMatchingMilliseconds > 0)
         #expect(started.duration(to: .now) < .seconds(1))
-        #expect(RealtimeBoardProtocol.requests(host).isEmpty)
+        #expect(RealtimeBoardProtocol.requests(host).count == 1)
     }
 
-}
-
-
-private extension HafasRealtimeRoutingProvider {
-    func seedCompleteMatchingBoard(_ board: HafasDepartureBoard, from: Date, through: Date) {
-        boardsBySlice[.init(stopID: "a", start: from)] = .init(fetchedAt: .now, from: from, through: through,
-            result: .init(stopID: "a", board: board, fetchedAt: .now, incomplete: false, requests: 0, hits: 0, bytes: 0))
-    }
 }

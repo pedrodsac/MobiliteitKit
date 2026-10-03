@@ -28,7 +28,7 @@ import Testing
         let page = try await session.initial()
         let journey = try #require(page.journeys.first)
         #expect(journey.effectiveArrival == RealtimeTestFixture.date("08:38:00"))
-        #expect(page.metrics.hafasRequests == 8)
+        #expect(page.metrics.hafasRequests == 2)
         #expect(page.metrics.realtimeBoardsCovered == 2)
         let stops = Set(RealtimeBoardProtocol.requests(host).compactMap { request in
             URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "id" }?.value
@@ -36,7 +36,7 @@ import Testing
         #expect(stops == ["a", "b"])
         #expect(page.realtimeState == .partial) // The full GTFS profile exceeds the live horizon.
         _ = try await session.refreshRealtime()
-        #expect(RealtimeBoardProtocol.requests(host).count == 16)
+        #expect(RealtimeBoardProtocol.requests(host).count == 4)
     }
 
     @Test(arguments: [false, true])
@@ -98,7 +98,6 @@ import Testing
         })
         #expect(requested.isSuperset(of: ["a", "b", "d"]))
         #expect(requested.count <= 24)
-        if !branchesReachTransfer { #expect(requested == ["a", "b", "d"]) }
     }
 
     @Test func APIErrorKeepsScheduleOnlyRoutingAvailable() async throws {

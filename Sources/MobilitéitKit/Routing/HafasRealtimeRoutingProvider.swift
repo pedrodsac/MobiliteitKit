@@ -3,15 +3,6 @@ import Foundation
 /// Matches optional ATP predictions to this provider's immutable GTFS generation.
 /// Acquisition, matching and event construction are separate from RAPTOR.
 public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
-    struct CachedBoard: Sendable {
-        let fetchedAt: Date
-        let from: Date
-        let through: Date
-        let result: BoardResult
-    }
-    struct CompletedSlice: Sendable {
-        let from: Date; let through: Date; let board: HafasDepartureBoard; let fetchedAt: Date
-    }
     struct BoardResult: Sendable {
         let stopID: String
         let board: HafasDepartureBoard?
@@ -22,8 +13,9 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
         let bytes: Int
         var httpMilliseconds: Int = 0
         var decodeMilliseconds: Int = 0
-        var completedSlices: [CompletedSlice] = []
+        var observations: [String: Date] = [:]
     }
+    struct RealtimeMatchingFailure: Error { let reason: RealtimeMatchingRejection }
     struct Candidate {
         let departure: ScheduledDeparture
         let serviceDate: GTFSDate
@@ -58,8 +50,6 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
     let now: @Sendable () -> Date
     let fullTimestampFormatter: DateFormatter
     let minuteTimestampFormatter: DateFormatter
-    struct BoardSliceKey: Hashable, Sendable { let stopID: String; let start: Date }
-    var boardsBySlice: [BoardSliceKey: CachedBoard] = [:]
     var schedulesByStopID: [String: ScheduleCache] = [:]
     var matchedJourneys: [String: MatchedJourney] = [:]
     var stopTimesByTripID: [String: [TripStopTime]] = [:]
@@ -115,7 +105,7 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
         let matchingReserve = min(.milliseconds(500), remaining / 4)
         let acquisitionDeadline = deadline.advanced(by: .zero - matchingReserve)
         let matchingFrom = request.from.addingTimeInterval(-Double(request.scheduledLookbackSeconds))
-        async let schedules = prepareSchedules(for: stopIDs, from: matchingFrom, through: request.through, deadline: deadline)
+        async let schedules = prepareSchedules(for: stopIDs, from: matchingFrom, through: request.through, deadline: deadline, targets: request.targets, lookback: request.scheduledLookbackSeconds)
         let started = ContinuousClock.now
         let fetched = await boards(for: stopIDs, request: request, deadline: acquisitionDeadline)
         let fetchMilliseconds = Self.milliseconds(started.duration(to: .now))
@@ -124,6 +114,7 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
         let matchingStarted = ContinuousClock.now
         var patches: [String: RealtimeTripPatch] = [:]
         var unfinished = Set<String>()
+        var rejections: [RealtimeMatchingRejection: Int] = [:]
         for stopID in stopIDs {
             guard ContinuousClock.now < deadline else { unfinished.insert(stopID); continue }
             guard let result = fetched[stopID], let board = result.board else { continue }
@@ -131,10 +122,14 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
             for live in board.departures.values {
                 try Task.checkCancellation()
                 guard ContinuousClock.now < deadline else { unfinished.insert(stopID); break }
-                guard Self.hasRealtimeSignal(live),
-                      let planned = date(date: live.plannedDate, time: live.plannedTime),
-                      planned >= matchingFrom.addingTimeInterval(-90),
-                      planned <= request.through.addingTimeInterval(90) else { continue }
+                guard Self.hasRealtimeSignal(live) else { continue }
+                guard let planned = date(date: live.plannedDate, time: live.plannedTime) else {
+                    rejections[.invalidTimestamp, default: 0] += 1; continue
+                }
+                guard planned >= matchingFrom.addingTimeInterval(-90),
+                      planned <= request.through.addingTimeInterval(90) else {
+                    rejections[.outsideInterval, default: 0] += 1; continue
+                }
                 let reference = live.journeyReference?.reference
                 let cached = reference.flatMap { matchedJourneys[$0] }
                 let reused = cached.flatMap { match -> Candidate? in
@@ -148,17 +143,23 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
                 }
                 let candidate: Candidate?
                 if let reused { candidate = reused }
-                else { candidate = await uniqueCandidate(for: live, planned: planned, scheduled: scheduled, deadline: deadline) }
+                else {
+                    switch await uniqueCandidate(for: live, planned: planned, scheduled: scheduled, deadline: deadline) {
+                    case let .success(value): candidate = value
+                    case let .failure(error):
+                        rejections[error.reason, default: 0] += 1; candidate = nil
+                    }
+                }
                 guard ContinuousClock.now < deadline else { unfinished.insert(stopID); break }
-                guard let candidate,
-                      let update = await patch(for: live, candidate: candidate,
-                                               boardingStopID: stopID, observedAt: result.fetchedAt, deadline: deadline)
-                else { continue }
+                guard let candidate else { continue }
+                guard let update = await patch(for: live, candidate: candidate,
+                                               boardingStopID: stopID, observedAt: result.observations[live.cacheIdentity] ?? result.fetchedAt, deadline: deadline)
+                else { rejections[.invalidTripTimeline, default: 0] += 1; continue }
                 guard ContinuousClock.now < deadline else { unfinished.insert(stopID); break }
                 if let reference {
                     matchedJourneys[reference] = .init(tripID: candidate.departure.tripID,
                                                        serviceDate: candidate.serviceDate,
-                                                       fetchedAt: result.fetchedAt)
+                                                       fetchedAt: result.observations[live.cacheIdentity] ?? result.fetchedAt)
                 }
                 let key = "\(update.tripID)@\(update.serviceDate.compactString)"
                 patches[key] = patches[key].map { $0.merging(update) } ?? update
@@ -181,10 +182,11 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
                      incompleteStopIDs: Set(fetched.values.filter(\.incomplete).map(\.stopID)).union(unfinished).union(requested.subtracting(prepared.byStopID.keys)),
                      fetchedAt: fetched.values.map(\.fetchedAt).min(),
                      httpMilliseconds: fetched.values.reduce(0) { $0 + $1.httpMilliseconds },
-                     decodeMilliseconds: fetched.values.reduce(0) { $0 + $1.decodeMilliseconds })
+                     decodeMilliseconds: fetched.values.reduce(0) { $0 + $1.decodeMilliseconds },
+                     matchingRejections: rejections)
     }
 
-    func prepareSchedules(for stopIDs: [String], from: Date, through: Date, deadline: ContinuousClock.Instant) async -> PreparedSchedules {
+    func prepareSchedules(for stopIDs: [String], from: Date, through: Date, deadline: ContinuousClock.Instant, targets: [RealtimeBoardTarget] = [], lookback: Int = 7_200) async -> PreparedSchedules {
         let started = ContinuousClock.now
         guard ContinuousClock.now < deadline else { return .init(byStopID: [:], milliseconds: 0) }
         let feed = await store.feedInfo()
@@ -192,11 +194,14 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
         var result: [String: [PreparedDeparture]] = [:]
         for stopID in stopIDs {
             if Task.isCancelled || ContinuousClock.now >= deadline { break }
-            if let cached = schedulesByStopID[stopID], cached.from <= from, cached.through >= through {
+            let relevant = targets.filter { $0.stopID == stopID }
+            let start = relevant.map(\.from).min().map { max(from, $0.addingTimeInterval(-Double(lookback) - 1_800)) } ?? from
+            let end = relevant.map(\.through).max().map { min(through, $0) } ?? through
+            if let cached = schedulesByStopID[stopID], cached.from <= start, cached.through >= end {
                 result[stopID] = cached.values; continue
             }
             let departures = (try? await store.nextScheduledDepartures(
-                fromStopID: stopID, at: from, horizon: through.timeIntervalSince(from), limit: 4_000
+                fromStopID: stopID, at: start, horizon: end.timeIntervalSince(start), limit: 4_000
             )) ?? []
             let values = departures.compactMap { value -> PreparedDeparture? in
                 guard value.serviceDay.index >= 0, value.serviceDay.index <= lastDay,
@@ -206,7 +211,7 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
                              scheduledDate: Self.serviceDate(date, time: time))
             }.sorted { $0.scheduledDate < $1.scheduledDate }
             result[stopID] = values
-            schedulesByStopID[stopID] = .init(from: from, through: through, values: values)
+            schedulesByStopID[stopID] = .init(from: start, through: end, values: values)
         }
         if schedulesByStopID.count > 128 {
             schedulesByStopID = schedulesByStopID.filter { stopIDs.contains($0.key) }

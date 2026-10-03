@@ -6,7 +6,7 @@ extension HafasRealtimeRoutingProvider {
         planned: Date,
         scheduled: [PreparedDeparture],
         deadline: ContinuousClock.Instant
-    ) async -> Candidate? {
+    ) async -> Result<Candidate, RealtimeMatchingFailure> {
         var candidates: [Candidate] = []
         let lowerBound = planned.addingTimeInterval(-90)
         let upperBound = planned.addingTimeInterval(90)
@@ -18,7 +18,7 @@ extension HafasRealtimeRoutingProvider {
             else { upper = middle }
         }
         for value in scheduled[lower...] {
-            guard !Task.isCancelled, ContinuousClock.now < deadline else { return nil }
+            guard !Task.isCancelled, ContinuousClock.now < deadline else { return .failure(.init(reason: .deadline)) }
             guard value.scheduledDate <= upperBound else { break }
             guard let lineScore = Self.lineScore(live.product, route: value.departure.route)
             else { continue }
@@ -60,13 +60,13 @@ extension HafasRealtimeRoutingProvider {
             if lhs != rhs { return lhs < rhs }
             return $0.departure.tripID < $1.departure.tripID
         }
-        guard let best = ordered.first else { return nil }
+        guard let best = ordered.first else { return .failure(.init(reason: .noCandidate)) }
         if ordered.count > 1 {
             let firstDistance = abs(best.scheduledDate.timeIntervalSince(planned))
             let secondDistance = abs(ordered[1].scheduledDate.timeIntervalSince(planned))
-            guard best.score != ordered[1].score || firstDistance != secondDistance else { return nil }
+            guard best.score != ordered[1].score || firstDistance != secondDistance else { return .failure(.init(reason: .ambiguousCandidate)) }
         }
-        return best
+        return .success(best)
     }
 
     func cachedStopTimes(forTripID tripID: String) async -> [TripStopTime] {

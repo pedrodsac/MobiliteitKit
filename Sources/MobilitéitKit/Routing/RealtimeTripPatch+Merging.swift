@@ -78,6 +78,38 @@ extension RealtimeTripPatch {
             : (newDate >= oldDate ? incoming : self)
     }
 
+    /// Freshness belongs to each observation, not to the whole trip. Keep
+    /// scheduled events so accumulated pages can shed expired live timings.
+    func retainingFreshObservations(at now: Date, maximumAge: TimeInterval = 60) -> Self {
+        func fresh(_ date: Date?) -> Bool {
+            date.map { now.timeIntervalSince($0) < maximumAge && $0.timeIntervalSince(now) <= 60 } ?? true
+        }
+        let retained = events.map { event in
+            let departure = fresh(event.departureObservedAt)
+            let arrival = fresh(event.arrivalObservedAt)
+            let metadata = fresh(event.observedAt)
+            let stamps = [metadata ? event.observedAt : nil,
+                          departure ? event.departureObservedAt : nil,
+                          arrival ? event.arrivalObservedAt : nil].compactMap { $0 }
+            return RealtimeStopEventPatch(stopID: event.stopID,
+                scheduledDeparture: event.scheduledDeparture,
+                effectiveDeparture: departure ? event.effectiveDeparture : event.scheduledDeparture,
+                departureSource: departure ? event.departureSource : .scheduled,
+                scheduledArrival: event.scheduledArrival,
+                effectiveArrival: arrival ? event.effectiveArrival : event.scheduledArrival,
+                arrivalSource: arrival ? event.arrivalSource : .scheduled,
+                platform: metadata ? event.platform : nil, stopSequence: event.stopSequence,
+                boardingAllowed: metadata ? event.boardingAllowed : nil,
+                alightingAllowed: metadata ? event.alightingAllowed : nil,
+                observedAt: stamps.max(),
+                departureObservedAt: departure ? event.departureObservedAt : nil,
+                arrivalObservedAt: arrival ? event.arrivalObservedAt : nil)
+        }
+        let latest = events.compactMap(\.observedAt).max()
+        return .init(tripID: tripID, serviceDate: serviceDate,
+                     status: fresh(latest) ? status : .active, events: retained)
+    }
+
     func event(stopID: String, sequence: Int) -> RealtimeStopEventPatch? {
         events.first { $0.stopID == stopID && $0.stopSequence == sequence }
             ?? events.first { $0.stopID == stopID && $0.stopSequence == nil }

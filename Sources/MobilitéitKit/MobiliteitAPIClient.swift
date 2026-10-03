@@ -156,6 +156,8 @@ public struct MobiliteitAPIClient: Sendable {
     public let apiKey: String
     /// The endpoint root. Override this for a relay or compatible test server.
     public let baseURL: URL
+    /// Shared language for board consumers and realtime routing.
+    public let language: String?
     private let session: URLSession
 
     /// Creates a client for the Mobilitéit HAFAS API.
@@ -167,11 +169,13 @@ public struct MobiliteitAPIClient: Sendable {
     public init(
         apiKey: String,
         baseURL: URL = MobiliteitAPIClient.defaultBaseURL,
-        session: URLSession = .shared
+        session: URLSession = .shared,
+        language: String? = nil
     ) {
         self.apiKey = apiKey
         self.baseURL = baseURL
         self.session = session
+        self.language = language
     }
 
     /// Creates a client from a URL entered or stored by the host app.
@@ -191,7 +195,8 @@ public struct MobiliteitAPIClient: Sendable {
     public init(
         apiKey: String,
         apiURL: String,
-        session: URLSession = .shared
+        session: URLSession = .shared,
+        language: String? = nil
     ) throws {
         let value = apiURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let url = URL(string: value),
@@ -200,7 +205,7 @@ public struct MobiliteitAPIClient: Sendable {
               scheme == "http" || scheme == "https" else {
             throw MobiliteitAPIError.invalidRequest("apiURL must be an absolute HTTP(S) URL")
         }
-        self.init(apiKey: apiKey, baseURL: url, session: session)
+        self.init(apiKey: apiKey, baseURL: url, session: session, language: language)
     }
 
     /// Fetches stops near a WGS-84 coordinate.
@@ -250,19 +255,44 @@ public struct MobiliteitAPIClient: Sendable {
         try await departureBoardResponse(request, refreshPolicy: refreshPolicy).board
     }
 
+    /// Returns acquisition timestamps and proven coverage, including on cache hits.
+    public func departureBoardSnapshot(
+        _ request: HafasDepartureBoardRequest,
+        refreshPolicy: RealtimeRefreshPolicy = .useCache
+    ) async throws -> HafasDepartureBoardSnapshot {
+        .init(try await departureBoardResponse(request, refreshPolicy: refreshPolicy))
+    }
+
     func departureBoardResponse(
-        _ request: HafasDepartureBoardRequest, refreshPolicy: RealtimeRefreshPolicy
+        _ request: HafasDepartureBoardRequest, refreshPolicy: RealtimeRefreshPolicy,
+        preservePartialOnFailure: Bool = false, maximumCacheAge: TimeInterval = 60
     ) async throws -> CachedBoardResponse {
         guard !request.stationID.isEmpty else { throw MobiliteitAPIError.invalidRequest("stationID is required") }
         if let duration = request.durationMinutes, !(0...1_439).contains(duration) {
             throw MobiliteitAPIError.invalidRequest("durationMinutes must be in 0...1439")
         }
+        if let maximum = request.maximumJourneys, maximum < -1 {
+            throw MobiliteitAPIError.invalidRequest("maximumJourneys must be -1 or nonnegative")
+        }
+        guard let interval = request.interval() else {
+            return try await fetchBoardResponse(request, refreshPolicy: refreshPolicy, maximumCacheAge: maximumCacheAge)
+        }
+        let resolved = request.covering(interval)
+        let scope = try boardScope(resolved)
+        guard let scope else { return try await fetchBoardResponse(resolved, refreshPolicy: refreshPolicy, maximumCacheAge: maximumCacheAge) }
+        return try await Self.departureBoardCache.intervalResponse(scope: scope, refreshPolicy: refreshPolicy,
+                                                                  preservePartialOnFailure: preservePartialOnFailure, maximumCacheAge: maximumCacheAge) { interval in
+            try await fetchBoardResponse(resolved.covering(interval), refreshPolicy: refreshPolicy, maximumCacheAge: maximumCacheAge)
+        }
+    }
+
+    private func boardURL(_ request: HafasDepartureBoardRequest) throws -> URL {
         var items = baseItems()
         items += [
             .init(name: "id", value: request.stationID),
             .init(name: "extId", value: request.externalStationID),
             .init(name: "requestId", value: request.requestID),
-            .init(name: "lang", value: request.language),
+            .init(name: "lang", value: request.language ?? language),
             .init(name: "direction", value: request.directionStationID),
             .init(name: "date", value: request.date?.description),
             .init(name: "time", value: request.time?.gtfsString),
@@ -277,9 +307,31 @@ public struct MobiliteitAPIClient: Sendable {
             .init(name: "rtMode", value: request.realtimeMode?.rawValue),
             .init(name: "passlist", value: request.includePasslist ? "1" : nil),
         ].filter { $0.value != nil }
-        let requestURL = try url(path: "departureBoard", queryItems: items)
+        return try url(path: "departureBoard", queryItems: items)
+    }
+
+    private func boardScope(_ request: HafasDepartureBoardRequest) throws -> BoardCacheScope? {
+        guard let interval = request.interval() else { return nil }
+        var components = URLComponents(url: try boardURL(request), resolvingAgainstBaseURL: false)!
+        let windowParameters: Set<String> = ["date", "time", "duration", "maxJourneys", "requestId"]
+        components.queryItems = components.queryItems?.filter { !windowParameters.contains($0.name) }.map { item in
+            var item = item
+            if item.name == "id", let value = item.value, !value.isEmpty, value.allSatisfy(\.isNumber) {
+                item.value = String(value.drop(while: { $0 == "0" }))
+            }
+            if ["operators", "lines", "platforms", "attributes"].contains(item.name) {
+                item.value = item.value?.split(separator: ",").sorted().joined(separator: ",")
+            }
+            return item
+        }.sorted { ($0.name, $0.value ?? "") < ($1.name, $1.value ?? "") }
+        return .init(namespace: components.string!, interval: interval, maximumJourneys: request.maximumJourneys)
+    }
+
+    private func fetchBoardResponse(_ request: HafasDepartureBoardRequest,
+                                    refreshPolicy: RealtimeRefreshPolicy, maximumCacheAge: TimeInterval = 60) async throws -> CachedBoardResponse {
+        let requestURL = try boardURL(request)
         return try await Self.departureBoardCache.measuredResponse(
-            for: requestURL.absoluteString, refreshPolicy: refreshPolicy
+            for: requestURL.absoluteString, refreshPolicy: refreshPolicy, scope: try boardScope(request), maximumCacheAge: maximumCacheAge
         ) {
             let measured: (value: HafasDepartureBoardEnvelope, http: Int, decode: Int) = try await fetchMeasured(requestURL: requestURL)
             let response = measured.value

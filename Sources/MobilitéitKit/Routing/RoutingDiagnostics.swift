@@ -14,6 +14,7 @@ public struct RoutingDiagnostics: Hashable, Sendable {
         case boardsCovered, incompleteBoards, workers, candidates, retainedAlternatives
         case invalidJourneys, duplicatesSuppressed, sharedFirstVehicleGroups, recommendationSwitches, pageNewJourneys
     }
+    public var realtimeMatchingRejections: [RealtimeMatchingRejection: Int] = [:]
     public var rejections: [JourneyInfeasibility: Int] = [:]
     public var counters: [Counter: Int] = [:]
     public var rounds: [RoutingRoundMetrics] = []

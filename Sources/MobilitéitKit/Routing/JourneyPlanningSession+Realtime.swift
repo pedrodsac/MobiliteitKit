@@ -3,20 +3,16 @@ import Foundation
 extension JourneyPlanningSession {
     func acquireRealtime(access: [Edge], egress: [Edge], anchor: Date,
                                  searchHorizon: TimeInterval, force: Bool) async throws -> [RealtimeTripPatch] {
-        if !force, let frozenPatches {
-            state = frozenPatches.isEmpty ? .unavailable : .partial
-            latestPatchesByInstance = Dictionary(frozenPatches.map { (RealtimePatchKey(tripID: $0.tripID, serviceDate: $0.serviceDate), $0) }, uniquingKeysWith: { _, latest in latest })
-            return frozenPatches
-        }
         guard case let .bestEffort(configuration, requestedRefresh) = query.realtimePolicy,
               let realtimeProvider else { return [] }
         let from = query.direction == .arriveBy
-            ? anchor.addingTimeInterval(-min(searchHorizon, Double(configuration.minimumForwardHorizonSeconds)))
+            ? anchor.addingTimeInterval(-searchHorizon)
             : anchor
         let through = query.direction == .arriveBy ? anchor
-            : anchor.addingTimeInterval(min(searchHorizon, Double(configuration.minimumForwardHorizonSeconds)))
+            : anchor.addingTimeInterval(searchHorizon)
         if !force, let cachedRealtimeBatch, let fetchedAt = cachedRealtimeBatch.fetchedAt,
-           clock().timeIntervalSince(fetchedAt) < 60 {
+           clock().timeIntervalSince(fetchedAt) < 60,
+           let interval = cachedRealtimeInterval, interval.start <= from, interval.end >= through {
             metrics.hafasCacheHits += 1
             return cachedRealtimeBatch.patches
         }
@@ -25,31 +21,46 @@ extension JourneyPlanningSession {
         var queried: Set<String> = []
         var covered: Set<String> = []
         var incomplete: Set<String> = []
-        var patches: [RealtimePatchKey: RealtimeTripPatch] = [:]
+        let seeds = force || requestedRefresh == .forceRefresh ? []
+            : (frozenPatches ?? []).map { $0.retainingFreshObservations(at: clock()) }
+        var patches = Dictionary(seeds.map { (RealtimePatchKey(tripID: $0.tripID, serviceDate: $0.serviceDate), $0) },
+                                 uniquingKeysWith: { old, new in old.merging(new) })
         var fetchedAt: Date?
-        var frontier = access.sorted { $0.seconds < $1.seconds }
-            .prefix(8).map { snapshot.stops[$0.stop].id }
+        var frontier: [String] = []
         var discoveryArrivals = Dictionary(access.map { ($0.stop, from.addingTimeInterval(Double($0.seconds))) },
                                            uniquingKeysWith: min)
-        let omittedAccess = access.count > frontier.count
-        let limitedHorizon = searchHorizon > through.timeIntervalSince(from)
+        let omittedAccess = access.count > 8
+        let limitedHorizon = searchHorizon > Double(configuration.minimumForwardHorizonSeconds)
         // Reserve the bounded board budget for trips that can still lead to the
         // destination. Earliest intermediate stops alone starve later lines.
         let maxRides = min(8, max(1, (query.preferences.maxTransfers ?? 7) + 1))
         let reachability = Raptor.DestinationReachability(snapshot: snapshot,
             egressStops: Set(egress.map(\.stop)), maxRides: maxRides + 1)
+        frontier = access.sorted { left, right in
+            let a = reachability.stopsByRemainingRides.firstIndex { $0[left.stop] } ?? Int.max
+            let b = reachability.stopsByRemainingRides.firstIndex { $0[right.stop] } ?? Int.max
+            return a != b ? a < b : (left.seconds != right.seconds ? left.seconds < right.seconds : left.stop < right.stop)
+        }.prefix(8).map { snapshot.stops[$0.stop].id }
         for _ in 0..<min(4, max(1, configuration.maximumRefinementWaves)) {
             try Task.checkCancellation()
             guard !frontier.isEmpty, ContinuousClock.now < deadline, queried.count < 24 else { break }
             frontier = Array(frontier.prefix(24 - queried.count))
+            let targets = realtimeTargets(stopIDs: frontier, arrivalByStop: discoveryArrivals,
+                from: from, through: through, configuration: configuration, deadline: deadline, patches: patches, reachability: reachability)
+            let targetedStops = frontier.filter { stopID in targets.contains { $0.stopID == stopID } }
             queried.formUnion(frontier)
             do {
-                let batch = try await realtimeProvider.patches(for: .init(
-                    stopIDs: frontier, from: from, through: through,
+                let batch = targetedStops.isEmpty
+                    ? RealtimePatchBatch(patches: [], requestedStopIDs: [], coveredStopIDs: [])
+                    : try await realtimeProvider.patches(for: .init(
+                    stopIDs: targetedStops, from: from, through: through,
                     scheduledLookbackSeconds: configuration.scheduledLookbackSeconds,
                     refreshPolicy: force ? .forceRefresh : requestedRefresh,
                     maximumConcurrentRequests: min(4, configuration.maximumConcurrentBoardRequests),
-                    timeout: ContinuousClock.now.duration(to: deadline), deadline: deadline))
+                    timeout: ContinuousClock.now.duration(to: deadline), deadline: deadline, targets: targets))
+                for (reason, count) in batch.matchingRejections {
+                    diagnostics.realtimeMatchingRejections[reason, default: 0] += count
+                }
                 covered.formUnion(batch.coveredStopIDs)
                 incomplete.formUnion(batch.incompleteStopIDs)
                 if let date = batch.fetchedAt { fetchedAt = min(fetchedAt ?? date, date) }
@@ -85,10 +96,11 @@ extension JourneyPlanningSession {
         metrics.realtimePredictedEvents = updates.flatMap(\.events).filter {
             $0.departureSource == .reported || $0.arrivalSource == .reported
         }.count
-        state = covered.isEmpty ? .unavailable
+        state = covered.isEmpty && updates.isEmpty ? .unavailable
             : (covered == queried && incomplete.isEmpty && frontier.isEmpty && !omittedAccess
                 && !limitedHorizon && ContinuousClock.now < deadline && !updates.isEmpty ? .live : .partial)
         metrics.realtimeOverlayRevisions += 1
+        cachedRealtimeInterval = .init(start: from, end: through)
         cachedRealtimeBatch = .init(patches: updates, requestedStopIDs: queried,
                                     coveredStopIDs: covered, incompleteStopIDs: incomplete,
                                     fetchedAt: fetchedAt)
@@ -126,7 +138,7 @@ extension JourneyPlanningSession {
                         let event = patch?.event(stopID: snapshot.stops[stop].id, sequence: board.sequence)
                         let departure = event?.effectiveDeparture ?? day.start.addingTimeInterval(Double(time))
                         guard event?.boardingAllowed != false,
-                              departure >= reach.addingTimeInterval(patch == nil ? -Double(lookback) : 0), departure <= through
+                              departure >= reach.addingTimeInterval(freshBoardingReport(event) ? 0 : -Double(lookback)), departure <= through
                         else { continue }
                         let rescue = max(0, reach.timeIntervalSince(departure))
                         for downstream in trip.times[(position + 1)...] where downstream.dropoff == 0 {
@@ -160,12 +172,15 @@ extension JourneyPlanningSession {
                     guard query.preferences.allowedModes.contains(routeType: snapshot.routes[trip.route].type)
                     else { return false }
                     return serviceDays.contains { day in
-                        guard day.activeServices.contains(trip.service),
-                              patches[.init(tripID: trip.id, serviceDate: day.date)] == nil else { return false }
+                        guard day.activeServices.contains(trip.service) else { return false }
+                        let patch = patches[.init(tripID: trip.id, serviceDate: day.date)]
+                        guard patch?.status != .cancelled, patch?.status != .unreachable else { return false }
                         return trip.times.indices.contains { position in
                             let time = trip.times[position]
                             guard time.stop == stop, time.pickup == 0, let departure = time.departure else { return false }
-                            let date = day.start.addingTimeInterval(Double(departure))
+                            let event = patch?.event(stopID: snapshot.stops[stop].id, sequence: time.sequence)
+                            guard !freshBoardingReport(event), event?.boardingAllowed != false else { return false }
+                            let date = event?.effectiveDeparture ?? day.start.addingTimeInterval(Double(departure))
                             return date >= arrivalByStop[stop]!.addingTimeInterval(-Double(lookback)) && date <= through
                                 && trip.times.dropFirst(position + 1).contains {
                                     $0.dropoff == 0 && reachableAfterBoarding[$0.stop]

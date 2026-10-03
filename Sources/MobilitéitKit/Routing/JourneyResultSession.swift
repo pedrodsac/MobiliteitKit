@@ -82,7 +82,19 @@ public actor JourneyResultSession {
         let enriched = await JourneyGeometry.enrich(raw.journeys, store: store)
         try Task.checkCancellation()
         guard operation == currentOperation else { throw JourneyPlanningError.supersededRequest }
-        frozenPatches = await session.currentPatches()
+        let acquiredPatches = await session.currentPatches()
+        try Task.checkCancellation()
+        guard operation == currentOperation else { throw JourneyPlanningError.supersededRequest }
+        frozenPatches = acquiredPatches
+        let updates = Dictionary((frozenPatches ?? []).map {
+            (RealtimePatchKey(tripID: $0.tripID, serviceDate: $0.serviceDate), $0)
+        }, uniquingKeysWith: { old, new in old.merging(new) })
+        journeys = journeys.compactMap { journey in
+            guard let revised = journey.applyingRealtime(updates) else {
+                invalidated.insert(journey.id); return nil
+            }
+            return revised
+        }
         switch effectivePage {
         case .before: if let boundary = raw.exploredBefore { exploredBefore = boundary }
         case .after: if let boundary = raw.exploredAfter { exploredAfter = boundary }
