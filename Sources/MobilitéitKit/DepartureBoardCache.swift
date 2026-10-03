@@ -135,6 +135,27 @@ actor DepartureBoardCache {
         return response.restricted(to: scope)
     }
 
+    /// Metadata-only lookup lets acquisition consume fresh boards before
+    /// unrelated network waits occupy all of its bounded request slots.
+    func coverage(of scope: BoardCacheScope, maximumCacheAge: TimeInterval = 60) -> Double {
+        guard scope.unlimited, scope.interval.duration > 0 else { return 0 }
+        let intervals = entries.values.compactMap { entry -> DateInterval? in
+            guard entry.response.isComplete, let prior = entry.response.scope,
+                  prior.namespace == scope.namespace,
+                  now().timeIntervalSince(entry.response.fetchedAt) < min(lifetime, maximumCacheAge) else { return nil }
+            return prior.interval
+        }.sorted { $0.start < $1.start }
+        var position = scope.interval.start
+        var seconds: TimeInterval = 0
+        for interval in intervals {
+            let start = max(position, interval.start)
+            let end = min(scope.interval.end, interval.end)
+            if end > start { seconds += end.timeIntervalSince(start); position = end }
+            if position >= scope.interval.end { break }
+        }
+        return min(1, seconds / scope.interval.duration)
+    }
+
     private func cacheHit(_ response: CachedBoardResponse) -> CachedBoardResponse {
         var value = response
         value = .init(board: value.board, networkRequests: 0, cacheHits: 1,

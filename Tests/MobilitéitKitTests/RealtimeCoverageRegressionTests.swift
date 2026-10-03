@@ -69,6 +69,24 @@ import Testing
         #expect(RealtimeBoardProtocol.requests(host).count > count)
     }
 
+    @Test func freshStopBoardIsUsedBeforeUnrelatedSlowRequestsConsumeTheBudget() async throws {
+        let fixture = try await RealtimeTestFixture(); defer { fixture.remove() }
+        let (client, host) = RealtimeBoardProtocol.client(responseDelay: { request in
+            request.url!.query!.contains("id=a") ? .zero : .seconds(5)
+        }) { _ in liveBoard(stops: liveStop("a", planned: "08:00:00", predicted: "08:08:00")) }
+        defer { RealtimeBoardProtocol.remove(host) }
+        _ = try await client.departureBoardSnapshot(.init(stationID: "a", language: "en",
+            date: GTFSDate(parsing: "20260930"), time: ServiceTime(parsing: "08:00:00"), durationMinutes: 90,
+            maximumJourneys: -1, realtimeMode: .serverDefault, includePasslist: true))
+        let provider = try HafasRealtimeRoutingProvider(databaseURL: fixture.database, client: client)
+        let batch = try await provider.patches(for: .init(stopIDs: ["slow-0", "slow-1", "slow-2", "slow-3", "a"],
+            from: RealtimeTestFixture.date("08:00:00"), through: RealtimeTestFixture.date("09:30:00"), timeout: .milliseconds(900)))
+        #expect(batch.patches.first?.tripID == "trip")
+        #expect(batch.patches.first?.events.first?.departureSource == .reported)
+        #expect(batch.cacheHits == 1)
+        #expect(batch.coveredStopIDs.contains("a"))
+    }
+
     @Test func denseBoardRetainsLiveDepartureBeyondTheOldJourneyCap() async throws {
         let fixture = try await RealtimeTestFixture(); defer { fixture.remove() }
         let irrelevant = #"{"Product":{"line":"999"},"time":"08:00:00","date":"2026-09-30","rtTime":"08:01:00"}"#

@@ -9,8 +9,32 @@ extension HafasRealtimeRoutingProvider {
     func boards(for stopIDs: [String], request: RealtimeRoutingRequest,
                 deadline: ContinuousClock.Instant) async -> [String: BoardResult] {
         guard ContinuousClock.now < deadline else { return [:] }
+        var ordered = stopIDs
+        if request.refreshPolicy == .useCache {
+            var coverage: [String: Double] = [:]
+            for stopID in stopIDs {
+                if Task.isCancelled || ContinuousClock.now >= deadline { break }
+                let targets = request.targets.filter { $0.stopID == stopID }
+                let windows = targets.isEmpty ? [RealtimeBoardTarget(stopID: stopID, from: request.from, through: request.through)] : targets
+                for window in windows where window.through >= window.from {
+                    let (date, time) = Self.requestDateAndTime(window.from)
+                    let value = await client.cachedDepartureBoardCoverage(.init(
+                        stationID: stopID, language: client.language ?? "en", date: date, time: time,
+                        durationMinutes: max(1, Int(ceil(window.through.timeIntervalSince(window.from) / 60))),
+                        maximumJourneys: -1, realtimeMode: .serverDefault, includePasslist: true
+                    ), maximumCacheAge: cacheLifetime)
+                    coverage[stopID, default: 0] += value / Double(windows.count)
+                }
+            }
+            // Preserve destination/boarding priority among equal cache coverage.
+            ordered = stopIDs.enumerated().sorted {
+                let a = coverage[$0.element, default: 0]; let b = coverage[$1.element, default: 0]
+                return a != b ? a > b : $0.offset < $1.offset
+            }.map(\.element)
+        }
+        guard !Task.isCancelled, ContinuousClock.now < deadline else { return [:] }
         return await Self.fetchResults(
-            stopIDs: stopIDs,
+            stopIDs: ordered,
             maximumConcurrentRequests: min(maximumConcurrentBoardRequests, request.maximumConcurrentRequests),
             timeout: max(.zero, ContinuousClock.now.duration(to: deadline))
         ) { [client, now, cacheLifetime] stopID in

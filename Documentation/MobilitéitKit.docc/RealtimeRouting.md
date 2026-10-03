@@ -53,7 +53,9 @@ that already arrived. Matching still stops at the original shared deadline.
 
 The shared departure-board cache reuses fresh compatible interval coverage
 across stop boards and routing, fetches uncovered gaps, coalesces overlapping
-in-flight requests, and permits independent caller cancellation. Entries expire
+in-flight requests, and permits independent caller cancellation. Fresh cached
+coverage is acquired first so unrelated slow network requests cannot occupy all
+request slots until the deadline and hide an already-available live board. Entries expire
 60 seconds after their original acquisition and are evicted within a bounded
 capacity. Endpoint, credentials, station, language, filters, realtime mode and
 passlist availability isolate coverage. Truncated boards do not provide complete

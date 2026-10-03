@@ -286,6 +286,12 @@ public struct MobiliteitAPIClient: Sendable {
         }
     }
 
+    func cachedDepartureBoardCoverage(_ request: HafasDepartureBoardRequest,
+                                      maximumCacheAge: TimeInterval = 60) async -> Double {
+        guard let scope = try? boardScope(request) else { return 0 }
+        return await Self.departureBoardCache.coverage(of: scope, maximumCacheAge: maximumCacheAge)
+    }
+
     private func boardURL(_ request: HafasDepartureBoardRequest) throws -> URL {
         var items = baseItems()
         items += [
