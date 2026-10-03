@@ -474,7 +474,7 @@ public actor GTFSStore {
         departure: Bool,
         limit: Int
     ) throws -> [ScheduledDeparture] {
-        let safeLimit = max(0, min(limit, 1_000))
+        let safeLimit = max(0, limit)
         guard safeLimit > 0, lowerBound <= upperBound else { return [] }
         let timeColumn = departure ? "departure_sec" : "arrival_sec"
         let restrictionColumn = departure ? "pickup_type" : "dropoff_type"
