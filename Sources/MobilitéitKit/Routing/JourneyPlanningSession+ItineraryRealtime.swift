@@ -40,7 +40,8 @@ extension JourneyPlanningSession {
                     ride.scheduledDeparture.addingTimeInterval(RealtimeTimeline.maximumDelay + 60)))
                 guard end >= start else { continue }
                 tripIDs.insert(ride.tripID)
-                targets.append(.init(stopID: ride.board.stop.id, from: start, through: end))
+                targets.append(.init(stopID: ride.board.stop.id, from: start, through: end,
+                    lines: ride.route.shortName.map { [$0] } ?? []))
                 if seenStops.insert(ride.board.stop.id).inserted { stopIDs.append(ride.board.stop.id) }
             }
         }

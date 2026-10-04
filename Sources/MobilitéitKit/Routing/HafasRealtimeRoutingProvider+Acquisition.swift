@@ -49,6 +49,8 @@ extension HafasRealtimeRoutingProvider {
         now: @escaping @Sendable () -> Date, cacheLifetime: TimeInterval
     ) async -> BoardResult {
         let targets = request.targets.filter { $0.stopID == stopID && $0.through >= $0.from }
+        let selectedLines = targets.isEmpty || targets.contains(where: { $0.lines.isEmpty }) ? []
+            : Array(Set(targets.flatMap(\.lines))).sorted()
         let windows = targets.isEmpty ? [DateInterval(start: request.from, end: request.through)]
             : targets.map { DateInterval(start: $0.from, end: $0.through) }
         let width: TimeInterval = 30 * 60
@@ -81,10 +83,21 @@ extension HafasRealtimeRoutingProvider {
             guard !Task.isCancelled else { incomplete = true; break }
             let (date, time) = requestDateAndTime(interval.start)
             do {
+                var lines = selectedLines
+                // A complete unrestricted board can satisfy a narrower request;
+                // a filtered board must never claim unrestricted coverage.
+                if !lines.isEmpty, request.refreshPolicy == .useCache {
+                    let coverage = await client.cachedDepartureBoardCoverage(.init(
+                        stationID: stopID, language: client.language ?? "en", date: date, time: time,
+                        durationMinutes: max(1, Int(ceil(interval.duration / 60))),
+                        maximumJourneys: -1, realtimeMode: .serverDefault, includePasslist: true
+                    ), maximumCacheAge: cacheLifetime)
+                    if coverage >= 1 { lines = [] }
+                }
                 let response = try await client.departureBoardResponse(.init(
                     stationID: stopID, language: client.language ?? "en", date: date, time: time,
                     durationMinutes: max(1, Int(ceil(interval.duration / 60))),
-                    maximumJourneys: -1, realtimeMode: .serverDefault, includePasslist: true
+                    maximumJourneys: -1, lines: lines, realtimeMode: .serverDefault, includePasslist: true
                 ), refreshPolicy: request.refreshPolicy, preservePartialOnFailure: true, maximumCacheAge: cacheLifetime)
                 successful = true
                 incomplete = incomplete || !response.isComplete

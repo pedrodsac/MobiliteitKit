@@ -125,4 +125,41 @@ import Testing
         #expect(requested == ["a", "b", "d"])
     }
 
+    @Test(arguments: [false, true])
+    func filteredBoardsRetainIntermediateReportsAndReuseUnrestrictedCache(primeUnrestricted: Bool) async throws {
+        let fixture = try await RealtimeTestFixture(); defer { fixture.remove() }
+        let (client, host) = RealtimeBoardProtocol.client { _ in
+            liveBoard(stops: liveStop("a", planned: "08:00:00", predicted: "08:03:00") + ","
+                + liveStop("b", planned: "08:10:00", predicted: "08:13:00", arrival: "08:13:00") + ","
+                + liveStop("c", planned: "08:20:00", predicted: "08:23:00", arrival: "08:23:00"), realtime: "08:03:00")
+        }
+        defer { RealtimeBoardProtocol.remove(host) }
+        let unrestricted = HafasDepartureBoardRequest(stationID: "a", language: "en",
+            date: try GTFSDate(parsing: "20260930"), time: ServiceTime(rawValue: 7 * 3_600 + 30 * 60),
+            durationMinutes: 180, maximumJourneys: -1, realtimeMode: .serverDefault, includePasslist: true)
+        if primeUnrestricted { _ = try await client.departureBoardSnapshot(unrestricted) }
+        let provider = try HafasRealtimeRoutingProvider(databaseURL: fixture.database, client: client)
+        let router = try await TransitRouter(databaseURL: fixture.database, realtimeProvider: provider)
+        let page = try await router.makeSession(for: .init(origin: .stop(id: "a"), destination: .stop(id: "c"),
+            departureTime: RealtimeTestFixture.date("07:55:00"), realtimePolicy: .bestEffort()))
+            .initial(count: 10, searchHorizon: 3 * 3_600)
+        let journey = try #require(page.journeys.first)
+        let ride = try #require(journey.legs.compactMap { if case let .transit(t) = $0 { t } else { nil } }.first)
+        let intermediate = try #require(ride.intermediateStops.first)
+        #expect(ride.intermediateStops.count == 1)
+        #expect(intermediate.stop.id == "b")
+        #expect(intermediate.scheduledTime == RealtimeTestFixture.date("08:10:00"))
+        #expect(intermediate.effectiveTime == RealtimeTestFixture.date("08:13:00"))
+        #expect(intermediate.timingSource == .reported)
+        #expect(journey.statusEvidence.coverage == .live)
+        let requests = RealtimeBoardProtocol.requests(host)
+        #expect(requests.count == 1)
+        let lines = URLComponents(url: requests[0].url!, resolvingAgainstBaseURL: false)?.queryItems?
+            .first { $0.name == "lines" }?.value
+        #expect(lines == (primeUnrestricted ? nil : "201"))
+        // A filtered response cannot hide other lines on an unrestricted board.
+        _ = try await client.departureBoardSnapshot(unrestricted)
+        #expect(RealtimeBoardProtocol.requests(host).count == (primeUnrestricted ? 1 : 2))
+    }
+
 }

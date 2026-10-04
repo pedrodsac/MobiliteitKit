@@ -212,7 +212,7 @@ public struct JourneyStopEvent: Hashable, Sendable {
         self.platform = platform
     }
 }
-public struct TransitLeg: Hashable, Sendable { public let tripID: String; public let route: TransitRoute; public let headsign: String?; public let board: JourneyStopEvent; public let alight: JourneyStopEvent; public let intermediateStops: [JourneyStopEvent]; public let scheduledDeparture: Date; public let scheduledArrival: Date; public let effectiveDeparture: Date; public let effectiveArrival: Date; public let status: RealtimeTripStatus; public var requiredTransferSecondsAfterWalking: Int; public var boardingDeadline: Date? = nil; public var requiredTotalTransferSeconds: Int? = nil; public var instance: TransitInstanceIdentity? = nil; public var boardSequence: Int? = nil; public var alightSequence: Int? = nil; public var polyline: [Coordinate] = [] }
+public struct TransitLeg: Hashable, Sendable { public let tripID: String; public let route: TransitRoute; public let headsign: String?; public let board: JourneyStopEvent; public let alight: JourneyStopEvent; public var intermediateStops: [JourneyStopEvent]; public let scheduledDeparture: Date; public let scheduledArrival: Date; public let effectiveDeparture: Date; public let effectiveArrival: Date; public let status: RealtimeTripStatus; public var requiredTransferSecondsAfterWalking: Int; public var boardingDeadline: Date? = nil; public var requiredTotalTransferSeconds: Int? = nil; public var instance: TransitInstanceIdentity? = nil; public var boardSequence: Int? = nil; public var alightSequence: Int? = nil; public var polyline: [Coordinate] = [] }
 public struct InSeatContinuationLeg: Hashable, Sendable { public let fromTripID: String; public let toTripID: String }
 public enum JourneyLeg: Hashable, Sendable { case walk(WalkingLeg), transit(TransitLeg), inSeatContinuation(InSeatContinuationLeg) }
 public struct JourneySignature: Hashable, Sendable, Codable, Comparable, Identifiable { public let value: String; public var id: String { value }; public init(_ value: String) { self.value = value }; public static func < (l: Self, r: Self) -> Bool { l.value < r.value } }
@@ -669,7 +669,7 @@ public actor JourneyPlanningSession {
         let maximumCompletionWaves: Int
         if case let .bestEffort(configuration, _) = query.realtimePolicy {
             realtimeBudget = configuration.acquisitionBudgetMilliseconds
-            maximumCompletionWaves = min(4, max(1, configuration.maximumRefinementWaves))
+            maximumCompletionWaves = min(2, max(1, configuration.maximumRefinementWaves))
         } else {
             realtimeBudget = 0
             maximumCompletionWaves = 0
@@ -728,7 +728,7 @@ public actor JourneyPlanningSession {
                 let before = latestPatchesByInstance
                 let acquired = try await acquireRealtime(access: access, egress: egress, anchor: anchor,
                     searchHorizon: searchHorizon, force: forceRealtime,
-                    budgetMilliseconds: remainingRealtimeMilliseconds,
+                    budgetMilliseconds: min(remainingRealtimeMilliseconds, max(0, realtimeBudget / 8)),
                     seedPatches: Array(latestRawPatchesByInstance.values))
                 latestRawPatchesByInstance = Dictionary(acquired.map {
                     (RealtimePatchKey(tripID: $0.tripID, serviceDate: $0.serviceDate), $0)
@@ -829,7 +829,8 @@ public actor JourneyPlanningSession {
                 transferRepresentatives.append(journey)
             }
         }
-        let journeys = strictEnvelope(transferRepresentatives, preferences: query.preferences).sorted(by: journeyOrder).map(\.journey)
+        let journeys = strictEnvelope(transferRepresentatives, preferences: query.preferences).sorted(by: journeyOrder)
+            .map { addingIntermediateStops(to: $0.journey) }
         return (journeys, validCandidates, transferRepresentatives.count)
     }
 
@@ -1020,29 +1021,10 @@ public actor JourneyPlanningSession {
                     timingSource: alightPatch?.arrivalSource ?? .scheduled,
                     platform: alightPatch?.platform ?? alight.platformCode
                 )
-                let middle = trip.times[(item.boardPos + 1)..<item.alightPos].map { time in
-                    let stop = snapshot.stops[time.stop].model
-                    let eventPatch = patch?.event(stopID: stop.id, sequence: time.sequence)
-                    let scheduled = snapshot.converter.date(
-                        serviceDate: item.day,
-                        serviceSeconds: time.arrival ?? time.departure ?? 0
-                    )
-                    return JourneyStopEvent(
-                        stop: stop,
-                        scheduledTime: scheduled,
-                        effectiveTime: eventPatch?.effectiveArrival
-                            ?? eventPatch?.effectiveDeparture
-                            ?? scheduled,
-                        timingSource: eventPatch?.arrivalSource
-                            ?? eventPatch?.departureSource
-                            ?? .scheduled,
-                        platform: eventPatch?.platform ?? stop.platformCode
-                    )
-                }
                 if item.continuesFromPrevious, let previous = legs.last, case let .transit(incoming) = previous {
                     legs.append(.inSeatContinuation(.init(fromTripID: incoming.tripID, toTripID: trip.id)))
                 }
-                legs.append(.transit(.init(tripID: trip.id, route: snapshot.routes[trip.route], headsign: trip.times[item.boardPos].headsign ?? trip.headsign, board: b, alight: x, intermediateStops: Array(middle), scheduledDeparture: item.scheduledBoard, scheduledArrival: item.scheduledAlight, effectiveDeparture: item.boardTime, effectiveArrival: item.alightTime, status: status, requiredTransferSecondsAfterWalking: item.requiredTransferSecondsAfterWalking)))
+                legs.append(.transit(.init(tripID: trip.id, route: snapshot.routes[trip.route], headsign: trip.times[item.boardPos].headsign ?? trip.headsign, board: b, alight: x, intermediateStops: [], scheduledDeparture: item.scheduledBoard, scheduledArrival: item.scheduledAlight, effectiveDeparture: item.boardTime, effectiveArrival: item.alightTime, status: status, requiredTransferSecondsAfterWalking: item.requiredTransferSecondsAfterWalking)))
                 if case var .transit(ride) = legs[legs.count - 1] {
                     ride.instance = .init(feedGeneration: snapshot.info.generation, tripID: trip.id, serviceDate: item.day)
                     ride.boardingDeadline = item.continuesFromPrevious ? nil : item.boardingDeadline

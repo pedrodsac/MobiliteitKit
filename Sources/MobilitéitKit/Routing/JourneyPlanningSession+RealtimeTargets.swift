@@ -23,6 +23,8 @@ extension JourneyPlanningSession {
             if Task.isCancelled || ContinuousClock.now >= deadline { break }
             guard let stop = snapshot.stopByID[stopID], let reach = arrivalByStop[stop] else { continue }
             var departures: [Date] = []
+            var lines: Set<String> = []
+            var hasUnnamedLine = false
             for tripIndex in snapshot.tripIndicesByDepartureStop[stop] {
                 if Task.isCancelled || ContinuousClock.now >= deadline { break }
                 let trip = snapshot.trips[tripIndex]
@@ -45,6 +47,8 @@ extension JourneyPlanningSession {
                         guard departure >= reach.addingTimeInterval(-Double(configuration.scheduledLookbackSeconds)),
                               departure <= through else { continue }
                         departures.append(departure)
+                        if let name = snapshot.routes[trip.route].shortName, !name.isEmpty { lines.insert(name) }
+                        else { hasUnnamedLine = true }
                     }
                 }
             }
@@ -57,7 +61,8 @@ extension JourneyPlanningSession {
             for departure in ordered.prefix(8) {
                 let start = max(from, departure.addingTimeInterval(-60))
                 let end = min(through, start.addingTimeInterval(Double(configuration.minimumForwardHorizonSeconds)))
-                if end >= start { targets.append(.init(stopID: stopID, from: start, through: end)) }
+                if end >= start { targets.append(.init(stopID: stopID, from: start, through: end,
+                    lines: hasUnnamedLine ? [] : lines.sorted())) }
             }
         }
         return targets

@@ -105,8 +105,9 @@ public struct RealtimeBoardTarget: Hashable, Sendable {
     public let stopID: String
     public let from: Date
     public let through: Date
-    public init(stopID: String, from: Date, through: Date) {
-        self.stopID = stopID; self.from = from; self.through = through
+    public let lines: [String]
+    public init(stopID: String, from: Date, through: Date, lines: [String] = []) {
+        self.stopID = stopID; self.from = from; self.through = through; self.lines = lines
     }
 }
 public protocol RealtimeRoutingProvider: Sendable {
