@@ -2,7 +2,8 @@ import Foundation
 
 extension JourneyPlanningSession {
     func acquireRealtime(access: [Edge], egress: [Edge], anchor: Date,
-                                 searchHorizon: TimeInterval, force: Bool, budgetMilliseconds: Int? = nil) async throws -> [RealtimeTripPatch] {
+                                 searchHorizon: TimeInterval, force: Bool, budgetMilliseconds: Int? = nil,
+                    seedPatches: [RealtimeTripPatch]? = nil) async throws -> [RealtimeTripPatch] {
         guard case let .bestEffort(configuration, requestedRefresh) = query.realtimePolicy,
               let realtimeProvider else { return [] }
         let from = query.direction == .arriveBy
@@ -10,19 +11,14 @@ extension JourneyPlanningSession {
             : anchor
         let through = query.direction == .arriveBy ? anchor
             : anchor.addingTimeInterval(searchHorizon)
-        if !force, let cachedRealtimeBatch, let fetchedAt = cachedRealtimeBatch.fetchedAt,
-           clock().timeIntervalSince(fetchedAt) < 60,
-           let interval = cachedRealtimeInterval, interval.start <= from, interval.end >= through {
-            metrics.hafasCacheHits += 1
-            return cachedRealtimeBatch.patches
-        }
         let started = ContinuousClock.now
         let deadline = started.advanced(by: .milliseconds(max(0, budgetMilliseconds ?? configuration.acquisitionBudgetMilliseconds)))
-        var queried: Set<String> = []
+        var queried = seedPatches == nil ? Set<String>() : (cachedRealtimeBatch?.requestedStopIDs ?? [])
         var covered: Set<String> = []
         var incomplete: Set<String> = []
-        let seeds = force || requestedRefresh == .forceRefresh ? []
-            : (frozenPatches ?? []).map { $0.retainingFreshObservations(at: clock()) }
+        let previousBatch = seedPatches == nil ? nil : cachedRealtimeBatch
+        let seeds = seedPatches ?? (force || requestedRefresh == .forceRefresh ? []
+            : (frozenPatches ?? []).map { $0.retainingFreshObservations(at: clock()) })
         var patches = Dictionary(seeds.map { (RealtimePatchKey(tripID: $0.tripID, serviceDate: $0.serviceDate), $0) },
                                  uniquingKeysWith: { old, new in old.merging(new) })
         var fetchedAt: Date?
@@ -74,6 +70,10 @@ extension JourneyPlanningSession {
                                          deadline: deadline, patches: patches, excluding: queried, reachability: reachability)
             diagnostics.record(.realtimeDiscovery, since: discoveryStarted)
         }
+        queried.formUnion(previousBatch?.requestedStopIDs ?? [])
+        covered.formUnion(previousBatch?.coveredStopIDs ?? [])
+        incomplete.formUnion(previousBatch?.incompleteStopIDs ?? [])
+        if let date = previousBatch?.fetchedAt { fetchedAt = min(fetchedAt ?? date, date) }
         metrics.realtimeFrontierSize = queried.count
         metrics.realtimeBoardsCovered = covered.count
         metrics.realtimeIncompleteBoards = incomplete.count
@@ -90,7 +90,6 @@ extension JourneyPlanningSession {
             : (covered == queried && incomplete.isEmpty && frontier.isEmpty && !omittedAccess
                 && !limitedHorizon && ContinuousClock.now < deadline && !updates.isEmpty ? .live : .partial)
         metrics.realtimeOverlayRevisions += 1
-        cachedRealtimeInterval = .init(start: from, end: through)
         cachedRealtimeBatch = .init(patches: updates, requestedStopIDs: queried,
                                     coveredStopIDs: covered, incompleteStopIDs: incomplete,
                                     fetchedAt: fetchedAt)

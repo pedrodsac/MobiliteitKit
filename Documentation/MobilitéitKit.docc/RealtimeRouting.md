@@ -40,12 +40,17 @@ boards; only ATP's 1,439-minute duration limit requires splitting. A report from
 another stop does not cover an occurrence that still lacks a fresh departure
 prediction. Destination-aware discovery includes delayed departures and transfers
 absent from scheduled winners, then applies acquired predictions in RAPTOR.
-Discovery stops after four waves, 24 stop targets, or half the acquisition budget.
-The remaining acquisition time is reserved for every transit leg in the retained
-itineraries. This completion pass targets actual boarding occurrences, including
-walking and in-seat connections, without discovery's stop or temporal-seed caps.
+The first RAPTOR scan identifies the candidate page before network acquisition.
+Every transit leg in that page gets acquisition priority, including walking and
+in-seat connections, without discovery's stop or temporal-seed caps. Only the
+remaining acquisition time is used for broad discovery, bounded to four waves
+and 24 stop targets including already-checked itinerary stops.
 Its windows include the permitted two-hour delay range, clipped to the search
 horizon. Shared board coverage still avoids duplicate downloads.
+
+Raw observations remain available to discovery even when a sparse, long-trip
+overlay cannot yet be resolved into a complete usable timeline. Later stop
+reports can complete that overlay without losing the earlier evidence.
 
 New predictions trigger another RAPTOR scan so connecting-trip delays,
 cancellations and restrictions affect feasibility and ranking before publication.

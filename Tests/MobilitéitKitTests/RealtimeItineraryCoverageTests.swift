@@ -55,7 +55,10 @@ import Testing
         #expect(rides.allSatisfy { $0.board.timingSource == .reported && $0.alight.timingSource == .reported })
         #expect(journey.effectiveArrival == RealtimeTestFixture.date("08:54:00"))
         #expect(journey.statusEvidence.coverage == .live)
-        #expect(RealtimeBoardProtocol.requests(host).contains { $0.url!.query!.contains("id=b") })
+        let requests = RealtimeBoardProtocol.requests(host)
+        let connectingIndex = try #require(requests.firstIndex { $0.url!.query!.contains("id=b") })
+        let branchIndex = requests.firstIndex { $0.url!.query!.contains("id=branch-") } ?? requests.count
+        #expect(connectingIndex < branchIndex)
     }
 
     @Test(arguments: ["live", "cancelled", "missed"])

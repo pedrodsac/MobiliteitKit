@@ -6,9 +6,9 @@ extension JourneyPlanningSession {
         let sequence: Int?
     }
 
-    /// Discovery is deliberately broad and bounded. Reserve acquisition time
-    /// for every vehicle in the retained itineraries, including walking and
-    /// in-seat connections that discovery did not reach.
+    /// Acquire every vehicle in the candidate page before broad discovery,
+    /// including walking and in-seat connections. Unrelated stops must not
+    /// consume the deadline before an actual connecting vehicle is checked.
     func completeItineraryRealtime(_ journeys: [Journey], anchor: Date, searchHorizon: TimeInterval,
                                    force: Bool, budgetMilliseconds: Int,
                                    attempted: inout Set<ItineraryBoarding>) async throws -> Bool {
@@ -59,16 +59,15 @@ extension JourneyPlanningSession {
         let before = latestPatchesByInstance
         for incoming in batch.patches {
             let key = RealtimePatchKey(tripID: incoming.tripID, serviceDate: incoming.serviceDate)
-            let resolved = RealtimeTimeline.resolved(incoming, snapshot: snapshot, now: clock())
-            if latestPatchesByInstance[key] == resolved { continue }
-            let merged = latestPatchesByInstance[key].map { $0.merging(resolved) } ?? resolved
+            let merged = latestRawPatchesByInstance[key].map { $0.merging(incoming) } ?? incoming
+            latestRawPatchesByInstance[key] = merged
             latestPatchesByInstance[key] = RealtimeTimeline.resolved(merged, snapshot: snapshot, now: clock())
         }
         let requested = (cachedRealtimeBatch?.requestedStopIDs ?? []).union(stopIDs)
         let covered = (cachedRealtimeBatch?.coveredStopIDs ?? []).union(batch.coveredStopIDs)
         let incomplete = (cachedRealtimeBatch?.incompleteStopIDs ?? []).union(batch.incompleteStopIDs)
         let fetchedAt = [cachedRealtimeBatch?.fetchedAt, batch.fetchedAt].compactMap { $0 }.min()
-        cachedRealtimeBatch = .init(patches: Array(latestPatchesByInstance.values), requestedStopIDs: requested,
+        cachedRealtimeBatch = .init(patches: Array(latestRawPatchesByInstance.values), requestedStopIDs: requested,
             coveredStopIDs: covered, incompleteStopIDs: incomplete, fetchedAt: fetchedAt)
         metrics.realtimeFrontierSize = requested.count
         metrics.realtimeBoardsCovered = covered.count
