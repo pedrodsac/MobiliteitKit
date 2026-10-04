@@ -41,7 +41,7 @@ extension JourneyPlanningSession {
                 guard end >= start else { continue }
                 tripIDs.insert(ride.tripID)
                 targets.append(.init(stopID: ride.board.stop.id, from: start, through: end,
-                    lines: ride.route.shortName.map { [$0] } ?? []))
+                    lines: ride.route.shortName.flatMap { $0.isEmpty ? nil : [$0] } ?? []))
                 if seenStops.insert(ride.board.stop.id).inserted { stopIDs.append(ride.board.stop.id) }
             }
         }
@@ -53,7 +53,7 @@ extension JourneyPlanningSession {
                 from: targets.map(\.from).min()!, through: targets.map(\.through).max()!,
                 scheduledLookbackSeconds: configuration.scheduledLookbackSeconds,
                 refreshPolicy: force ? .forceRefresh : refresh,
-                maximumConcurrentRequests: min(4, configuration.maximumConcurrentBoardRequests),
+                maximumConcurrentRequests: min(16, configuration.maximumConcurrentBoardRequests),
                 timeout: max(.zero, ContinuousClock.now.duration(to: deadline)), deadline: deadline, targets: targets, tripIDs: tripIDs))
         } catch is CancellationError { throw CancellationError() }
         catch { return false }

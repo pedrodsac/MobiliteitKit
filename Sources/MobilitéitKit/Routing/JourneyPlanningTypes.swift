@@ -33,9 +33,11 @@ public enum JourneyPlanningPage: Hashable, Sendable {
     case before(Date, JourneySignature?, Int)
     case after(Date, JourneySignature?, Int)
 
-    public func realtimePolicy(_ refresh: JourneyRefreshPolicy, acquisitionBudgetMilliseconds: Int = 4_000) -> RealtimePolicy {
+    public func realtimePolicy(_ refresh: JourneyRefreshPolicy, acquisitionBudgetMilliseconds: Int = 4_000,
+                               maximumConcurrentBoardRequests: Int = 4) -> RealtimePolicy {
         let later: Bool = switch self { case .later, .after: true; default: false }
-        let configuration = RealtimeConfiguration(scheduledLookbackSeconds: later ? 600 : 1_200, acquisitionBudgetMilliseconds: acquisitionBudgetMilliseconds)
+        let configuration = RealtimeConfiguration(scheduledLookbackSeconds: later ? 600 : 1_200,
+            maximumConcurrentBoardRequests: maximumConcurrentBoardRequests, acquisitionBudgetMilliseconds: acquisitionBudgetMilliseconds)
         return switch refresh {
         case .scheduleOnly: .disabled
         case .useCache: .bestEffort(configuration: configuration, refresh: .useCache)
@@ -50,14 +52,17 @@ public struct JourneyPlanningRequest: Hashable, Sendable {
     public var time: JourneyPlanningTime
     public var preferences: RoutingPreferences
     public var realtimeAcquisitionBudgetMilliseconds: Int
+    public var realtimeMaximumConcurrentBoardRequests: Int
     public var pagingPolicy: JourneyPagingPolicy
     public init(origin: JourneyEndpoint, destination: JourneyEndpoint,
                 time: JourneyPlanningTime = .now, preferences: RoutingPreferences = .init(),
                 realtimeAcquisitionBudgetMilliseconds: Int = 4_000,
+                realtimeMaximumConcurrentBoardRequests: Int = 4,
                 pagingPolicy: JourneyPagingPolicy = .departureProfile) {
         self.origin = origin; self.destination = destination
         self.time = time; self.preferences = preferences
         self.realtimeAcquisitionBudgetMilliseconds = max(0, realtimeAcquisitionBudgetMilliseconds)
+        self.realtimeMaximumConcurrentBoardRequests = min(16, max(1, realtimeMaximumConcurrentBoardRequests))
         self.pagingPolicy = pagingPolicy
     }
 }

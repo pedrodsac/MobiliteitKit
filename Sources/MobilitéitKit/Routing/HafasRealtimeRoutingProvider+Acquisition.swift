@@ -15,14 +15,23 @@ extension HafasRealtimeRoutingProvider {
             for stopID in stopIDs {
                 if Task.isCancelled || ContinuousClock.now >= deadline { break }
                 let targets = request.targets.filter { $0.stopID == stopID }
+                let lines = Self.selectedLines(in: targets)
                 let windows = targets.isEmpty ? [RealtimeBoardTarget(stopID: stopID, from: request.from, through: request.through)] : targets
                 for window in windows where window.through >= window.from {
                     let (date, time) = Self.requestDateAndTime(window.from)
-                    let value = await client.cachedDepartureBoardCoverage(.init(
+                    var value = await client.cachedDepartureBoardCoverage(.init(
                         stationID: stopID, language: client.language ?? "en", date: date, time: time,
                         durationMinutes: max(1, Int(ceil(window.through.timeIntervalSince(window.from) / 60))),
                         maximumJourneys: -1, realtimeMode: .serverDefault, includePasslist: true
                     ), maximumCacheAge: cacheLifetime)
+                    if !lines.isEmpty, value < 1 {
+                        let filtered = await client.cachedDepartureBoardCoverage(.init(
+                            stationID: stopID, language: client.language ?? "en", date: date, time: time,
+                            durationMinutes: max(1, Int(ceil(window.through.timeIntervalSince(window.from) / 60))),
+                            maximumJourneys: -1, lines: lines, realtimeMode: .serverDefault, includePasslist: true
+                        ), maximumCacheAge: cacheLifetime)
+                        value = max(value, filtered)
+                    }
                     coverage[stopID, default: 0] += value / Double(windows.count)
                 }
             }
@@ -42,15 +51,19 @@ extension HafasRealtimeRoutingProvider {
         }
     }
 
-    /// One unrestricted request covers each merged window. The shared client
+    private nonisolated static func selectedLines(in targets: [RealtimeBoardTarget]) -> [String] {
+        targets.isEmpty || targets.contains(where: { $0.lines.isEmpty }) ? []
+            : Array(Set(targets.flatMap(\.lines))).sorted()
+    }
+
+    /// One unlimited-journey request covers each merged window and relevant lines. The shared client
     /// cache supplies complete overlapping boards and fetches only their gaps.
     private nonisolated static func acquireStop(
         client: MobiliteitAPIClient, stopID: String, request: RealtimeRoutingRequest,
         now: @escaping @Sendable () -> Date, cacheLifetime: TimeInterval
     ) async -> BoardResult {
         let targets = request.targets.filter { $0.stopID == stopID && $0.through >= $0.from }
-        let selectedLines = targets.isEmpty || targets.contains(where: { $0.lines.isEmpty }) ? []
-            : Array(Set(targets.flatMap(\.lines))).sorted()
+        let selectedLines = selectedLines(in: targets)
         let windows = targets.isEmpty ? [DateInterval(start: request.from, end: request.through)]
             : targets.map { DateInterval(start: $0.from, end: $0.through) }
         let width: TimeInterval = 30 * 60

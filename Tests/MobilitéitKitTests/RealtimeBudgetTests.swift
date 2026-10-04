@@ -189,4 +189,33 @@ import Testing
         #expect(started.duration(to: .now) < .seconds(1))
     }
 
+    @Test func parallelItineraryBatchCompletesBeforeTheDeadline() async throws {
+        let ids = (0..<16).map { "boarding-\($0)" }
+        let fixture = try await RealtimeTestFixture(
+            stopTimes: ids.map { "\($0),08:00:00,08:00:00,\($0),1\n\($0),08:20:00,08:20:00,c,2\n" }.joined(),
+            trips: ids.map { "route,service,\($0),Destination\n" }.joined(),
+            additionalStops: ids.map { "\($0),Boarding \($0),49.6,6.1\n" }.joined())
+        defer { fixture.remove() }
+        let (client, host) = RealtimeBoardProtocol.client(responseDelay: { _ in .milliseconds(200) }) { request in
+            let stop = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!
+                .first { $0.name == "id" }!.value!
+            return liveBoard(stops: liveStop(stop, planned: "08:00:00", predicted: "08:01:00") + ","
+                + liveStop("c", planned: "08:20:00", predicted: "08:21:00", arrival: "08:21:00"),
+                realtime: "08:01:00", stop: stop)
+                .replacingOccurrences(of: "same-journey", with: stop)
+        }
+        defer { RealtimeBoardProtocol.remove(host) }
+        let provider = try HafasRealtimeRoutingProvider(databaseURL: fixture.database, client: client,
+                                                        maximumConcurrentBoardRequests: 16)
+        let started = ContinuousClock.now
+        let batch = try await provider.patches(for: .init(stopIDs: ids,
+            from: RealtimeTestFixture.date("07:55:00"), through: RealtimeTestFixture.date("08:30:00"),
+            refreshPolicy: .forceRefresh, maximumConcurrentRequests: 16, timeout: .milliseconds(700),
+            deadline: started.advanced(by: .milliseconds(700)), tripIDs: Set(ids)))
+        #expect(batch.patches.count == 16)
+        #expect(batch.coveredStopIDs == Set(ids))
+        #expect(batch.incompleteStopIDs.isEmpty)
+        #expect(started.duration(to: .now) < .seconds(1.5))
+    }
+
 }

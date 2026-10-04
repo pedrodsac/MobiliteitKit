@@ -34,7 +34,8 @@ struct AdjacentJourneySearch {
                 preferences: request.preferences,
                 realtimePolicy: JourneyPlanningPage.initial.realtimePolicy(
                     historical ? .scheduleOnly : refresh,
-                    acquisitionBudgetMilliseconds: remainingBudget))
+                    acquisitionBudgetMilliseconds: remainingBudget,
+                    maximumConcurrentBoardRequests: request.realtimeMaximumConcurrentBoardRequests))
             let session = try await router.makeSession(for: query)
             if let patches, !historical { await session.setFrozenPatches(patches) }
             // A later arrival can belong to a journey which started before the
