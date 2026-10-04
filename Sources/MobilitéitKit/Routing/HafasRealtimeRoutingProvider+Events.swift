@@ -115,8 +115,8 @@ extension HafasRealtimeRoutingProvider {
                                     : pass?.realtimeAlighting ?? pass?.alighting,
                                 observedAt: observedAt))
         }
-        let result = RealtimeTripPatch(tripID: candidate.departure.tripID,
-                                       serviceDate: candidate.serviceDate, status: status, events: events)
+        let result = RealtimeTimeline.constrainingMinutePrecision(RealtimeTripPatch(tripID: candidate.departure.tripID,
+                                       serviceDate: candidate.serviceDate, status: status, events: events))
         return status != .active || result.isChronological ? result : nil
     }
 }

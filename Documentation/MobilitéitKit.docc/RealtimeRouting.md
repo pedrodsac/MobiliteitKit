@@ -64,8 +64,13 @@ into up to sixteen concurrent boards through
 retains four request slots. The package's total acquisition budget
 is four seconds by default; hosts can configure a longer allowance for pages
 with many boarding stops. An explicit session deadline applies to the entire
-batch, rather than inheriting the standalone provider timeout. Routing scan time
-is measured separately. Unavailable, unmatched or expired reports remain honestly
+batch, rather than inheriting the standalone provider timeout. Hosts can also set `JourneyPlanningRequest.realtimeSearchWorkBudgetMilliseconds`.
+Before starting another acquisition wave, the router reserves the measured last
+scan/materialization duration plus a margin for a complete final scan. Adjacent
+window expansion shares the remaining work allowance. Static search is never
+truncated; a zero remaining allowance skips network acquisition. The host must
+leave time outside this phase for readiness, endpoints, mapping and rendering.
+Routing scan time is measured separately. Unavailable, unmatched or expired reports remain honestly
 scheduled or partial; incomplete acquisition never implies live coverage.
 
 Each provider wave reserves a quarter of its remaining time (up to 500 ms)
@@ -91,7 +96,10 @@ Normal searches use `.useCache`. Pass `.forceRefresh` for an explicit refresh.
 `RealtimeRoutingRequest.targets` optionally supplies per-stop windows; providers
 implementing only the original method continue receiving its global bounds.
 `RealtimeRoutingRequest.tripIDs` optionally limits patch construction to selected
-itinerary vehicles. Matching still checks the complete timetable for ambiguity;
+itinerary vehicles for custom requests. The itinerary coordinator leaves this
+filter empty and matches all forecasts returned for its needed lines, so
+replacement vehicles can use already-acquired evidence. Matching still checks
+the complete timetable for ambiguity;
 an unrelated trip cannot become a false unique match through this filter.
 Paging retains fresh observations and checks missing coverage for newly explored
 occurrences. New evidence revalidates accumulated results within the active
@@ -125,12 +133,17 @@ At a stop with a reported departure but no reported arrival, an arrival later
 than that departure is constrained to the departure and marked estimated.
 This handles ATP minute precision versus GTFS seconds and sparse delay recovery
 without discarding a valid report. Scheduled times remain intact, and conflicting
-reported arrival/departure times are still rejected.
+reported arrival/departure times are still rejected. A minute-rounded report
+also bounds preceding unreported events that overlap it by at most 90 seconds;
+those constrained events are estimated and keep the report's observation time.
+Larger conflicts and conflicting direct observations remain rejected.
 
 Overlapping boards merge by trip, service date and stop sequence, preferring
 reported predictions over estimates, then newer observations. Intermediate-stop
 presentation events are materialized only for journeys retained after quality
-selection; rejected profile candidates avoid that allocation work. Non-monotonic
+selection. Envelope pruning applies cheap necessary timing, walking, transfer,
+mode and accessibility bounds before the unchanged quality predicates; a
+differential regression checks equivalence to exhaustive selection; rejected profile candidates avoid that allocation work. Non-monotonic
 active predictions and ambiguous matches are ignored. `RoutingMetrics` includes
 network requests, cache hits, bytes, coverage, and reported-event counts.
 `RoutingDiagnostics.realtimeMatchingRejections` separates unmatched, ambiguous,

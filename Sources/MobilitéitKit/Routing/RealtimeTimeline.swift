@@ -7,6 +7,40 @@ enum RealtimeTimeline {
     static let maximumDelay: TimeInterval = 2 * 60 * 60
     static let maximumPropagation: TimeInterval = 2 * 60 * 60
 
+    /// ATP minute precision can put a report just before an unreported GTFS
+    /// event at the preceding stop. That report bounds the earlier event, but
+    /// cannot override another report or justify a larger timetable conflict.
+    static func constrainingMinutePrecision(_ patch: RealtimeTripPatch) -> RealtimeTripPatch {
+        guard patch.status == .active, !patch.isChronological else { return patch }
+        var nextReport: (time: Date, observed: Date?)?
+        let events = patch.events.reversed().map { event in
+            func constrain(_ time: Date?, source: RealtimeTimingSource, observed: Date?)
+                -> (Date?, RealtimeTimingSource, Date?) {
+                guard let time else { return (nil, source, observed) }
+                if source == .reported {
+                    nextReport = (time, observed)
+                    return (time, source, observed)
+                }
+                guard let nextReport, time > nextReport.time,
+                      time.timeIntervalSince(nextReport.time) <= 90 else { return (time, source, observed) }
+                return (nextReport.time, .estimated, nextReport.observed)
+            }
+            let departure = constrain(event.effectiveDeparture, source: event.departureSource,
+                                      observed: event.departureObservedAt)
+            let arrival = constrain(event.effectiveArrival, source: event.arrivalSource,
+                                    observed: event.arrivalObservedAt)
+            return RealtimeStopEventPatch(stopID: event.stopID,
+                scheduledDeparture: event.scheduledDeparture, effectiveDeparture: departure.0,
+                departureSource: departure.1, scheduledArrival: event.scheduledArrival,
+                effectiveArrival: arrival.0, arrivalSource: arrival.1, platform: event.platform,
+                stopSequence: event.stopSequence, boardingAllowed: event.boardingAllowed,
+                alightingAllowed: event.alightingAllowed, observedAt: event.observedAt,
+                departureObservedAt: departure.2, arrivalObservedAt: arrival.2)
+        }
+        return .init(tripID: patch.tripID, serviceDate: patch.serviceDate,
+                     status: patch.status, events: events.reversed())
+    }
+
     /// A departure proves the vehicle has already arrived at that same stop.
     /// Sparse ATP boards omit the boarding arrival, and minute precision can
     /// put an on-time report before GTFS's scheduled seconds. Constrain only an
@@ -88,7 +122,7 @@ enum RealtimeTimeline {
                 boardingAllowed: event?.boardingAllowed, alightingAllowed: event?.alightingAllowed,
                 observedAt: event?.observedAt ?? delay?.observed, departureObservedAt: event?.departureObservedAt ?? delay?.observed, arrivalObservedAt: event?.arrivalObservedAt ?? delay?.observed))
         }
-        let result = RealtimeTripPatch(tripID: patch.tripID, serviceDate: patch.serviceDate, events: events)
+        let result = constrainingMinutePrecision(RealtimeTripPatch(tripID: patch.tripID, serviceDate: patch.serviceDate, events: events))
         return result.isChronological ? result : rejected()
     }
 }
