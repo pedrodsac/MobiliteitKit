@@ -1067,7 +1067,8 @@ private func strictEnvelope(_ journeys: [JourneyPlanningSession.BuiltJourney], p
         !journeys.contains { other in
             other.tripInstanceKey != candidate.tripInstanceKey
                 && (JourneyQualityPolicy.dominates(other.journey, candidate.journey)
-                    || JourneyQualityPolicy.redundantAccessFeeder(candidate.journey, replacedBy: other.journey, preferences: preferences))
+                    || JourneyQualityPolicy.redundantAccessFeeder(candidate.journey, replacedBy: other.journey, preferences: preferences)
+                    || JourneyQualityPolicy.redundantIntermediateTransfer(candidate.journey, replacedBy: other.journey, preferences: preferences))
         }
     }
 }

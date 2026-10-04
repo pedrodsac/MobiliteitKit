@@ -82,6 +82,13 @@ routes do not establish wheelchair accessibility. Automatic interchanges use
 verified pedestrian routes within 15 minutes and 1.5 km; the geographic
 shortlist expands from 450 m to 900 m when nearby station groups are sparse.
 
+The published profile removes an intermediate vehicle change when staying
+aboard the same trip reaches the same downstream vehicle instances, leaves
+no earlier, arrives no later, and adds at most five minutes of walking. Both
+journeys must pass feed, transfer, accessibility and walking-budget checks.
+An explicit `.lessWalking` preference preserves a change that saves walking.
+Paging, realtime refresh and walking refinement apply the same policy.
+
 The complete API reference and workflow guides are maintained in the DocC
 catalog at `Documentation/MobilitéitKit.docc`. Generate a static documentation
 archive with:

@@ -29,6 +29,105 @@ struct RoutingWastefulConnectionTests {
             (firstArrival == "08:46:45" ? ["326", "18"] : ["326", "311", "18"]) })
     }
 
+    @Test func stayOn322ToCatchTheSameTramDespiteLongerInterchangeWalk() async throws {
+        let fixture = try await luxexpoFixture()
+        defer { fixture.remove() }
+        let query = fixture.query(anchor: date(hour: 10, minute: 58))
+        let page = try await fixture.profile(query)
+        #expect(!page.journeys.isEmpty)
+        #expect(page.journeys.allSatisfy { transitTripInstanceSequence($0) == ["322", "T1"] })
+        let session = try await fixture.planning(.init(origin: query.origin, destination: query.destination,
+            time: .departAt(query.departureTime)))
+        for result in [try await session.calculate(refresh: .scheduleOnly),
+                       try await session.calculate(page: .later, refresh: .scheduleOnly),
+                       try await session.refreshRealtime(now: query.departureTime)] {
+            #expect(!result.journeys.isEmpty)
+            #expect(result.journeys.allSatisfy { transitTripInstanceSequence($0) == ["322", "T1"] })
+        }
+    }
+
+    @Test(arguments: [0, 300, 540, 541, 660], ["11:23:00", "11:40:00"])
+    func preserveUseful325AndInterchangeWalkingBoundary(interchangeSeconds: Int, firstArrival: String) async throws {
+        let fixture = try await luxexpoFixture(interchangeSeconds: interchangeSeconds, firstArrival: firstArrival,
+            tramDeparture: "11:40:00", tramArrival: "11:48:00")
+        defer { fixture.remove() }
+        let query = fixture.query(anchor: date(hour: 10, minute: 58))
+        let page = try await fixture.profile(query)
+        let detour = page.journeys.first { transitTripInstanceSequence($0) == ["322", "325", "T1"] }
+        #expect(!page.journeys.isEmpty)
+        #expect((detour != nil) == (interchangeSeconds == 0 || firstArrival == "11:40:00" || interchangeSeconds > 540))
+        let lessWalking = try await fixture.profile(fixture.query(preferences: .init(routePreference: .lessWalking), anchor: query.departureTime))
+        #expect(lessWalking.journeys.contains { transitTripInstanceSequence($0) == ["322", "325", "T1"] })
+        let budget = try await fixture.profile(fixture.query(preferences: .init(maximumWalkingSeconds: 240), anchor: query.departureTime))
+        #expect(!budget.journeys.isEmpty)
+        #expect(budget.journeys.allSatisfy { transitTripInstanceSequence($0) == ["322", "325", "T1"] })
+        let arriveBy = try await fixture.profile(fixture.query(anchor: date(hour: 11, minute: 48), direction: .arriveBy))
+        #expect(arriveBy.journeys.map(\.id) == page.journeys.map(\.id))
+    }
+
+    @Test func longerRefinedLuxexpoWalkRestoresNecessary325() async throws {
+        let fixture = try await luxexpoFixture()
+        defer { fixture.remove() }
+        let session = try await fixture.planning(.init(origin: .stop(id: "a"), destination: .stop(id: "d"),
+            time: .departAt(date(hour: 10, minute: 58))))
+        let initial = try await session.calculate(refresh: .scheduleOnly)
+        let stay = try #require(initial.journeys.first { transitTripInstanceSequence($0) == ["322", "T1"] })
+        let index = try #require(stay.legs.firstIndex { if case .walk = $0 { true } else { false } })
+        guard case let .walk(walk) = stay.legs[index] else { return }
+        let corrected = try await session.submitWalkingRefinement(.init(
+            token: try #require(initial.refinementTokens[stay.id]), range: index..<(index + 1),
+            route: .init(durationSeconds: 420, distanceMeters: 200, polyline: [walk.from.coordinate, walk.to.coordinate]),
+            departure: walk.departure, arrival: walk.departure.addingTimeInterval(420)))
+        #expect(corrected.invalidatedIDs.contains(stay.id))
+        #expect(corrected.journeys.contains { transitTripInstanceSequence($0) == ["322", "325", "T1"] })
+    }
+
+    @Test func intermediateTransferRequiresInstanceAndOccurrenceEvidence() async throws {
+        let fixture = try await luxexpoFixture()
+        defer { fixture.remove() }
+        let page = try await fixture.profile(fixture.query(preferences: .init(routePreference: .lessWalking)))
+        let detour = try #require(page.journeys.first { transitTripInstanceSequence($0) == ["322", "325", "T1"] })
+        let stay = try #require(page.journeys.first { transitTripInstanceSequence($0) == ["322", "T1"] })
+        #expect(JourneyQualityPolicy.redundantIntermediateTransfer(detour, replacedBy: stay, preferences: .init()))
+        for change in 0..<7 {
+            var legs = stay.legs
+            let indexes = legs.indices.filter { if case .transit = legs[$0] { true } else { false } }
+            let index = change < 3 ? indexes[0] : indexes[1]
+            guard case var .transit(ride) = legs[index] else { return }
+            switch change {
+            case 0: ride.boardSequence = nil
+            case 1: ride.alightSequence = 2 // No longer extends the first ride.
+            case 2: ride.instance = nil
+            case 3: ride.instance = .init(feedGeneration: 8, tripID: ride.tripID, serviceDate: try GTFSDate(parsing: "20260904"))
+            case 4: ride.instance = .init(feedGeneration: 7, tripID: ride.tripID, serviceDate: try GTFSDate(parsing: "20260905"))
+            case 5: ride.alightSequence = 3
+            default: ride.boardSequence = nil
+            }
+            legs[index] = .transit(ride)
+            #expect(!JourneyQualityPolicy.redundantIntermediateTransfer(detour, replacedBy: replacingLegs(stay, with: legs), preferences: .init()))
+        }
+    }
+
+    private func luxexpoFixture(interchangeSeconds: Int = 300, firstArrival: String = "11:23:00",
+                                tramDeparture: String = "11:29:00", tramArrival: String = "11:37:00") async throws -> RoutingPreventionFixture {
+        let files = scenarioFiles(routes: "bus,operator,322,Bus,3\nother,operator,325,Other,3\nlast,operator,T1,Tram,0\n",
+            stops: scenarioStops([("a", "Gromscheed", 49.6), ("b", "Rue du Golf", 49.6005),
+                                 ("c", "Laangschib", 49.601), ("x", "Gare routière Luxexpo", 49.61),
+                                 ("h", "Hugo Gernsback", 49.6105), ("t", "Luxexpo Tram", 49.611),
+                                 ("d", "Philharmonie / Mudam", 49.63)]),
+            trips: "bus,service,322,,,,\nother,service,325,,,,\nlast,service,T1,,,,\n",
+            stopTimes: "322,11:17:00,11:17:00,a,1\n322,11:19:00,11:19:00,b,2\n322,\(firstArrival),\(firstArrival),x,3\n325,11:22:00,11:22:00,c,1\n325,11:26:00,11:26:00,h,2\nT1,\(tramDeparture),\(tramDeparture),t,1\nT1,\(tramArrival),\(tramArrival),d,2\n")
+        var edges = [PreventionWalking.Edge(
+            from: b, to: c, seconds: 120),
+            .init(from: .init(latitude: 49.6105, longitude: 6.1), to: .init(latitude: 49.611, longitude: 6.1), seconds: 120),
+        ]
+        if interchangeSeconds > 0 {
+            edges.append(.init(from: .init(latitude: 49.61, longitude: 6.1),
+                to: .init(latitude: 49.611, longitude: 6.1), seconds: interchangeSeconds))
+        }
+        return try await RoutingPreventionFixture(files: files, walking: PreventionWalking(edges: edges))
+    }
+
     @Test(arguments: [0, 540, 660, 720, 900])
     func walkTo850WhenItLeavesHomeLater(walkingSeconds: Int) async throws {
         let files = scenarioFiles(routes: "bus,operator,326,Bus,3\nother,operator,850,Other,3\nlast,operator,16,Last,3\n",

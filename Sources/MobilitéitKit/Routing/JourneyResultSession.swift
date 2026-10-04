@@ -310,7 +310,8 @@ public actor JourneyResultSession {
             guard transitProfile.contains(where: { $0.id == candidate.id }) else { return true }
             return !transitProfile.contains {
                 $0.id != candidate.id && (JourneyQualityPolicy.dominates($0, candidate)
-                    || JourneyQualityPolicy.redundantAccessFeeder(candidate, replacedBy: $0, preferences: request.preferences))
+                    || JourneyQualityPolicy.redundantAccessFeeder(candidate, replacedBy: $0, preferences: request.preferences)
+                    || JourneyQualityPolicy.redundantIntermediateTransfer(candidate, replacedBy: $0, preferences: request.preferences))
             }
         }.sorted { JourneyQualityPolicy.chronologicalOrder($0, $1, query: .init(origin: request.origin, destination: request.destination, departureTime: anchor, direction: direction, preferences: request.preferences)) }
         let selectionQuery = RouteQuery(origin: request.origin, destination: request.destination,
