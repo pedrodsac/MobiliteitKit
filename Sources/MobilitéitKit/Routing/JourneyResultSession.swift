@@ -253,7 +253,8 @@ public actor JourneyResultSession {
                         preferences: request.preferences,
                         realtimePolicy: JourneyPlanningPage.initial.realtimePolicy(.useCache,
                             acquisitionBudgetMilliseconds: request.realtimeAcquisitionBudgetMilliseconds,
-                            maximumConcurrentBoardRequests: request.realtimeMaximumConcurrentBoardRequests))
+                            maximumConcurrentBoardRequests: request.realtimeMaximumConcurrentBoardRequests,
+                            searchWorkBudgetMilliseconds: request.realtimeSearchWorkBudgetMilliseconds))
                     let session = try await router.makeSession(for: replacementQuery)
                     let raw = direction == .arriveBy
                         ? try await session.expanded(count: 10)
@@ -311,7 +312,8 @@ public actor JourneyResultSession {
         return .init(origin: request.origin, destination: request.destination,
                      departureTime: searchAnchor, direction: direction, preferences: request.preferences,
                      realtimePolicy: page.realtimePolicy(refresh, acquisitionBudgetMilliseconds: request.realtimeAcquisitionBudgetMilliseconds,
-                            maximumConcurrentBoardRequests: request.realtimeMaximumConcurrentBoardRequests))
+                            maximumConcurrentBoardRequests: request.realtimeMaximumConcurrentBoardRequests,
+                            searchWorkBudgetMilliseconds: request.realtimeSearchWorkBudgetMilliseconds))
     }
     private func merge(_ incoming: [Journey], validationAnchor: Date? = nil) {
         var values = Dictionary(journeys.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })

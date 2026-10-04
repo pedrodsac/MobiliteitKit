@@ -93,14 +93,17 @@ public struct RealtimeConfiguration: Hashable, Sendable, Codable {
     public var maximumConcurrentBoardRequests: Int
     public var maximumRefinementWaves: Int
     public var acquisitionBudgetMilliseconds: Int
-    public init(scheduledLookbackSeconds: Int = 7_200, minimumForwardHorizonSeconds: Int = 5_400, maximumConcurrentBoardRequests: Int = 4, maximumRefinementWaves: Int = 4, acquisitionBudgetMilliseconds: Int = 4_000) {
+    /// Reserve time for a final full scan before starting another live wave.
+    public var searchWorkBudgetMilliseconds: Int?
+    public init(scheduledLookbackSeconds: Int = 7_200, minimumForwardHorizonSeconds: Int = 5_400, maximumConcurrentBoardRequests: Int = 4, maximumRefinementWaves: Int = 4, acquisitionBudgetMilliseconds: Int = 4_000, searchWorkBudgetMilliseconds: Int? = nil) {
         self.scheduledLookbackSeconds = scheduledLookbackSeconds; self.minimumForwardHorizonSeconds = minimumForwardHorizonSeconds
         self.maximumConcurrentBoardRequests = maximumConcurrentBoardRequests; self.maximumRefinementWaves = maximumRefinementWaves
         self.acquisitionBudgetMilliseconds = max(0, acquisitionBudgetMilliseconds)
+        self.searchWorkBudgetMilliseconds = searchWorkBudgetMilliseconds.map { max(0, $0) }
     }
     private enum CodingKeys: String, CodingKey {
         case scheduledLookbackSeconds, minimumForwardHorizonSeconds
-        case maximumConcurrentBoardRequests, maximumRefinementWaves, acquisitionBudgetMilliseconds
+        case maximumConcurrentBoardRequests, maximumRefinementWaves, acquisitionBudgetMilliseconds, searchWorkBudgetMilliseconds
     }
     public init(from decoder: any Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -108,7 +111,8 @@ public struct RealtimeConfiguration: Hashable, Sendable, Codable {
                   minimumForwardHorizonSeconds: try values.decode(Int.self, forKey: .minimumForwardHorizonSeconds),
                   maximumConcurrentBoardRequests: try values.decode(Int.self, forKey: .maximumConcurrentBoardRequests),
                   maximumRefinementWaves: try values.decode(Int.self, forKey: .maximumRefinementWaves),
-                  acquisitionBudgetMilliseconds: try values.decodeIfPresent(Int.self, forKey: .acquisitionBudgetMilliseconds) ?? 4_000)
+                  acquisitionBudgetMilliseconds: try values.decodeIfPresent(Int.self, forKey: .acquisitionBudgetMilliseconds) ?? 4_000,
+                  searchWorkBudgetMilliseconds: try values.decodeIfPresent(Int.self, forKey: .searchWorkBudgetMilliseconds))
     }
     public static let `default` = RealtimeConfiguration()
 }
@@ -667,11 +671,14 @@ public actor JourneyPlanningSession {
         metrics.endpointEgressCandidates = egress.count
         let realtimeBudget: Int
         let maximumCompletionWaves: Int
+        let searchWorkBudget: Int?
         if case let .bestEffort(configuration, _) = query.realtimePolicy {
             realtimeBudget = configuration.acquisitionBudgetMilliseconds
+            searchWorkBudget = configuration.searchWorkBudgetMilliseconds
             maximumCompletionWaves = min(2, max(1, configuration.maximumRefinementWaves))
         } else {
             realtimeBudget = 0
+            searchWorkBudget = nil
             maximumCompletionWaves = 0
         }
         let refreshing = forceRealtime || {
@@ -701,6 +708,7 @@ public actor JourneyPlanningSession {
         var built: (journeys: [Journey], validCandidates: Int, representativeCount: Int)
         let rejectionsBefore = diagnostics.rejections
         while true {
+            let scanStarted = ContinuousClock.now
             metrics.pointRaptorScans += 1
             let raptorStarted = ContinuousClock.now
             searchResult = try await Raptor.search(snapshot: snapshot, query: query, access: access, egress: egress,
@@ -713,6 +721,14 @@ public actor JourneyPlanningSession {
             diagnostics.rejections = rejectionsBefore
             built = buildJourneys(searchResult.candidates, access: access, egress: egress, accepting: accepting)
             diagnostics.record(.candidateBuilding, since: candidateStarted)
+            if let searchWorkBudget {
+                // The last full scan is a useful estimate for the required
+                // post-overlay scan. Keep a margin and leave publication/render
+                // time outside this host-selected search-work allowance.
+                let reserve = Int((RoutingDiagnostics.elapsed(since: scanStarted) * 1.05 + 100).rounded(.up))
+                let available = max(0, searchWorkBudget - Int(RoutingDiagnostics.elapsed(since: started).rounded(.up)) - reserve)
+                remainingRealtimeMilliseconds = min(remainingRealtimeMilliseconds, available)
+            }
             guard remainingRealtimeMilliseconds > 0, refinementWaves < maximumCompletionWaves else { break }
             let completionStarted = ContinuousClock.now
             var changed = try await completeItineraryRealtime(
@@ -1159,14 +1175,9 @@ public actor JourneyPlanningSession {
 
 
 private func strictEnvelope(_ journeys: [JourneyPlanningSession.BuiltJourney], preferences: RoutingPreferences) -> [JourneyPlanningSession.BuiltJourney] {
-    journeys.filter { candidate in
-        !journeys.contains { other in
-            other.tripInstanceKey != candidate.tripInstanceKey
-                && (JourneyQualityPolicy.dominates(other.journey, candidate.journey)
-                    || JourneyQualityPolicy.redundantAccessFeeder(candidate.journey, replacedBy: other.journey, preferences: preferences)
-                    || JourneyQualityPolicy.redundantIntermediateTransfer(candidate.journey, replacedBy: other.journey, preferences: preferences))
-        }
-    }
+    let retained = JourneyQualityPolicy.envelopeIDs(journeys.map(\.journey), preferences: preferences)
+    return journeys.filter { retained.contains($0.journey.id) }
 }
+
 private func journeyOrder(_ a: JourneyPlanningSession.BuiltJourney, _ b: JourneyPlanningSession.BuiltJourney) -> Bool { (a.journey.effectiveDeparture, a.journey.effectiveArrival, a.journey.transferCount, a.journey.walkingDuration, a.journey.duration, a.tripInstanceKey) < (b.journey.effectiveDeparture, b.journey.effectiveArrival, b.journey.transferCount, b.journey.walkingDuration, b.journey.duration, b.tripInstanceKey) }
 func distance(_ a: Coordinate, _ b: Coordinate) -> Double { let p = a.latitude * .pi / 180, q = b.latitude * .pi / 180, dp = q-p, dl = (b.longitude-a.longitude) * .pi / 180; let x = sin(dp/2)*sin(dp/2)+cos(p)*cos(q)*sin(dl/2)*sin(dl/2); return 6_371_000 * 2 * atan2(sqrt(x),sqrt(1-x)) }

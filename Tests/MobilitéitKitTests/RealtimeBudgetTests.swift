@@ -56,8 +56,10 @@ import Testing
         let json = Data(#"{"scheduledLookbackSeconds":7200,"minimumForwardHorizonSeconds":5400,"maximumConcurrentBoardRequests":4,"maximumRefinementWaves":4}"#.utf8)
         let old = try JSONDecoder().decode(RealtimeConfiguration.self, from: json)
         #expect(old.acquisitionBudgetMilliseconds == 4_000)
+        #expect(old.searchWorkBudgetMilliseconds == nil)
         var changed = old
         changed.acquisitionBudgetMilliseconds = 2_000
+        changed.searchWorkBudgetMilliseconds = 4_100
         #expect(try JSONDecoder().decode(RealtimeConfiguration.self, from: JSONEncoder().encode(changed)) == changed)
     }
 
@@ -216,6 +218,22 @@ import Testing
         #expect(batch.coveredStopIDs == Set(ids))
         #expect(batch.incompleteStopIDs.isEmpty)
         #expect(started.duration(to: .now) < .seconds(1.5))
+    }
+
+    @Test func exhaustedSearchWorkAllowanceRetainsTheFullScheduledSearch() async throws {
+        let fixture = try await RealtimeTestFixture(); defer { fixture.remove() }
+        let (client, host) = RealtimeBoardProtocol.client { _ in liveBoard(stops: "") }
+        defer { RealtimeBoardProtocol.remove(host) }
+        let provider = try HafasRealtimeRoutingProvider(databaseURL: fixture.database, client: client)
+        let router = try await TransitRouter(databaseURL: fixture.database, realtimeProvider: provider)
+        let page = try await router.makeSession(for: .init(origin: .stop(id: "a"), destination: .stop(id: "c"),
+            departureTime: RealtimeTestFixture.date("07:55:00"), realtimePolicy: .bestEffort(
+                configuration: .init(acquisitionBudgetMilliseconds: 1_000, searchWorkBudgetMilliseconds: 0))))
+            .initial(count: 10, searchHorizon: 3 * 3_600)
+        #expect(!page.journeys.isEmpty)
+        #expect(page.metrics.candidatesGenerated > 0)
+        #expect(page.journeys.first?.effectiveArrival == RealtimeTestFixture.date("08:20:00"))
+        #expect(RealtimeBoardProtocol.requests(host).isEmpty)
     }
 
 }
