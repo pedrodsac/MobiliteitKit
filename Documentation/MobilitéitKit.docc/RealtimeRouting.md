@@ -35,15 +35,17 @@ let router = try await TransitRouter(
 
 Boards request `SERVER_DEFAULT`, `passlist=1`, and `maxJourneys=-1`.
 Acquisition targets reachable boarding occurrences and their effective departure
-windows for the current search or page. Adjacent windows merge into unrestricted
-boards; only ATP's 1,439-minute duration limit requires splitting. A report from
+windows for the current search or page. Adjacent windows merge into unlimited-journey
+boards filtered to the reachable lines; only ATP's 1,439-minute duration limit
+requires splitting. A report from
 another stop does not cover an occurrence that still lacks a fresh departure
 prediction. Destination-aware discovery includes delayed departures and transfers
 absent from scheduled winners, then applies acquired predictions in RAPTOR.
 The first RAPTOR scan identifies the candidate page before network acquisition.
 Every transit leg in that page gets acquisition priority, including walking and
 in-seat connections, without discovery's stop or temporal-seed caps. Only the
-remaining acquisition time is used for broad discovery, bounded to four waves
+remaining acquisition time is used for broad discovery, capped at one eighth
+of the acquisition allowance and bounded to four waves
 and 24 stop targets including already-checked itinerary stops.
 Its windows include the permitted two-hour delay range, clipped to the search
 horizon. Shared board coverage still avoids duplicate downloads.
@@ -54,9 +56,12 @@ reports can complete that overlay without losing the earlier evidence.
 
 New predictions trigger another RAPTOR scan so connecting-trip delays,
 cancellations and restrictions affect feasibility and ranking before publication.
-Replacement itineraries can acquire previously unseen boardings, for up to four
-completion waves; each occurrence is attempted once per calculation. At most
-four stop acquisitions run concurrently. The package's total acquisition budget
+Replacement itineraries can acquire previously unseen boardings, for up to two
+completion waves; each occurrence is attempted once per calculation. Refinement
+is capped at two waves to bound repeat scanning. Itinerary acquisition can opt
+into up to sixteen concurrent boards through
+`JourneyPlanningRequest.realtimeMaximumConcurrentBoardRequests`; broad discovery
+retains four request slots. The package's total acquisition budget
 is four seconds by default; hosts can configure a longer allowance for pages
 with many boarding stops. An explicit session deadline applies to the entire
 batch, rather than inheriting the standalone provider timeout. Routing scan time
@@ -77,7 +82,9 @@ request slots until the deadline and hide an already-available live board. Entri
 60 seconds after their original acquisition and are evicted within a bounded
 capacity. Endpoint, credentials, station, language, filters, realtime mode and
 passlist availability isolate coverage. Truncated boards do not provide complete
-unrestricted coverage. An explicit refresh bypasses completed evidence and older
+unrestricted coverage. A complete unrestricted board can satisfy a filtered
+itinerary acquisition; filtered responses never satisfy unrestricted boards.
+An explicit refresh bypasses completed evidence and older
 responses cannot replace refreshed coverage.
 
 Normal searches use `.useCache`. Pass `.forceRefresh` for an explicit refresh.
@@ -121,7 +128,9 @@ without discarding a valid report. Scheduled times remain intact, and conflictin
 reported arrival/departure times are still rejected.
 
 Overlapping boards merge by trip, service date and stop sequence, preferring
-reported predictions over estimates, then newer observations. Non-monotonic
+reported predictions over estimates, then newer observations. Intermediate-stop
+presentation events are materialized only for journeys retained after quality
+selection; rejected profile candidates avoid that allocation work. Non-monotonic
 active predictions and ambiguous matches are ignored. `RoutingMetrics` includes
 network requests, cache hits, bytes, coverage, and reported-event counts.
 `RoutingDiagnostics.realtimeMatchingRejections` separates unmatched, ambiguous,
