@@ -168,4 +168,25 @@ import Testing
         }
     }
 
+    @Test func explicitSessionDeadlineCanCoverSeveralRequestWaves() async throws {
+        let fixture = try await RealtimeTestFixture(); defer { fixture.remove() }
+        let (client, host) = RealtimeBoardProtocol.client(responseDelay: { _ in .milliseconds(100) }) { _ in
+            liveBoard(stops: liveStop("a", planned: "08:00:00", predicted: "08:01:00") + ","
+                + liveStop("c", planned: "08:20:00", predicted: "08:21:00", arrival: "08:21:00"), realtime: "08:01:00")
+        }
+        defer { RealtimeBoardProtocol.remove(host) }
+        let provider = try HafasRealtimeRoutingProvider(databaseURL: fixture.database, client: client,
+                                                        requestTimeout: .milliseconds(20))
+        let from = RealtimeTestFixture.date("07:55:00"), through = RealtimeTestFixture.date("08:30:00")
+        let standalone = try await provider.patches(for: .init(stopIDs: ["a"], from: from, through: through,
+            refreshPolicy: .forceRefresh, timeout: .seconds(1)))
+        #expect(standalone.patches.isEmpty)
+        let started = ContinuousClock.now
+        let sessionBatch = try await provider.patches(for: .init(stopIDs: ["a"], from: from, through: through,
+            refreshPolicy: .forceRefresh, timeout: .seconds(1), deadline: started.advanced(by: .seconds(1)), tripIDs: ["trip"]))
+        #expect(sessionBatch.patches.first?.events.first?.departureSource == .reported)
+        #expect(sessionBatch.incompleteStopIDs.isEmpty)
+        #expect(started.duration(to: .now) < .seconds(1))
+    }
+
 }
