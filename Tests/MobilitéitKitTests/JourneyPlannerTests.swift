@@ -21,7 +21,7 @@ struct JourneyPlannerTests {
         let session = try await planner.makePlanningSession(databaseURL: fixture.database,
             request: fixture.request, now: fixture.anchor)
         let initial = try await session.calculate(refresh: .scheduleOnly)
-        #expect(initial.journeys.count == 5)
+        #expect(initial.journeys.count == 6)
         #expect(initial.recommendedJourneyID == initial.journeys.first?.id)
         #expect(initial.journeys.allSatisfy { $0.statusEvidence.coverage == .scheduleOnly })
         let later = try await session.calculate(page: .later, refresh: .scheduleOnly)
@@ -203,7 +203,7 @@ struct JourneyPlannerTests {
         let unavailable = try await JourneyPlanner(realtimeProvider: PlannerRealtime(unavailable: true))
             .makePlanningSession(databaseURL: fixture.database, request: fixture.request)
         let scheduled = try await unavailable.calculate(refresh: .forceRefresh)
-        #expect(scheduled.journeys.count == 5)
+        #expect(scheduled.journeys.count == 6)
         #expect(scheduled.journeys.allSatisfy { $0.statusEvidence.coverage == .scheduleOnly })
     }
 
@@ -232,7 +232,7 @@ struct JourneyPlannerTests {
             .makePlanningSession(databaseURL: fixture.database, request: request)
         let result = try await session.calculate(refresh: .scheduleOnly)
         #expect(result.journeys.contains { $0.id.value.hasPrefix("walk:") })
-        #expect(result.journeys.filter { !$0.id.value.hasPrefix("walk:") }.count == 5)
+        #expect(result.journeys.filter { !$0.id.value.hasPrefix("walk:") }.count == 6)
         #expect(result.recommendedJourneyID?.value.hasPrefix("walk:") == false)
     }
 
