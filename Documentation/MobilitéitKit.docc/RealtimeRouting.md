@@ -69,7 +69,8 @@ Before starting another acquisition wave, the router reserves the measured last
 scan/materialization duration plus a margin for a complete final scan. Adjacent
 window expansion shares the remaining work allowance. Static search is never
 truncated; a zero remaining allowance skips network acquisition. The host must
-leave time outside this phase for readiness, endpoints, mapping and rendering.
+leave time outside this phase for readiness, mapping and rendering. Endpoint
+preparation inside the generation is charged to its work allowance.
 Routing scan time is measured separately. Unavailable, unmatched or expired reports remain honestly
 scheduled or partial; incomplete acquisition never implies live coverage.
 
