@@ -39,11 +39,22 @@ windows for the current search or page. Adjacent windows merge into unrestricted
 boards; only ATP's 1,439-minute duration limit requires splitting. A report from
 another stop does not cover an occurrence that still lacks a fresh departure
 prediction. Destination-aware discovery includes delayed departures and transfers
-absent from scheduled winners, then applies all acquired predictions before the
-final RAPTOR scan. It stops after four waves, 24 stop targets, or the shared
-acquisition deadline; at most four stop acquisitions run concurrently. The
-package's default deadline is four seconds; the host can select two seconds.
-Unchecked occurrences remain scheduled.
+absent from scheduled winners, then applies acquired predictions in RAPTOR.
+Discovery stops after four waves, 24 stop targets, or half the acquisition budget.
+The remaining acquisition time is reserved for every transit leg in the retained
+itineraries. This completion pass targets actual boarding occurrences, including
+walking and in-seat connections, without discovery's stop or temporal-seed caps.
+Its windows include the permitted two-hour delay range, clipped to the search
+horizon. Shared board coverage still avoids duplicate downloads.
+
+New predictions trigger another RAPTOR scan so connecting-trip delays,
+cancellations and restrictions affect feasibility and ranking before publication.
+Replacement itineraries can acquire previously unseen boardings, for up to four
+completion waves; each occurrence is attempted once per calculation. At most
+four stop acquisitions run concurrently. The package's total acquisition budget
+is four seconds by default; the host can select two seconds. Routing scan time
+is measured separately. Unavailable, unmatched or expired reports remain honestly
+scheduled or partial; incomplete acquisition never implies live coverage.
 
 Each provider wave reserves a quarter of its remaining time (up to 500 ms)
 for matching completed boards to GTFS. Board acquisition stops at that earlier

@@ -47,7 +47,7 @@ extension RealtimeTripPatch {
                 : (old.boardingAllowed ?? update.boardingAllowed)
             let alighting: Bool? = latest ? (update.alightingAllowed ?? old.alightingAllowed)
                 : (old.alightingAllowed ?? update.alightingAllowed)
-            let observation: Date = max(old.observedAt ?? Date.distantPast, update.observedAt ?? Date.distantPast)
+            let observation = [old.observedAt, update.observedAt].compactMap { $0 }.max()
             merged[key] = RealtimeStopEventPatch(stopID: old.stopID,
                                 scheduledDeparture: old.scheduledDeparture ?? update.scheduledDeparture,
                                 effectiveDeparture: departure ? update.effectiveDeparture : old.effectiveDeparture,

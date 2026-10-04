@@ -665,38 +665,109 @@ public actor JourneyPlanningSession {
         let access = edges.access; let egress = edges.egress
         metrics.endpointAccessCandidates = access.count
         metrics.endpointEgressCandidates = egress.count
+        let realtimeBudget: Int = if case let .bestEffort(configuration, _) = query.realtimePolicy {
+            configuration.acquisitionBudgetMilliseconds
+        } else { 0 }
         let realtimeStarted = ContinuousClock.now
         let acquired = try await acquireRealtime(access: access, egress: egress, anchor: anchor,
-                                                searchHorizon: searchHorizon, force: forceRealtime)
+                                                searchHorizon: searchHorizon, force: forceRealtime, budgetMilliseconds: realtimeBudget / 2)
         let patches = acquired.map { RealtimeTimeline.resolved($0, snapshot: snapshot, now: clock()) }
         latestPatchesByInstance = Dictionary(patches.map { (RealtimePatchKey(tripID: $0.tripID, serviceDate: $0.serviceDate), $0) }, uniquingKeysWith: { _, latest in latest })
         metrics.realtimePreparationMilliseconds += HafasRealtimeRoutingProvider.milliseconds(
             realtimeStarted.duration(to: .now))
         diagnostics.record(.realtime, since: realtimeStarted)
-        diagnostics.milliseconds[.http] = Double(metrics.realtimeHTTPMilliseconds - countersBefore.realtimeHTTPMilliseconds)
-        diagnostics.milliseconds[.decode] = Double(metrics.realtimeDecodeMilliseconds - countersBefore.realtimeDecodeMilliseconds)
-        diagnostics.milliseconds[.boardFetch] = Double(metrics.realtimeBoardFetchMilliseconds - boardFetchBefore)
-        diagnostics.milliseconds[.schedulePreparation] = Double(metrics.realtimeScheduledPreparationMilliseconds - scheduleBefore)
-        diagnostics.milliseconds[.boardMatching] = Double(metrics.realtimeBoardMatchingMilliseconds - matchingBefore)
-        metrics.pointRaptorScans += 1
+        var remainingRealtimeMilliseconds = max(0, realtimeBudget - Int(RoutingDiagnostics.elapsed(since: realtimeStarted)))
         async let directJourney = Self.directWalk(snapshot: snapshot, query: query, walking: walking, anchor: anchor)
-        let raptorStarted = ContinuousClock.now
-        let searchResult = try await Raptor.search(snapshot: snapshot, query: query, access: access, egress: egress, patches: patches, walking: walking, profileHorizon: searchHorizon)
-        metrics.raptorSearchMilliseconds = Int(RoutingDiagnostics.elapsed(since: raptorStarted))
-        diagnostics.record(.raptor, since: raptorStarted)
-        metrics.raptorCPUMilliseconds = searchResult.cpuMilliseconds
-        metrics.walkingTransferMilliseconds = searchResult.walkingTransferMilliseconds
-        diagnostics.milliseconds[.walkingTransfers] = Double(searchResult.walkingTransferMilliseconds)
-        metrics.walkingTransferPairs = searchResult.walkingTransferPairs
+        var attempted: Set<ItineraryBoarding> = []
+        var refinementWaves = 0
+        var cpuMilliseconds = 0
+        var walkingPairs = 0
+        var searchResult: Raptor.SearchResult
+        var built: (journeys: [Journey], validCandidates: Int, representativeCount: Int)
+        let rejectionsBefore = diagnostics.rejections
+        while true {
+            metrics.pointRaptorScans += 1
+            let raptorStarted = ContinuousClock.now
+            searchResult = try await Raptor.search(snapshot: snapshot, query: query, access: access, egress: egress,
+                patches: Array(latestPatchesByInstance.values), walking: walking, profileHorizon: searchHorizon)
+            diagnostics.record(.raptor, since: raptorStarted)
+            cpuMilliseconds += searchResult.cpuMilliseconds
+            walkingPairs += searchResult.walkingTransferPairs
+            diagnostics.milliseconds[.walkingTransfers, default: 0] += Double(searchResult.walkingTransferMilliseconds)
+            let candidateStarted = ContinuousClock.now
+            diagnostics.rejections = rejectionsBefore
+            built = buildJourneys(searchResult.candidates, access: access, egress: egress, accepting: accepting)
+            diagnostics.record(.candidateBuilding, since: candidateStarted)
+            guard remainingRealtimeMilliseconds > 0, refinementWaves < 4 else { break }
+            let completionStarted = ContinuousClock.now
+            let changed = try await completeItineraryRealtime(built.journeys, anchor: anchor,
+                searchHorizon: searchHorizon, force: forceRealtime,
+                budgetMilliseconds: remainingRealtimeMilliseconds, attempted: &attempted)
+            let elapsed = RoutingDiagnostics.elapsed(since: completionStarted)
+            remainingRealtimeMilliseconds = max(0, remainingRealtimeMilliseconds - Int(elapsed.rounded(.up)))
+            metrics.realtimePreparationMilliseconds += Int(elapsed)
+            diagnostics.record(.realtime, since: completionStarted)
+            refinementWaves += 1
+            // Re-run feasibility and ranking with the new overlay, including
+            // cancellations and delays on connecting vehicles.
+            if !changed { break }
+        }
+        let journeys = built.journeys
+        metrics.raptorSearchMilliseconds = Int(diagnostics.milliseconds[.raptor, default: 0])
+        metrics.raptorCPUMilliseconds = cpuMilliseconds
+        metrics.walkingTransferMilliseconds = Int(diagnostics.milliseconds[.walkingTransfers, default: 0])
+        metrics.walkingTransferPairs = walkingPairs
         metrics.raptorWorkerCount = searchResult.maximumWorkerCount
         metrics.searchRounds = searchResult.roundMetrics
         metrics.scannedPatterns = searchResult.scannedPatterns
         metrics.scannedTripInstances = searchResult.scannedTripInstances
         metrics.candidatesGenerated = searchResult.candidates.count
-        let candidateStarted = ContinuousClock.now
+        metrics.alternativesRetained = journeys.count
+        metrics.candidateBuildingMilliseconds = Int(diagnostics.milliseconds[.candidateBuilding, default: 0])
+        metrics.realtimePredictedEvents = latestPatchesByInstance.values.flatMap(\.events).filter {
+            $0.departureSource == .reported || $0.arrivalSource == .reported
+        }.count
+        metrics.delayedPastBoardingsInjected = countersBefore.delayedPastBoardingsInjected
+            + latestPatchesByInstance.values.flatMap(\.events).filter {
+                ($0.scheduledDeparture ?? .distantFuture) < anchor && ($0.effectiveDeparture ?? .distantPast) >= anchor
+            }.count
+        diagnostics.milliseconds[.http] = Double(metrics.realtimeHTTPMilliseconds - countersBefore.realtimeHTTPMilliseconds)
+        diagnostics.milliseconds[.decode] = Double(metrics.realtimeDecodeMilliseconds - countersBefore.realtimeDecodeMilliseconds)
+        diagnostics.milliseconds[.boardFetch] = Double(metrics.realtimeBoardFetchMilliseconds - boardFetchBefore)
+        diagnostics.milliseconds[.schedulePreparation] = Double(metrics.realtimeScheduledPreparationMilliseconds - scheduleBefore)
+        diagnostics.milliseconds[.boardMatching] = Double(metrics.realtimeBoardMatchingMilliseconds - matchingBefore)
+        let directWaitStarted = ContinuousClock.now
+        let direct = await directJourney
+        diagnostics.record(.directWalkingWait, since: directWaitStarted)
+        if let before = walkingStatisticsBefore, let after = await walking?.statistics() {
+            metrics.walkingRequests += after.requests - before.requests
+            metrics.walkingCacheHits += after.hits - before.hits
+        }
+        diagnostics.counters = [.networkRequests: metrics.hafasRequests - countersBefore.hafasRequests,
+            .boardCacheHits: metrics.hafasCacheHits - countersBefore.hafasCacheHits,
+            .responseBytes: metrics.realtimeResponseBytes - countersBefore.realtimeResponseBytes,
+            .predictedEvents: metrics.realtimePredictedEvents,
+            .delayedPastBoardings: metrics.delayedPastBoardingsInjected - countersBefore.delayedPastBoardingsInjected,
+            .walkingRequests: metrics.walkingRequests - countersBefore.walkingRequests,
+            .walkingCacheHits: metrics.walkingCacheHits - countersBefore.walkingCacheHits,
+            .boardsCovered: metrics.realtimeBoardsCovered, .incompleteBoards: metrics.realtimeIncompleteBoards,
+            .workers: metrics.raptorWorkerCount, .candidates: metrics.candidatesGenerated,
+            .retainedAlternatives: metrics.alternativesRetained,
+            .invalidJourneys: diagnostics.rejections.values.reduce(0, +),
+            .duplicatesSuppressed: built.validCandidates - built.representativeCount]
+        diagnostics.rounds = searchResult.roundMetrics
+        directWalking = direct
+        metrics.profileGenerationMilliseconds = Int(RoutingDiagnostics.elapsed(since: started))
+        diagnostics.totalMilliseconds = RoutingDiagnostics.elapsed(since: started)
+        return journeys
+    }
+
+    private func buildJourneys(_ candidates: [Raptor.Candidate], access: [Edge], egress: [Edge],
+                               accepting: (@Sendable (Journey) -> Bool)?)
+        -> (journeys: [Journey], validCandidates: Int, representativeCount: Int) {
         var representatives: [String: BuiltJourney] = [:]
         var validCandidates = 0
-        for candidate in searchResult.candidates {
+        for candidate in candidates {
             guard let journey = buildJourney(candidate, access: access, egress: egress) else { continue }
             // Page bounds must apply before representatives and dominance: an
             // itinerary outside an arrival window cannot suppress one inside it.
@@ -723,33 +794,7 @@ public actor JourneyPlanningSession {
             }
         }
         let journeys = strictEnvelope(transferRepresentatives, preferences: query.preferences).sorted(by: journeyOrder).map(\.journey)
-        metrics.alternativesRetained = journeys.count
-        metrics.candidateBuildingMilliseconds = Int(RoutingDiagnostics.elapsed(since: candidateStarted))
-        diagnostics.record(.candidateBuilding, since: candidateStarted)
-        let directWaitStarted = ContinuousClock.now
-        let direct = await directJourney
-        diagnostics.record(.directWalkingWait, since: directWaitStarted)
-        if let before = walkingStatisticsBefore, let after = await walking?.statistics() {
-            metrics.walkingRequests += after.requests - before.requests
-            metrics.walkingCacheHits += after.hits - before.hits
-        }
-        diagnostics.counters = [.networkRequests: metrics.hafasRequests - countersBefore.hafasRequests,
-            .boardCacheHits: metrics.hafasCacheHits - countersBefore.hafasCacheHits,
-            .responseBytes: metrics.realtimeResponseBytes - countersBefore.realtimeResponseBytes,
-            .predictedEvents: metrics.realtimePredictedEvents,
-            .delayedPastBoardings: metrics.delayedPastBoardingsInjected - countersBefore.delayedPastBoardingsInjected,
-            .walkingRequests: metrics.walkingRequests - countersBefore.walkingRequests,
-            .walkingCacheHits: metrics.walkingCacheHits - countersBefore.walkingCacheHits,
-            .boardsCovered: metrics.realtimeBoardsCovered, .incompleteBoards: metrics.realtimeIncompleteBoards,
-            .workers: metrics.raptorWorkerCount, .candidates: metrics.candidatesGenerated,
-            .retainedAlternatives: metrics.alternativesRetained,
-            .invalidJourneys: diagnostics.rejections.values.reduce(0, +),
-            .duplicatesSuppressed: validCandidates - transferRepresentatives.count]
-        diagnostics.rounds = searchResult.roundMetrics
-        directWalking = direct
-        metrics.profileGenerationMilliseconds = Int(RoutingDiagnostics.elapsed(since: started))
-        diagnostics.totalMilliseconds = RoutingDiagnostics.elapsed(since: started)
-        return journeys
+        return (journeys, validCandidates, transferRepresentatives.count)
     }
 
     /// Uses the same generation and suggestion policy as an initial search,

@@ -2,7 +2,7 @@ import Foundation
 
 extension JourneyPlanningSession {
     func acquireRealtime(access: [Edge], egress: [Edge], anchor: Date,
-                                 searchHorizon: TimeInterval, force: Bool) async throws -> [RealtimeTripPatch] {
+                                 searchHorizon: TimeInterval, force: Bool, budgetMilliseconds: Int? = nil) async throws -> [RealtimeTripPatch] {
         guard case let .bestEffort(configuration, requestedRefresh) = query.realtimePolicy,
               let realtimeProvider else { return [] }
         let from = query.direction == .arriveBy
@@ -17,7 +17,7 @@ extension JourneyPlanningSession {
             return cachedRealtimeBatch.patches
         }
         let started = ContinuousClock.now
-        let deadline = started.advanced(by: .milliseconds(max(0, configuration.acquisitionBudgetMilliseconds)))
+        let deadline = started.advanced(by: .milliseconds(max(0, budgetMilliseconds ?? configuration.acquisitionBudgetMilliseconds)))
         var queried: Set<String> = []
         var covered: Set<String> = []
         var incomplete: Set<String> = []
@@ -58,20 +58,10 @@ extension JourneyPlanningSession {
                     refreshPolicy: force ? .forceRefresh : requestedRefresh,
                     maximumConcurrentRequests: min(4, configuration.maximumConcurrentBoardRequests),
                     timeout: ContinuousClock.now.duration(to: deadline), deadline: deadline, targets: targets))
-                for (reason, count) in batch.matchingRejections {
-                    diagnostics.realtimeMatchingRejections[reason, default: 0] += count
-                }
+                recordRealtimeBatch(batch)
                 covered.formUnion(batch.coveredStopIDs)
                 incomplete.formUnion(batch.incompleteStopIDs)
                 if let date = batch.fetchedAt { fetchedAt = min(fetchedAt ?? date, date) }
-                metrics.realtimeHTTPMilliseconds += batch.httpMilliseconds
-                metrics.realtimeDecodeMilliseconds += batch.decodeMilliseconds
-                metrics.hafasRequests += batch.networkRequests
-                metrics.hafasCacheHits += batch.cacheHits
-                metrics.realtimeResponseBytes += batch.responseBytes
-                metrics.realtimeBoardFetchMilliseconds += batch.boardFetchMilliseconds
-                metrics.realtimeScheduledPreparationMilliseconds += batch.scheduledPreparationMilliseconds
-                metrics.realtimeBoardMatchingMilliseconds += batch.boardMatchingMilliseconds
                 for patch in batch.patches {
                     let key = RealtimePatchKey(tripID: patch.tripID, serviceDate: patch.serviceDate)
                     patches[key] = patches[key].map { $0.merging(patch) } ?? patch
