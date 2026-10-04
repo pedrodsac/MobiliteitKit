@@ -91,9 +91,14 @@ extension JourneyQualityPolicy {
 
     static func primarySuggestions(_ all: [Journey], count: Int, query: RouteQuery) -> [Journey] {
         guard count > 0 else { return [] }
+        // Arrive by promises the latest feasible departure. Initial-list
+        // heuristics for departing now must not remove that departure because
+        // an earlier vehicle is faster or involves less walking.
+        let latestDeparture = query.direction == .arriveBy ? all.map(\.effectiveDeparture).max() : nil
         let useful = all.filter {
-            !clearlyInferiorInInitialProfile($0, among: all)
+            $0.effectiveDeparture == latestDeparture || (!clearlyInferiorInInitialProfile($0, among: all)
                 && !materiallyInferior($0, among: all, policy: query.preferences.suggestionPolicy)
+            )
         }
         let ordered = useful.sorted { ranksBefore($0, $1, anchor: query.departureTime,
             direction: query.direction, preferences: query.preferences) }

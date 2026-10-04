@@ -641,7 +641,8 @@ public actor JourneyPlanningSession {
         diagnostics = RoutingDiagnostics()
         return result
     }
-    private func generate(anchor: Date, searchHorizon: TimeInterval, forceRealtime: Bool = false) async throws -> [Journey] {
+    private func generate(anchor: Date, searchHorizon: TimeInterval, forceRealtime: Bool = false,
+                          accepting: (@Sendable (Journey) -> Bool)? = nil) async throws -> [Journey] {
         let started = ContinuousClock.now
         diagnostics = RoutingDiagnostics()
         let countersBefore = metrics
@@ -697,6 +698,9 @@ public actor JourneyPlanningSession {
         var validCandidates = 0
         for candidate in searchResult.candidates {
             guard let journey = buildJourney(candidate, access: access, egress: egress) else { continue }
+            // Page bounds must apply before representatives and dominance: an
+            // itinerary outside an arrival window cannot suppress one inside it.
+            if let accepting, !accepting(journey.journey) { continue }
             validCandidates += 1
             if let existing = representatives[journey.tripInstanceKey] {
                 if prefers(journey, over: existing) { representatives[journey.tripInstanceKey] = journey }
@@ -746,6 +750,35 @@ public actor JourneyPlanningSession {
         metrics.profileGenerationMilliseconds = Int(RoutingDiagnostics.elapsed(since: started))
         diagnostics.totalMilliseconds = RoutingDiagnostics.elapsed(since: started)
         return journeys
+    }
+
+    /// Uses the same generation and suggestion policy as an initial search,
+    /// restricted to one adjacent door-to-door time window.
+    func adjacentTimePage(axis: JourneyTimeAxis, boundary: JourneyPageBoundary,
+                          earlier: Bool, count: Int, excludingIDs: Set<JourneySignature>,
+                          searchHorizon: TimeInterval) async throws -> JourneyPage {
+        let profile = try await generate(anchor: query.departureTime, searchHorizon: searchHorizon) { journey in
+            guard !excludingIDs.contains(journey.id) else { return false }
+            let time = axis == .arrival ? journey.effectiveArrival : journey.effectiveDeparture
+            let edge = boundary.departure
+            if time != edge { return earlier ? time < edge : time > edge }
+            guard let id = boundary.id else { return false }
+            return earlier ? journey.id < id : journey.id > id
+        }
+        let selected: [Journey]
+        if axis == .departure && !earlier {
+            selected = JourneyQualityPolicy.primarySuggestions(profile, count: count, query: query)
+        } else {
+            let useful = JourneyQualityPolicy.primarySuggestions(profile, count: profile.count, query: query)
+            let ordered = useful.sorted {
+                let a = axis == .arrival ? $0.effectiveArrival : $0.effectiveDeparture
+                let b = axis == .arrival ? $1.effectiveArrival : $1.effectiveDeparture
+                return (a, $0.id) < (b, $1.id)
+            }
+            selected = earlier ? Array(ordered.suffix(count)) : Array(ordered.prefix(count))
+        }
+        return makePage(journeys: selected, includeWalking: false,
+                        hasEarlier: true, hasLater: true)
     }
     struct Edge: Sendable { let stop: Int; let seconds: Int; let distance: Double; let walk: WalkingRoute? }
     private enum EndpointEdgePurpose: Equatable { case access, egress }

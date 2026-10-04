@@ -8,6 +8,26 @@ public enum JourneyRefreshPolicy: Hashable, Sendable {
     case scheduleOnly, useCache, forceRefresh
 }
 
+/// Existing consumers retain departure-profile backfilling unless they opt in.
+public enum JourneyPagingPolicy: Hashable, Sendable {
+    case departureProfile
+    case adjacentTimeWindows
+}
+
+public enum JourneyTimeAxis: Hashable, Sendable {
+    case departure, arrival
+}
+
+/// Effective door-to-door times covered by the most recently published page.
+public struct JourneyBrowsingWindow: Hashable, Sendable {
+    public let axis: JourneyTimeAxis
+    public let range: DateInterval
+    public init(axis: JourneyTimeAxis, range: DateInterval) {
+        self.axis = axis
+        self.range = range
+    }
+}
+
 public enum JourneyPlanningPage: Hashable, Sendable {
     case initial, earlier, later
     case before(Date, JourneySignature?, Int)
@@ -30,12 +50,15 @@ public struct JourneyPlanningRequest: Hashable, Sendable {
     public var time: JourneyPlanningTime
     public var preferences: RoutingPreferences
     public var realtimeAcquisitionBudgetMilliseconds: Int
+    public var pagingPolicy: JourneyPagingPolicy
     public init(origin: JourneyEndpoint, destination: JourneyEndpoint,
                 time: JourneyPlanningTime = .now, preferences: RoutingPreferences = .init(),
-                realtimeAcquisitionBudgetMilliseconds: Int = 4_000) {
+                realtimeAcquisitionBudgetMilliseconds: Int = 4_000,
+                pagingPolicy: JourneyPagingPolicy = .departureProfile) {
         self.origin = origin; self.destination = destination
         self.time = time; self.preferences = preferences
         self.realtimeAcquisitionBudgetMilliseconds = max(0, realtimeAcquisitionBudgetMilliseconds)
+        self.pagingPolicy = pagingPolicy
     }
 }
 
@@ -64,7 +87,7 @@ public enum JourneyFeasibility: Codable, Hashable, Sendable {
     }
 }
 
-public struct JourneyValidationContext: Hashable, Sendable {
+public struct JourneyValidationContext: Codable, Hashable, Sendable {
     public let anchor: Date
     public let arriveBy: Bool
     public let minimumTransferSeconds: Int
@@ -128,6 +151,8 @@ public struct JourneyPlanningCursor: Hashable, Sendable {
 }
 
 public struct JourneyPlanningResult: Sendable {
+    public var validationContexts: [JourneySignature: JourneyValidationContext] = [:]
+    public var browsingWindow: JourneyBrowsingWindow? = nil
     public var earlierCursor: JourneyPlanningCursor? = nil
     public var laterCursor: JourneyPlanningCursor? = nil
     public let journeys: [Journey]

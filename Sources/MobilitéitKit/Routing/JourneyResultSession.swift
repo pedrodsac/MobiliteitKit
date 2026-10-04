@@ -16,6 +16,7 @@ public actor JourneyResultSession {
     private var invalidated: Set<JourneySignature> = []
     private var exploredBefore: JourneyPageBoundary?
     private var exploredAfter: JourneyPageBoundary?
+    private var browsingWindow: JourneyBrowsingWindow?
     private var frozenPatches: [RealtimeTripPatch]?
     private var previousRecommendation: JourneySignature?
     private var hasEarlier = true
@@ -58,31 +59,45 @@ public actor JourneyResultSession {
         let isInitial = page == .initial || refresh == .forceRefresh
         if isInitial, case .now = request.time, let now { anchor = now }
         let effectivePage = resolved(isInitial ? .initial : page)
-        let query = makeQuery(page: effectivePage, refresh: refresh)
+        var query = makeQuery(page: effectivePage, refresh: refresh)
         if isInitial {
             generation = UUID(); didReplan = false; replacementSearches = 0
             exploredBefore = nil; exploredAfter = nil; frozenPatches = nil
             invalidated = []; journeys = []; contexts = [:]; hasEarlier = true; hasLater = true
+            browsingWindow = nil
         }
-        let session = try await router.makeSession(for: query)
-        if let frozenPatches { await session.setFrozenPatches(frozenPatches) }
         let raw: JourneyPage
-        switch effectivePage {
-        case let .before(date, id, count):
-            raw = try await session.boundedPage(before: date, beforeID: id, count: count, excludingIDs: Set(journeys.map(\.id)))
-        case let .after(date, id, count):
-            raw = try await session.boundedPage(after: date, afterID: id, count: count, excludingIDs: Set(journeys.map(\.id)))
-        default:
-            raw = direction == .arriveBy
-                ? try await session.expanded(count: 5)
-                : try await session.initial(count: 5, searchHorizon: 3 * 60 * 60)
+        let acquiredPatches: [RealtimeTripPatch]
+        let adjacent = !isInitial && request.pagingPolicy == .adjacentTimeWindows
+            && (page == .earlier || page == .later)
+        var searchedWindow: JourneyBrowsingWindow?
+        if adjacent {
+            let earlier = page == .earlier
+            let boundary = timeBoundary(earlier: earlier)
+            let search = AdjacentJourneySearch(router: router, request: request,
+                boundary: boundary, earlier: earlier, excludingIDs: Set(journeys.map(\.id)).union(invalidated),
+                patches: frozenPatches, now: clock())
+            let result = try await search.calculate(refresh: refresh)
+            query = result.query; raw = result.page; acquiredPatches = result.patches
+            searchedWindow = result.window
+        } else {
+            let session = try await router.makeSession(for: query)
+            if let frozenPatches { await session.setFrozenPatches(frozenPatches) }
+            switch effectivePage {
+            case let .before(date, id, count):
+                raw = try await session.boundedPage(before: date, beforeID: id, count: count, excludingIDs: Set(journeys.map(\.id)))
+            case let .after(date, id, count):
+                raw = try await session.boundedPage(after: date, afterID: id, count: count, excludingIDs: Set(journeys.map(\.id)))
+            default:
+                raw = direction == .arriveBy
+                    ? try await session.expanded(count: 5)
+                    : try await session.initial(count: 5, searchHorizon: 3 * 60 * 60)
+            }
+            acquiredPatches = await session.currentPatches()
         }
         try Task.checkCancellation()
         let geometryStarted = ContinuousClock.now
         let enriched = await JourneyGeometry.enrich(raw.journeys, store: store)
-        try Task.checkCancellation()
-        guard operation == currentOperation else { throw JourneyPlanningError.supersededRequest }
-        let acquiredPatches = await session.currentPatches()
         try Task.checkCancellation()
         guard operation == currentOperation else { throw JourneyPlanningError.supersededRequest }
         frozenPatches = acquiredPatches
@@ -111,13 +126,25 @@ public actor JourneyResultSession {
         }
         let incoming = enriched.filter { !invalidated.contains($0.id) }
         merge(incoming, validationAnchor: query.departureTime)
-        switch effectivePage {
+        switch adjacent ? page : effectivePage {
+        case .earlier: hasEarlier = !incoming.isEmpty
+        case .later: hasLater = !incoming.isEmpty
         case .before: hasEarlier = !incoming.isEmpty && raw.hasEarlier
         case .after: hasLater = !incoming.isEmpty && raw.hasLater
         default:
             hasEarlier = journeys.contains { $0.legs.contains { if case .transit = $0 { true } else { false } } }
             // Initial search is deliberately shorter than adjacent-page searches.
             hasLater = hasEarlier
+        }
+        if let searchedWindow, !incoming.isEmpty {
+            browsingWindow = searchedWindow
+        } else if isInitial, request.pagingPolicy == .adjacentTimeWindows {
+            let transit = incoming.filter { $0.firstRide != nil }
+            let times = transit.map { direction == .arriveBy ? $0.effectiveArrival : $0.effectiveDeparture }
+            if let start = times.min(), let end = times.max() {
+                browsingWindow = .init(axis: direction == .arriveBy ? .arrival : .departure,
+                                       range: .init(start: start, end: end))
+            }
         }
         revision &+= 1
         diagnostics.record(.resultAssembly, since: assemblyStarted)
@@ -207,14 +234,24 @@ public actor JourneyResultSession {
             if !didReplan, corrected.legs.contains(where: { if case .transit = $0 { true } else { false } }) {
                 didReplan = true; replacementSearches += 1
                 let expectedGeneration = generation
+                let expectedOperation = operation
+                let replacementContext = contexts[corrected.id] ?? context
                 do {
-                    let session = try await router.makeSession(for: makeQuery(page: .initial, refresh: .useCache))
+                    let replacementQuery = RouteQuery(origin: request.origin, destination: request.destination,
+                        departureTime: replacementContext.anchor,
+                        direction: replacementContext.arriveBy ? .arriveBy : .departAfter,
+                        preferences: request.preferences,
+                        realtimePolicy: JourneyPlanningPage.initial.realtimePolicy(.useCache,
+                            acquisitionBudgetMilliseconds: request.realtimeAcquisitionBudgetMilliseconds))
+                    let session = try await router.makeSession(for: replacementQuery)
                     let raw = direction == .arriveBy
                         ? try await session.expanded(count: 5)
                         : try await session.initial(count: 5, searchHorizon: 3 * 60 * 60)
                     let replacements = await JourneyGeometry.enrich(raw.journeys, store: store)
-                    guard expectedGeneration == generation else { throw JourneyPlanningError.staleRefinement }
-                    merge(replacements)
+                    guard expectedGeneration == generation, expectedOperation == operation else {
+                        throw JourneyPlanningError.staleRefinement
+                    }
+                    merge(replacements, validationAnchor: replacementContext.anchor)
                     metrics = raw.metrics
                 } catch is CancellationError { throw CancellationError() }
                 catch {
@@ -237,6 +274,19 @@ public actor JourneyResultSession {
             return .after(anchor, nil, 3)
         default: return page
         }
+    }
+    private func timeBoundary(earlier: Bool) -> JourneyPageBoundary {
+        let transit = snapshot().journeys.filter { $0.firstRide != nil }
+        let ordered = transit.sorted {
+            let a = direction == .arriveBy ? $0.effectiveArrival : $0.effectiveDeparture
+            let b = direction == .arriveBy ? $1.effectiveArrival : $1.effectiveDeparture
+            return (a, $0.id) < (b, $1.id)
+        }
+        guard let edge = earlier ? ordered.first : ordered.last else {
+            return .init(departure: anchor, id: nil)
+        }
+        return .init(departure: direction == .arriveBy ? edge.effectiveArrival : edge.effectiveDeparture,
+                     id: edge.id)
     }
     private func makeQuery(page: JourneyPlanningPage, refresh: JourneyRefreshPolicy) -> RouteQuery {
         var searchAnchor = anchor
@@ -339,6 +389,8 @@ public actor JourneyResultSession {
             diagnostics: diagnostics, validationContext: context)
         result.earlierCursor = exploredBefore.map { .init(generation: generation, feedGeneration: feedSnapshot.info.generation, departure: $0.departure, journeyID: $0.id) }
         result.laterCursor = exploredAfter.map { .init(generation: generation, feedGeneration: feedSnapshot.info.generation, departure: $0.departure, journeyID: $0.id) }
+        result.validationContexts = Dictionary(uniqueKeysWithValues: retained.map { ($0.id, contexts[$0.id] ?? context) })
+        result.browsingWindow = browsingWindow
         return result
     }
 }
