@@ -52,7 +52,8 @@ struct AdjacentJourneyPagingTests {
         let priorIDs = Set(initial.journeys.map(\.id))
         let added = later.journeys.filter { !priorIDs.contains($0.id) }
         #expect(added.map(\.id) == expected.journeys.map(\.id))
-        #expect(added.count == 5)
+        #expect(initial.journeys.count == 10)
+        #expect(added.count == 8)
         #expect(priorIDs.isSubset(of: Set(later.journeys.map(\.id))))
         #expect(added.allSatisfy { $0.effectiveDeparture > latest })
     }

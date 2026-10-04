@@ -90,8 +90,8 @@ public actor JourneyResultSession {
                 raw = try await session.boundedPage(after: date, afterID: id, count: count, excludingIDs: Set(journeys.map(\.id)))
             default:
                 raw = direction == .arriveBy
-                    ? try await session.expanded(count: 5)
-                    : try await session.initial(count: 5, searchHorizon: 3 * 60 * 60)
+                    ? try await session.expanded(count: 10)
+                    : try await session.initial(count: 10, searchHorizon: 3 * 60 * 60)
             }
             acquiredPatches = await session.currentPatches()
         }
@@ -255,8 +255,8 @@ public actor JourneyResultSession {
                             acquisitionBudgetMilliseconds: request.realtimeAcquisitionBudgetMilliseconds))
                     let session = try await router.makeSession(for: replacementQuery)
                     let raw = direction == .arriveBy
-                        ? try await session.expanded(count: 5)
-                        : try await session.initial(count: 5, searchHorizon: 3 * 60 * 60)
+                        ? try await session.expanded(count: 10)
+                        : try await session.initial(count: 10, searchHorizon: 3 * 60 * 60)
                     let replacements = await JourneyGeometry.enrich(raw.journeys, store: store)
                     guard expectedGeneration == generation, expectedOperation == operation else {
                         throw JourneyPlanningError.staleRefinement

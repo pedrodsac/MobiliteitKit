@@ -40,7 +40,7 @@ struct AdjacentJourneySearch {
             // A later arrival can belong to a journey which started before the
             // previous arrival boundary. Keep the normal arrive-by lookback.
             let page = try await session.adjacentTimePage(axis: arrival ? .arrival : .departure,
-                boundary: boundary, earlier: earlier, count: 5, excludingIDs: excludingIDs,
+                boundary: boundary, earlier: earlier, count: 10, excludingIDs: excludingIDs,
                 searchHorizon: arrival && !earlier ? Raptor.fullProfileHorizon : horizon)
             if !page.journeys.isEmpty || horizon == Raptor.fullProfileHorizon {
                 return Result(page: page, query: query, patches: await session.currentPatches(),
