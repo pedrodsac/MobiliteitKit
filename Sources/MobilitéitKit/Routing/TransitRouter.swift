@@ -723,7 +723,7 @@ public actor JourneyPlanningSession {
             remainingRealtimeMilliseconds = max(0, remainingRealtimeMilliseconds - Int(elapsed.rounded(.up)))
             metrics.realtimePreparationMilliseconds += Int(elapsed)
             diagnostics.record(.realtime, since: completionStarted)
-            if !discovered, remainingRealtimeMilliseconds > 0 {
+            if !discovered, !changed, remainingRealtimeMilliseconds > 0 {
                 let discoveryStarted = ContinuousClock.now
                 let before = latestPatchesByInstance
                 let acquired = try await acquireRealtime(access: access, egress: egress, anchor: anchor,

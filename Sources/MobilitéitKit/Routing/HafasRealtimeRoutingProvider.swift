@@ -96,7 +96,10 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
         guard !requested.isEmpty, request.through >= request.from else {
             return .init(patches: [], requestedStopIDs: requested, coveredStopIDs: [])
         }
-        let localDeadline = ContinuousClock.now.advanced(by: min(request.timeout, requestTimeout))
+        // An explicit session deadline owns the whole batch budget. The default
+        // timeout still bounds standalone board requests.
+        let localDeadline = ContinuousClock.now.advanced(by:
+            request.deadline == nil ? min(request.timeout, requestTimeout) : request.timeout)
         let deadline = request.deadline.map { min($0, localDeadline) } ?? localDeadline
         // A slow later slice must not consume the time needed to match boards
         // that already arrived. Keep matching inside the original deadline and
@@ -119,6 +122,7 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
             guard ContinuousClock.now < deadline else { unfinished.insert(stopID); continue }
             guard let result = fetched[stopID], let board = result.board else { continue }
             let scheduled = prepared.byStopID[stopID] ?? []
+            let desired = request.tripIDs.isEmpty ? [] : scheduled.filter { request.tripIDs.contains($0.departure.tripID) }
             for live in board.departures.values {
                 try Task.checkCancellation()
                 guard ContinuousClock.now < deadline else { unfinished.insert(stopID); break }
@@ -130,6 +134,8 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
                       planned <= request.through.addingTimeInterval(90) else {
                     rejections[.outsideInterval, default: 0] += 1; continue
                 }
+                if !request.tripIDs.isEmpty,
+                   !desired.contains(where: { abs($0.scheduledDate.timeIntervalSince(planned)) <= 90 }) { continue }
                 let reference = live.journeyReference?.reference
                 let cached = reference.flatMap { matchedJourneys[$0] }
                 let reused = cached.flatMap { match -> Candidate? in
@@ -152,6 +158,8 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
                 }
                 guard ContinuousClock.now < deadline else { unfinished.insert(stopID); break }
                 guard let candidate else { continue }
+                // Resolve ambiguity against the complete timetable first.
+                guard request.tripIDs.isEmpty || request.tripIDs.contains(candidate.departure.tripID) else { continue }
                 guard let update = await patch(for: live, candidate: candidate,
                                                boardingStopID: stopID, observedAt: result.observations[live.cacheIdentity] ?? result.fetchedAt, deadline: deadline)
                 else { rejections[.invalidTripTimeline, default: 0] += 1; continue }

@@ -131,11 +131,14 @@ public struct RealtimeRoutingRequest: Sendable {
     public let timeout: Duration
     public let deadline: ContinuousClock.Instant?
     public let targets: [RealtimeBoardTarget]
+    /// Optional itinerary filter. Empty requests retain broad discovery matching.
+    public let tripIDs: Set<String>
     public init(stopIDs: [String], from: Date, through: Date,
                 scheduledLookbackSeconds: Int = 7_200,
                 refreshPolicy: RealtimeRefreshPolicy = .useCache,
                 maximumConcurrentRequests: Int = 4, timeout: Duration = .seconds(4),
-                deadline: ContinuousClock.Instant? = nil, targets: [RealtimeBoardTarget] = []) {
+                deadline: ContinuousClock.Instant? = nil, targets: [RealtimeBoardTarget] = [],
+                tripIDs: Set<String> = []) {
         self.stopIDs = stopIDs; self.from = from; self.through = through
         self.scheduledLookbackSeconds = max(0, scheduledLookbackSeconds)
         self.refreshPolicy = refreshPolicy
@@ -143,6 +146,7 @@ public struct RealtimeRoutingRequest: Sendable {
         self.timeout = timeout
         self.deadline = deadline
         self.targets = targets
+        self.tripIDs = tripIDs
     }
 }
 

@@ -17,6 +17,7 @@ extension JourneyPlanningSession {
         let deadline = ContinuousClock.now.advanced(by: .milliseconds(budgetMilliseconds))
         let lower = query.direction == .arriveBy ? anchor.addingTimeInterval(-searchHorizon) : anchor
         let upper = query.direction == .arriveBy ? anchor : anchor.addingTimeInterval(searchHorizon)
+        var tripIDs: Set<String> = []
         var targets: [RealtimeBoardTarget] = []
         var stopIDs: [String] = []
         var seenStops: Set<String> = []
@@ -38,6 +39,7 @@ extension JourneyPlanningSession {
                 let end = min(upper, max(ride.effectiveDeparture.addingTimeInterval(60),
                     ride.scheduledDeparture.addingTimeInterval(RealtimeTimeline.maximumDelay + 60)))
                 guard end >= start else { continue }
+                tripIDs.insert(ride.tripID)
                 targets.append(.init(stopID: ride.board.stop.id, from: start, through: end))
                 if seenStops.insert(ride.board.stop.id).inserted { stopIDs.append(ride.board.stop.id) }
             }
@@ -51,7 +53,7 @@ extension JourneyPlanningSession {
                 scheduledLookbackSeconds: configuration.scheduledLookbackSeconds,
                 refreshPolicy: force ? .forceRefresh : refresh,
                 maximumConcurrentRequests: min(4, configuration.maximumConcurrentBoardRequests),
-                timeout: max(.zero, ContinuousClock.now.duration(to: deadline)), deadline: deadline, targets: targets))
+                timeout: max(.zero, ContinuousClock.now.duration(to: deadline)), deadline: deadline, targets: targets, tripIDs: tripIDs))
         } catch is CancellationError { throw CancellationError() }
         catch { return false }
         try Task.checkCancellation()

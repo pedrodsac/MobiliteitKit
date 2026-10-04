@@ -133,4 +133,39 @@ import Testing
         #expect(RealtimeBoardProtocol.requests(host).count == 1)
     }
 
+    @Test(arguments: [false, true])
+    func itineraryFilterKeepsFullTimetableAmbiguity(ambiguous: Bool) async throws {
+        let otherTime = ambiguous ? "08:00:00" : "09:00:00"
+        let otherArrival = ambiguous ? "08:20:00" : "09:20:00"
+        let fixture = try await RealtimeTestFixture(
+            stopTimes: "trip,08:00:00,08:00:00,a,1\ntrip,08:20:00,08:20:00,c,2\n"
+                + "other,\(otherTime),\(otherTime),a,1\nother,\(otherArrival),\(otherArrival),c,2\n",
+            trips: "route,service,trip,Destination\nroute,service,other,Destination\n")
+        defer { fixture.remove() }
+        let first = try JSONSerialization.jsonObject(with: Data(liveBoard(stops:
+            liveStop("a", planned: "08:00:00", predicted: "08:01:00") + ","
+                + liveStop("c", planned: "08:20:00", predicted: "08:21:00", arrival: "08:21:00"),
+            realtime: "08:01:00").utf8)) as! [String: Any]
+        let other = try JSONSerialization.jsonObject(with: Data(liveBoard(stops:
+            liveStop("a", planned: otherTime, predicted: otherTime) + ","
+                + liveStop("c", planned: otherArrival, predicted: otherArrival, arrival: otherArrival),
+            time: otherTime, realtime: otherTime, extra: ",\"cancelled\":true")
+            .replacingOccurrences(of: "same-journey", with: "other-journey").utf8)) as! [String: Any]
+        let payload = String(decoding: try JSONSerialization.data(withJSONObject:
+            ["Departure": (first["Departure"] as! [[String: Any]]) + (other["Departure"] as! [[String: Any]])]), as: UTF8.self)
+        let (client, host) = RealtimeBoardProtocol.client { _ in payload }
+        defer { RealtimeBoardProtocol.remove(host) }
+        let provider = try HafasRealtimeRoutingProvider(databaseURL: fixture.database, client: client)
+        let batch = try await provider.patches(for: .init(stopIDs: ["a"],
+            from: RealtimeTestFixture.date("07:55:00"), through: RealtimeTestFixture.date("10:00:00"),
+            refreshPolicy: .useCache, tripIDs: ["trip"]))
+        if ambiguous {
+            #expect(batch.patches.isEmpty)
+            #expect(batch.matchingRejections[.ambiguousCandidate, default: 0] > 0)
+        } else {
+            #expect(batch.patches.map(\.tripID) == ["trip"])
+            #expect(batch.patches.first?.events.first?.departureSource == .reported)
+        }
+    }
+
 }
