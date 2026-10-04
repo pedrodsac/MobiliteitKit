@@ -100,7 +100,17 @@ public actor JourneyResultSession {
         let enriched = await JourneyGeometry.enrich(raw.journeys, store: store)
         try Task.checkCancellation()
         guard operation == currentOperation else { throw JourneyPlanningError.supersededRequest }
-        frozenPatches = acquiredPatches
+        // A schedule-only historical page acquires no live patches. Retain
+        // the evidence for existing journeys so expiry/cancellation validation
+        // cannot silently disappear when browsing into the past. A newly
+        // acquired instance replaces its old evidence, including pruned fields.
+        var evidence = Dictionary((frozenPatches ?? []).map {
+            (RealtimePatchKey(tripID: $0.tripID, serviceDate: $0.serviceDate), $0)
+        }, uniquingKeysWith: { _, latest in latest })
+        for patch in acquiredPatches {
+            evidence[RealtimePatchKey(tripID: patch.tripID, serviceDate: patch.serviceDate)] = patch
+        }
+        frozenPatches = Array(evidence.values)
         let updates = Dictionary((frozenPatches ?? []).map {
             (RealtimePatchKey(tripID: $0.tripID, serviceDate: $0.serviceDate), $0)
         }, uniquingKeysWith: { old, new in old.merging(new) })

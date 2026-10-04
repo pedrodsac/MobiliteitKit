@@ -17,16 +17,25 @@ struct AdjacentJourneyPagingTests {
               pagingPolicy: .adjacentTimeWindows)
     }
 
-    @Test func nowAndLeaveAtUseIdenticalResolvedInstant() async throws {
-        let fixture = try await RoutingPreventionFixture(files: files(Array(stride(from: 300, through: 3600, by: 300))))
+    @Test(arguments: [JourneyRefreshPolicy.scheduleOnly, .useCache])
+    func nowAndLeaveAtUseIdenticalResolvedInstant(refresh: JourneyRefreshPolicy) async throws {
+        let patch = RealtimeTripPatch(tripID: "run-0", serviceDate: try GTFSDate(parsing: "20260904"), events: [
+            .init(stopID: "a", effectiveDeparture: date(hour: 8, minute: 7), departureSource: .reported,
+                  stopSequence: 1, observedAt: date(hour: 8)),
+            .init(stopID: "d", effectiveArrival: date(hour: 8, minute: 27), arrivalSource: .reported,
+                  stopSequence: 2, observedAt: date(hour: 8))
+        ])
+        let fixture = try await RoutingPreventionFixture(files: files(Array(stride(from: 300, through: 3600, by: 300))),
+            realtime: PreventionRealtime(patches: [patch]))
         defer { fixture.remove() }
         let immediate = try await fixture.planning(request(.now))
         let explicit = try await fixture.planning(request())
-        let a = try await immediate.calculate(refresh: .scheduleOnly, now: date(hour: 8))
-        let b = try await explicit.calculate(refresh: .scheduleOnly)
+        let a = try await immediate.calculate(refresh: refresh, now: date(hour: 8))
+        let b = try await explicit.calculate(refresh: refresh)
         #expect(a.journeys == b.journeys)
         #expect(a.recommendedJourneyID == b.recommendedJourneyID)
         #expect(a.validationContexts == b.validationContexts)
+        if refresh == .useCache { #expect(a.journeys.contains { $0.effectiveDeparture == date(hour: 8, minute: 7) }) }
     }
 
     @Test func laterUsesNormalForwardSuggestionsAndKeepsEarlierResults() async throws {
@@ -189,4 +198,32 @@ struct AdjacentJourneyPagingTests {
         #expect(corrected.validationContexts[retained.id]?.anchor == paged.validationContexts[retained.id]?.anchor)
         #expect(!corrected.invalidatedIDs.contains(retained.id))
     }
+
+    @Test func historicalPagesRetainFreshnessEvidenceForExistingLiveJourneys() async throws {
+        let clock = AdjacentPagingClock()
+        let patch = RealtimeTripPatch(tripID: "run-2", serviceDate: try GTFSDate(parsing: "20260904"), events: [
+            .init(stopID: "a", effectiveDeparture: date(hour: 8, minute: 7), departureSource: .reported,
+                  stopSequence: 1, observedAt: date(hour: 8))
+        ])
+        let fixture = try await RoutingPreventionFixture(files: files([-1800, -1200, 300, 600]),
+            realtime: PreventionRealtime(patches: [patch]), clock: { clock.read() })
+        defer { fixture.remove() }
+        let session = try await fixture.planning(request())
+        let initial = try await session.calculate()
+        let live = try #require(initial.journeys.first { $0.firstRide?.tripID == "run-2" })
+        _ = try await session.calculate(page: .earlier)
+        // The second earlier search is wholly historical and acquires no patches.
+        _ = try await session.calculate(page: .earlier)
+        clock.advance(121)
+        let result = await session.result()
+        #expect(result.invalidatedIDs.contains(live.id))
+        #expect(!result.journeys.contains { $0.id == live.id })
+    }
+}
+
+private final class AdjacentPagingClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var instant = date(hour: 8)
+    func read() -> Date { lock.withLock { instant } }
+    func advance(_ seconds: TimeInterval) { lock.withLock { instant.addTimeInterval(seconds) } }
 }
