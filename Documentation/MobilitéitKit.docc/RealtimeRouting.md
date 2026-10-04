@@ -57,7 +57,9 @@ cancellations and restrictions affect feasibility and ranking before publication
 Replacement itineraries can acquire previously unseen boardings, for up to four
 completion waves; each occurrence is attempted once per calculation. At most
 four stop acquisitions run concurrently. The package's total acquisition budget
-is four seconds by default; the host can select two seconds. Routing scan time
+is four seconds by default; hosts can configure a longer allowance for pages
+with many boarding stops. An explicit session deadline applies to the entire
+batch, rather than inheriting the standalone provider timeout. Routing scan time
 is measured separately. Unavailable, unmatched or expired reports remain honestly
 scheduled or partial; incomplete acquisition never implies live coverage.
 
@@ -81,6 +83,9 @@ responses cannot replace refreshed coverage.
 Normal searches use `.useCache`. Pass `.forceRefresh` for an explicit refresh.
 `RealtimeRoutingRequest.targets` optionally supplies per-stop windows; providers
 implementing only the original method continue receiving its global bounds.
+`RealtimeRoutingRequest.tripIDs` optionally limits patch construction to selected
+itinerary vehicles. Matching still checks the complete timetable for ambiguity;
+an unrelated trip cannot become a false unique match through this filter.
 Paging retains fresh observations and checks missing coverage for newly explored
 occurrences. New evidence revalidates accumulated results within the active
 planning generation, including cancellations, transfers, timings and ranking.
