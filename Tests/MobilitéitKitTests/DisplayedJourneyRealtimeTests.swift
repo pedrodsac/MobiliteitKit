@@ -74,16 +74,85 @@ import Testing
         await #expect(throws: CancellationError.self) { try await task.value }
         #expect(await provider.requests.count == 1)
     }
+
+    @Test func aNewCalculationRejectsAnInFlightRefresh() async throws {
+        let fixture = try await RealtimeTestFixture(); defer { fixture.remove() }
+        let provider = DisplayedRealtimeProvider(hold: true)
+        let planner = JourneyPlanner(realtimeProvider: provider)
+        let anchor = RealtimeTestFixture.date("07:55:00")
+        let session = try await planner.makePlanningSession(databaseURL: fixture.database, request: .init(
+            origin: .stop(id: "a"), destination: .stop(id: "c"), time: .departAt(anchor),
+            realtimeAcquisitionBudgetMilliseconds: 0))
+        _ = try await session.calculate()
+        let refresh = Task { try await session.refreshDisplayedRealtime(now: anchor) }
+        await provider.waitForRequest()
+        let replacement = try await session.calculate()
+        await provider.release()
+        do {
+            _ = try await refresh.value
+            Issue.record("A refresh from the previous calculation was accepted")
+        } catch JourneyPlanningError.supersededRequest {
+            #expect(await session.result().revision == replacement.revision)
+        }
+    }
+
+    @Test func displayedRefreshIncludesPreviouslyLoadedPages() async throws {
+        var trips = "", times = ""
+        let day = try GTFSDate(parsing: "20260930")
+        var patches: [RealtimeTripPatch] = []
+        for index in 0..<7 {
+            let minute = index == 6 ? 240 : index * 10
+            let departure = RealtimeTestFixture.date("08:00:00").addingTimeInterval(Double(minute * 60))
+            let arrival = departure.addingTimeInterval(300)
+            let formatter = DateFormatter()
+            formatter.timeZone = TimeZone(identifier: "Europe/Luxembourg")
+            formatter.dateFormat = "HH:mm:ss"
+            let d = formatter.string(from: departure), a = formatter.string(from: arrival)
+            trips += "route,service,run-\(index),Destination\n"
+            times += "run-\(index),\(d),\(d),a,1\nrun-\(index),\(a),\(a),c,2\n"
+            patches.append(.init(tripID: "run-\(index)", serviceDate: day, events: [
+                .init(stopID: "a", scheduledDeparture: departure, effectiveDeparture: departure,
+                      departureSource: .reported, stopSequence: 1, observedAt: .now),
+                .init(stopID: "c", scheduledArrival: arrival, effectiveArrival: arrival,
+                      arrivalSource: .reported, stopSequence: 2, observedAt: .now)
+            ]))
+        }
+        let fixture = try await RealtimeTestFixture(stopTimes: times, trips: trips); defer { fixture.remove() }
+        let planner = JourneyPlanner(realtimeProvider: DisplayedProfileProvider(values: patches))
+        let anchor = RealtimeTestFixture.date("07:55:00")
+        let session = try await planner.makePlanningSession(databaseURL: fixture.database, request: .init(
+            origin: .stop(id: "a"), destination: .stop(id: "c"), time: .departAt(anchor),
+            realtimeAcquisitionBudgetMilliseconds: 0, pagingPolicy: .adjacentTimeWindows))
+        let initial = try await session.calculate()
+        #expect(initial.journeys.count == 6)
+        let page = try await session.calculate(page: .later)
+        #expect(page.journeys.count == 7)
+        let tracked = try await session.refreshDisplayedRealtime(now: anchor)
+        #expect(Set(tracked.journeys.map(\.id)) == Set(page.journeys.map(\.id)))
+        #expect(tracked.journeys.allSatisfy { $0.statusEvidence.coverage == .live })
+        #expect(tracked.browsingWindow == page.browsingWindow)
+        #expect(tracked.laterCursor == page.laterCursor)
+    }
+}
+
+private struct DisplayedProfileProvider: RealtimeRoutingProvider {
+    let values: [RealtimeTripPatch]
+    func patches(for stopIDs: [String], from: Date, through: Date,
+                 refreshPolicy: RealtimeRefreshPolicy) async throws -> RealtimePatchBatch {
+        .init(patches: values, requestedStopIDs: Set(stopIDs), coveredStopIDs: Set(stopIDs))
+    }
 }
 
 private actor DisplayedRealtimeProvider: RealtimeRoutingProvider {
     let outcome: String
     let failFirst: Bool
     let delay: Bool
+    let hold: Bool
     var requests: [RealtimeRoutingRequest] = []
     private var waiter: CheckedContinuation<Void, Never>?
-    init(outcome: String = "live", failFirst: Bool = false, delay: Bool = false) {
-        self.outcome = outcome; self.failFirst = failFirst; self.delay = delay
+    private var held: CheckedContinuation<Void, Never>?
+    init(outcome: String = "live", failFirst: Bool = false, delay: Bool = false, hold: Bool = false) {
+        self.outcome = outcome; self.failFirst = failFirst; self.delay = delay; self.hold = hold
     }
     func waitForRequest() async {
         if !requests.isEmpty { return }
@@ -93,6 +162,7 @@ private actor DisplayedRealtimeProvider: RealtimeRoutingProvider {
         requests.append(request)
         waiter?.resume(); waiter = nil
         if delay { try await Task.sleep(for: .seconds(30)) }
+        if hold { await withCheckedContinuation { held = $0 } }
         if failFirst, requests.count == 1 { throw HafasRealtimeRoutingError.timedOut }
         let day = try GTFSDate(parsing: "20260930")
         let observed = Date.now
@@ -113,6 +183,7 @@ private actor DisplayedRealtimeProvider: RealtimeRoutingProvider {
                   delay: 120, status: outcome == "cancelled" ? .cancelled : .active)
         ], requestedStopIDs: Set(request.stopIDs), coveredStopIDs: Set(request.stopIDs))
     }
+    func release() { held?.resume(); held = nil }
     func patches(for stopIDs: [String], from: Date, through: Date,
                  refreshPolicy: RealtimeRefreshPolicy) async throws -> RealtimePatchBatch {
         try await patches(for: .init(stopIDs: stopIDs, from: from, through: through, refreshPolicy: refreshPolicy))
