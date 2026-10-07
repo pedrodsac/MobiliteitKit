@@ -553,6 +553,10 @@ public actor TransitRouter {
     public func correctWalkingRoute(_ route: WalkingRoute, for request: WalkingRequest) async {
         await walking?.correct(request, with: route)
     }
+
+    func realtimePatches(for request: RealtimeRoutingRequest) async throws -> RealtimePatchBatch? {
+        try await realtime?.patches(for: request)
+    }
 }
 
 public actor JourneyPlanningSession {

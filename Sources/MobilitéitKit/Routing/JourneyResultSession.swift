@@ -195,6 +195,44 @@ public actor JourneyResultSession {
 
     public func result() -> JourneyPlanningResult { snapshot() }
 
+    /// Updates every accumulated itinerary without restarting search or paging.
+    /// Hosts can call immediately after publication and periodically while visible.
+    public func refreshDisplayedRealtime(refresh: RealtimeRefreshPolicy = .useCache,
+                                         timeout: Duration = .seconds(8),
+                                         now: Date? = nil) async throws -> JourneyPlanningResult {
+        let expectedOperation = operation
+        let expectedGeneration = generation
+        let targets = DisplayedJourneyRealtime.targets(for: journeys.filter { !invalidated.contains($0.id) },
+                                                       now: now ?? clock())
+        let batches = try await DisplayedJourneyRealtime.acquire(targets: targets, router: router,
+                                                                 refresh: refresh, timeout: timeout)
+        try Task.checkCancellation()
+        guard operation == expectedOperation, generation == expectedGeneration else {
+            throw JourneyPlanningError.supersededRequest
+        }
+        var evidence = Dictionary((frozenPatches ?? []).map {
+            (RealtimePatchKey(tripID: $0.tripID, serviceDate: $0.serviceDate), $0)
+        }, uniquingKeysWith: { old, new in old.merging(new) })
+        for patch in batches.flatMap(\.patches) {
+            let key = RealtimePatchKey(tripID: patch.tripID, serviceDate: patch.serviceDate)
+            evidence[key] = evidence[key].map { $0.merging(patch) } ?? patch
+        }
+        let observedNow = clock()
+        evidence = evidence.mapValues {
+            RealtimeTimeline.resolved($0.retainingFreshObservations(at: observedNow),
+                                      snapshot: feedSnapshot, now: observedNow)
+        }
+        frozenPatches = Array(evidence.values)
+        journeys = journeys.compactMap { journey in
+            guard let revised = journey.applyingRealtime(evidence) else {
+                invalidated.insert(journey.id); return nil
+            }
+            return revised
+        }
+        revision &+= 1
+        return snapshot()
+    }
+
     public func submitWalkingRefinement(_ update: JourneyWalkingRefinement) async throws -> JourneyPlanningResult {
         guard update.token.generation == generation,
               let index = journeys.firstIndex(where: { $0.id == update.token.journeyID }),
