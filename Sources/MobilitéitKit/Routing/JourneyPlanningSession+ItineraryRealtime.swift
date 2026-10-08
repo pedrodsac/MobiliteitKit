@@ -6,11 +6,11 @@ extension JourneyPlanningSession {
         let sequence: Int?
     }
 
-    /// Acquire every vehicle in the candidate page before broad discovery,
-    /// including walking and in-seat connections. Unrelated stops must not
-    /// consume the deadline before an actual connecting vehicle is checked.
-    func completeItineraryRealtime(_ journeys: [Journey], anchor: Date, searchHorizon: TimeInterval,
-                                   force: Bool, budgetMilliseconds: Int,
+    /// Acquire selected vehicles and alternative connecting lines together.
+    /// Selected stops retain priority over unrelated discovery branches.
+    func completeItineraryRealtime(_ journeys: [Journey], access: [Edge], egress: [Edge],
+                                   anchor: Date, searchHorizon: TimeInterval,
+                                   force: Bool, budgetMilliseconds: Int, includeDiscovery: Bool,
                                    attempted: inout Set<ItineraryBoarding>) async throws -> Bool {
         guard case let .bestEffort(configuration, refresh) = query.realtimePolicy,
               let realtimeProvider, budgetMilliseconds > 0 else { return false }
@@ -20,6 +20,7 @@ extension JourneyPlanningSession {
         var targets: [RealtimeBoardTarget] = []
         var stopIDs: [String] = []
         var seenStops: Set<String> = []
+        var requestedInstances: Set<RealtimePatchKey> = []
         for journey in journeys {
             guard ContinuousClock.now < deadline else { break }
             for leg in journey.legs {
@@ -38,10 +39,27 @@ extension JourneyPlanningSession {
                 let end = min(upper, max(ride.effectiveDeparture.addingTimeInterval(60),
                     ride.scheduledDeparture.addingTimeInterval(RealtimeTimeline.maximumDelay + 60)))
                 guard end >= start else { continue }
+                // A passlist can cover nearby downstream boardings. Long rides
+                // need another board before forecast propagation expires.
+                if ride.scheduledArrival.timeIntervalSince(ride.scheduledDeparture) <= RealtimeTimeline.maximumPropagation {
+                    requestedInstances.insert(key)
+                }
                 targets.append(.init(stopID: ride.board.stop.id, from: start, through: end,
                     lines: ride.route.shortName.flatMap { $0.isEmpty ? nil : [$0] } ?? []))
                 if seenStops.insert(ride.board.stop.id).inserted { stopIDs.append(ride.board.stop.id) }
             }
+        }
+        if includeDiscovery {
+            // Keep planning bounded so HTTP and matching own most of the batch.
+            let discoveryStarted = ContinuousClock.now
+            let planningDeadline = min(deadline, discoveryStarted.advanced(by:
+                .milliseconds(min(250, max(1, budgetMilliseconds / 10)))))
+            let discovered = discoveryRealtimeTargets(access: access, egress: egress, journeys: journeys,
+                preferredStops: stopIDs, anchor: anchor, searchHorizon: searchHorizon, deadline: planningDeadline,
+                requestedInstances: requestedInstances)
+            targets += discovered
+            for target in discovered where seenStops.insert(target.stopID).inserted { stopIDs.append(target.stopID) }
+            diagnostics.record(.realtimeDiscovery, since: discoveryStarted)
         }
         guard !targets.isEmpty, ContinuousClock.now < deadline else { return false }
         try Task.checkCancellation()

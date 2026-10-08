@@ -3,7 +3,7 @@ import Testing
 @testable import MobiliteitKit
 
 @Suite struct LiveTransferDiscoveryTests {
-    @Test(arguments: [RouteQueryDirection.departAfter, .arriveBy], ["available", "stalled", "absent", "exhausted-CPU"])
+    @Test(arguments: [RouteQueryDirection.departAfter, .arriveBy], ["available", "stalled", "absent", "exhausted-CPU", "slow-live"])
     func delayedDifferentLineIsDiscoveredBeforeTheFirstResult(direction: RouteQueryDirection,
                                                              fallback: String) async throws {
         let fixture = try await RealtimeTestFixture(
@@ -17,8 +17,10 @@ import Testing
         let (client, host) = RealtimeBoardProtocol.client(responseDelay: { request in
             let items = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
             // A stalled static winner must leave time to discover another line.
-            return fallback == "stalled" && items.contains { $0.name == "lines" && $0.value == "203" }
-                ? .seconds(5) : .zero
+            if fallback == "stalled" && items.contains(where: { $0.name == "lines" && $0.value == "203" }) {
+                return .seconds(5)
+            }
+            return fallback == "slow-live" ? .milliseconds(1_400) : .zero
         }) { request in
             let items = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
             let stop = items.first { $0.name == "id" }?.value

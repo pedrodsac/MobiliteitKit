@@ -12,7 +12,8 @@ extension JourneyPlanningSession {
     func realtimeTargets(stopIDs: [String], arrivalByStop: [Int: Date], from: Date, through: Date,
                          configuration: RealtimeConfiguration, deadline: ContinuousClock.Instant,
                          patches: [RealtimePatchKey: RealtimeTripPatch],
-                         reachability: Raptor.DestinationReachability) -> [RealtimeBoardTarget] {
+                         reachability: Raptor.DestinationReachability,
+                         excludingInstances: Set<RealtimePatchKey> = []) -> [RealtimeBoardTarget] {
         let days = snapshot.serviceDays.filter {
             $0.start <= through && $0.start.addingTimeInterval(Double(snapshot.info.maximumServiceTime.rawValue))
                 >= from.addingTimeInterval(-Double(configuration.scheduledLookbackSeconds))
@@ -30,7 +31,9 @@ extension JourneyPlanningSession {
                 let trip = snapshot.trips[tripIndex]
                 guard query.preferences.allowedModes.contains(routeType: snapshot.routes[trip.route].type) else { continue }
                 for day in days where day.activeServices.contains(trip.service) {
-                    let patch = patches[.init(tripID: trip.id, serviceDate: day.date)]
+                    let key = RealtimePatchKey(tripID: trip.id, serviceDate: day.date)
+                    guard !excludingInstances.contains(key) else { continue }
+                    let patch = patches[key]
                     guard patch?.status != .cancelled, patch?.status != .unreachable else { continue }
                     for position in trip.times.indices where trip.times[position].stop == stop {
                         let time = trip.times[position]

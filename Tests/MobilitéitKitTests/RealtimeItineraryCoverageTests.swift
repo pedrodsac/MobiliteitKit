@@ -42,7 +42,7 @@ import Testing
                 .replacingOccurrences(of: "same-journey", with: "second-journey")
         }
         defer { RealtimeBoardProtocol.remove(host) }
-        let provider = try HafasRealtimeRoutingProvider(databaseURL: fixture.database, client: client)
+        let provider = ItineraryPriorityProvider(try HafasRealtimeRoutingProvider(databaseURL: fixture.database, client: client))
         let router = try await TransitRouter(databaseURL: fixture.database, realtimeProvider: provider)
         let session = try await router.makeSession(for: .init(origin: .stop(id: "a"), destination: .stop(id: "c"),
             departureTime: RealtimeTestFixture.date(direction == .arriveBy ? "09:00:00" : "07:55:00"),
@@ -55,9 +55,9 @@ import Testing
         #expect(rides.allSatisfy { $0.board.timingSource == .reported && $0.alight.timingSource == .reported })
         #expect(journey.effectiveArrival == RealtimeTestFixture.date("08:54:00"))
         #expect(journey.statusEvidence.coverage == .live)
-        let requests = RealtimeBoardProtocol.requests(host)
-        let connectingIndex = try #require(requests.firstIndex { $0.url!.query!.contains("id=b") })
-        let branchIndex = requests.firstIndex { $0.url!.query!.contains("id=branch-") } ?? requests.count
+        let requestedStops = try #require(await provider.requests.first?.stopIDs)
+        let connectingIndex = try #require(requestedStops.firstIndex(of: "b"))
+        let branchIndex = requestedStops.firstIndex { $0.hasPrefix("branch-") } ?? requestedStops.count
         #expect(connectingIndex < branchIndex)
     }
 
@@ -162,4 +162,19 @@ import Testing
         #expect(RealtimeBoardProtocol.requests(host).count == (primeUnrestricted ? 1 : 2))
     }
 
+}
+
+/// Capture queue priority independently of concurrent URLSession start order.
+private actor ItineraryPriorityProvider: RealtimeRoutingProvider {
+    let delegate: HafasRealtimeRoutingProvider
+    var requests: [RealtimeRoutingRequest] = []
+    init(_ delegate: HafasRealtimeRoutingProvider) { self.delegate = delegate }
+    func patches(for request: RealtimeRoutingRequest) async throws -> RealtimePatchBatch {
+        requests.append(request)
+        return try await delegate.patches(for: request)
+    }
+    func patches(for stopIDs: [String], from: Date, through: Date,
+                 refreshPolicy: RealtimeRefreshPolicy) async throws -> RealtimePatchBatch {
+        try await patches(for: .init(stopIDs: stopIDs, from: from, through: through, refreshPolicy: refreshPolicy))
+    }
 }

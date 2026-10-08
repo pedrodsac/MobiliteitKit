@@ -738,39 +738,16 @@ public actor JourneyPlanningSession {
             }
             guard remainingRealtimeMilliseconds > 0, refinementWaves < maximumCompletionWaves else { break }
             let completionStarted = ContinuousClock.now
-            // Scheduled candidates establish acquisition priority, but cannot
-            // enumerate transfers made feasible only by live delays. Reserve
-            // half the first allowance for discovering those other vehicles.
-            let completionBudget = discovered ? remainingRealtimeMilliseconds
-                : max(1, remainingRealtimeMilliseconds / 2)
-            var changed = try await completeItineraryRealtime(
-                JourneyQualityPolicy.primarySuggestions(built.journeys, count: 10, query: query), anchor: anchor,
+            let changed = try await completeItineraryRealtime(
+                JourneyQualityPolicy.primarySuggestions(built.journeys, count: 10, query: query),
+                access: access, egress: egress, anchor: anchor,
                 searchHorizon: searchHorizon, force: forceRealtime,
-                budgetMilliseconds: completionBudget, attempted: &attempted)
+                budgetMilliseconds: remainingRealtimeMilliseconds, includeDiscovery: !discovered, attempted: &attempted)
+            discovered = true
             let elapsed = RoutingDiagnostics.elapsed(since: completionStarted)
             remainingRealtimeMilliseconds = max(0, remainingRealtimeMilliseconds - Int(elapsed.rounded(.up)))
             metrics.realtimePreparationMilliseconds += Int(elapsed)
             diagnostics.record(.realtime, since: completionStarted)
-            if !discovered, remainingRealtimeMilliseconds > 0 {
-                let discoveryStarted = ContinuousClock.now
-                let before = latestPatchesByInstance
-                let acquired = try await acquireRealtime(access: access, egress: egress, anchor: anchor,
-                    searchHorizon: searchHorizon, force: forceRealtime,
-                    budgetMilliseconds: remainingRealtimeMilliseconds,
-                    seedPatches: Array(latestRawPatchesByInstance.values))
-                latestRawPatchesByInstance = Dictionary(acquired.map {
-                    (RealtimePatchKey(tripID: $0.tripID, serviceDate: $0.serviceDate), $0)
-                }, uniquingKeysWith: { old, new in old.merging(new) })
-                latestPatchesByInstance = latestRawPatchesByInstance.mapValues {
-                    RealtimeTimeline.resolved($0, snapshot: snapshot, now: clock())
-                }
-                changed = changed || before != latestPatchesByInstance
-                let discoveryElapsed = RoutingDiagnostics.elapsed(since: discoveryStarted)
-                remainingRealtimeMilliseconds = max(0, remainingRealtimeMilliseconds - Int(discoveryElapsed.rounded(.up)))
-                metrics.realtimePreparationMilliseconds += Int(discoveryElapsed)
-                diagnostics.record(.realtime, since: discoveryStarted)
-                discovered = true
-            }
             refinementWaves += 1
             // Re-run feasibility and ranking with the new overlay, including
             // cancellations and delays on connecting vehicles.
