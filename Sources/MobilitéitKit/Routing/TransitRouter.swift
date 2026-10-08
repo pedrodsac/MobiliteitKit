@@ -875,6 +875,8 @@ public actor JourneyPlanningSession {
         var representatives: [String: BuiltJourney] = [:]
         var validCandidates = 0
         for candidate in candidates {
+            let candidate = RaptorWalkingShortcut.normalize(candidate, snapshot: snapshot, query: query,
+                egress: egress, patches: latestPatchesByInstance)
             guard let journey = buildJourney(candidate, access: access, egress: egress) else { continue }
             // Page bounds must apply before representatives and dominance: an
             // itinerary outside an arrival window cannot suppress one inside it.

@@ -406,8 +406,15 @@ public actor JourneyResultSession {
             revision &+= 1
             diagnostics.counters[.invalidJourneys, default: 0] += invalidated.count - priorInvalidations
         }
-        let transitProfile = valid.filter { $0.legs.contains { if case .transit = $0 { true } else { false } } }
-        let retained = valid.filter { candidate in
+        let patches = Dictionary((frozenPatches ?? []).map {
+            (RealtimePatchKey(tripID: $0.tripID, serviceDate: $0.serviceDate), $0)
+        }, uniquingKeysWith: { old, new in old.merging(new) })
+        let useful = valid.filter {
+            !RaptorWalkingShortcut.hasRedundantWalk($0, snapshot: feedSnapshot,
+                preferences: request.preferences, patches: patches)
+        }
+        let transitProfile = useful.filter { $0.legs.contains { if case .transit = $0 { true } else { false } } }
+        let retained = useful.filter { candidate in
             // The engine keeps an all-the-way walk as a comparison outside transit slots.
             guard transitProfile.contains(where: { $0.id == candidate.id }) else { return true }
             return !transitProfile.contains {
