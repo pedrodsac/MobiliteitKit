@@ -3,7 +3,7 @@ import Testing
 @testable import MobiliteitKit
 
 @Suite struct LiveTransferDiscoveryTests {
-    @Test(arguments: [RouteQueryDirection.departAfter, .arriveBy], ["available", "stalled", "absent"])
+    @Test(arguments: [RouteQueryDirection.departAfter, .arriveBy], ["available", "stalled", "absent", "exhausted-CPU"])
     func delayedDifferentLineIsDiscoveredBeforeTheFirstResult(direction: RouteQueryDirection,
                                                              fallback: String) async throws {
         let fixture = try await RealtimeTestFixture(
@@ -52,7 +52,8 @@ import Testing
         let live = try await router.makeSession(for: .init(origin: .stop(id: "a"), destination: .stop(id: "c"),
             departureTime: anchor, direction: direction, preferences: preferences,
             realtimePolicy: .bestEffort(configuration: .init(maximumConcurrentBoardRequests: 16,
-                acquisitionBudgetMilliseconds: 2_500, searchWorkBudgetMilliseconds: 4_100))))
+                acquisitionBudgetMilliseconds: 2_500,
+                searchWorkBudgetMilliseconds: fallback == "exhausted-CPU" ? 1 : 4_100))))
             .initial(count: 10, searchHorizon: 10_800)
         let rescued = try #require(live.journeys.first { Self.tripIDs($0) == ["first", "connection"] })
         #expect(rescued.effectiveArrival == RealtimeTestFixture.date("08:29:00"))

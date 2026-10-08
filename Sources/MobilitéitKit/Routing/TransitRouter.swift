@@ -93,7 +93,9 @@ public struct RealtimeConfiguration: Hashable, Sendable, Codable {
     public var maximumConcurrentBoardRequests: Int
     public var maximumRefinementWaves: Int
     public var acquisitionBudgetMilliseconds: Int
-    /// Reserve time for a final full scan before starting another live wave.
+    /// Limit additional live waves after the initial acquisition and final scan.
+    /// An explicit zero disables acquisition; slow scans cannot consume the
+    /// first acquisition allowance when this value is positive.
     public var searchWorkBudgetMilliseconds: Int?
     public init(scheduledLookbackSeconds: Int = 7_200, minimumForwardHorizonSeconds: Int = 5_400, maximumConcurrentBoardRequests: Int = 4, maximumRefinementWaves: Int = 4, acquisitionBudgetMilliseconds: Int = 4_000, searchWorkBudgetMilliseconds: Int? = nil) {
         self.scheduledLookbackSeconds = scheduledLookbackSeconds; self.minimumForwardHorizonSeconds = minimumForwardHorizonSeconds
@@ -725,10 +727,11 @@ public actor JourneyPlanningSession {
             diagnostics.rejections = rejectionsBefore
             built = buildJourneys(searchResult.candidates, access: access, egress: egress, accepting: accepting)
             diagnostics.record(.candidateBuilding, since: candidateStarted)
-            if let searchWorkBudget {
+            if let searchWorkBudget, refinementWaves > 0 || searchWorkBudget == 0 {
                 // The last full scan is a useful estimate for the required
-                // post-overlay scan. Keep a margin and leave publication/render
-                // time outside this host-selected search-work allowance.
+                // post-overlay scan. Initial acquisition has its own deadline;
+                // CPU work must not silently turn a live search into schedules.
+                // This allowance limits subsequent refinement waves.
                 let reserve = Int((RoutingDiagnostics.elapsed(since: scanStarted) * 1.05 + 100).rounded(.up))
                 let available = max(0, searchWorkBudget - Int(RoutingDiagnostics.elapsed(since: started).rounded(.up)) - reserve)
                 remainingRealtimeMilliseconds = min(remainingRealtimeMilliseconds, available)
