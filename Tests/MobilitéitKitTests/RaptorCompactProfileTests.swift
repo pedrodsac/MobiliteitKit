@@ -13,6 +13,8 @@ import Testing
         var compact: Raptor.CompactProfile? = nil
         var original: [Raptor.Label] = []
         var nextID = 0, attempts = 0, rejected = 0
+        var currentTrip: Int?
+        var peers: UInt64 = 0
         for _ in 0..<4_000 {
             let departure = Double(random(120)) + Double(random(4)) / 4
             let arrival = departure + Double(random(120))
@@ -33,7 +35,11 @@ import Testing
                 containsPreferredMode: preferred, walkingStopsVisited: .one(1),
                 tripKey: Raptor.TripKey().appending(.init(trip: prefix, day: day)).appending(.init(trip: trip, day: day)))
             original = Raptor.referenceInsert(label, into: original)
-            _ = Raptor.consider(key, profile: &compact, nextID: &nextID, attempts: &attempts, rejected: &rejected) {
+            if currentTrip != trip {
+                peers = compact?.byIncomingTrip[trip, default: 0] ?? 0
+                currentTrip = trip
+            }
+            _ = Raptor.consider(key, profile: &compact, peers: &peers, nextID: &nextID, attempts: &attempts, rejected: &rejected) {
                 .init(sourceIndex: prefix, trip: trip, board: 0, alight: 1, boardPos: 0, alightPos: 1,
                     day: day, scheduledBoard: board, scheduledAlight: alight, boardTime: board,
                     alightTime: alight, requiredTransferSeconds: 0)

@@ -58,6 +58,7 @@ extension Raptor {
         round: Int, maxRounds: Int, finalRoundAlightStops: Set<Int>) throws -> PatternScanResult {
         let started = ContinuousClock.now
         var next = [CompactProfile?](repeating: nil, count: snapshot.stops.count)
+        var incomingPeers = [UInt64](repeating: 0, count: snapshot.stops.count)
         var nextID = (chunkIndex + 1) * 1_000_000_000
         var scannedInstances = 0, boardingChecks = 0, feasibleBoardings = 0
         var alightingChecks = 0, attempts = 0, retained = 0, rejected = 0
@@ -85,6 +86,12 @@ extension Raptor {
                           snapshot.hasContinuations || round + 1 < maxRounds || finalRoundAlightStops.contains(time.stop)
                     else { return nil }
                     return (position, time.stop, arrival.timeIntervalSinceReferenceDate)
+                }
+                // Every boarding/alighting candidate below has this incoming
+                // trip. Reuse its peer mask instead of hashing the same key
+                // for every rejected candidate. Insertions refresh the mask.
+                for alight in alights {
+                    incomingPeers[alight.stop] = next[alight.stop]?.byIncomingTrip[tripIndex, default: 0] ?? 0
                 }
                 var firstAlight = 0
                 for boardPos in startPosition..<trip.times.count {
@@ -134,7 +141,7 @@ extension Raptor {
                             key.alightPosition = alightPos
                             key.arrival = alight.arrival
                             key.id = nextID
-                            if consider(key, profile: &next[stop], nextID: &nextID, attempts: &attempts,
+                            if consider(key, profile: &next[stop], peers: &incomingPeers[stop], nextID: &nextID, attempts: &attempts,
                                 rejected: &rejected, path: {
                                     .init(sourceIndex: sourceIndex, trip: tripIndex, board: board.stop, alight: stop,
                                         boardPos: boardPos, alightPos: alightPos, day: day, scheduledBoard: scheduled,
@@ -193,12 +200,13 @@ extension Raptor {
     }
 
     @inline(__always) static func consider(_ key: ScanKey, profile: inout CompactProfile?,
-        nextID: inout Int, attempts: inout Int, rejected: inout Int, path: () -> ScanPath) -> Bool {
+        peers: inout UInt64, nextID: inout Int, attempts: inout Int, rejected: inout Int, path: () -> ScanPath) -> Bool {
         if profile == nil { profile = CompactProfile() }
-        let peers = profile!.byIncomingTrip[key.incomingTrip, default: 0]
         if profile!.isDominated(key, peers: peers) { return false }
         nextID += 1; attempts += 1
         if profile!.cannotEnter(key, peers: peers) { rejected += 1; return false }
-        return profile!.insert(key, path: path())
+        let retained = profile!.insert(key, path: path())
+        peers = profile!.byIncomingTrip[key.incomingTrip, default: 0]
+        return retained
     }
 }
