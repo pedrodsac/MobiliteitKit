@@ -48,11 +48,9 @@ public enum JourneyItineraryValidator {
             }
             let gap = outgoing.1.effectiveDeparture.timeIntervalSince(incoming.1.effectiveArrival)
             let slack = gap - movement - Double(outgoing.1.requiredTransferSecondsAfterWalking)
-            let sameStop = incoming.1.alight.stop.id == outgoing.1.board.stop.id && movement == 0
             if slack < 0 {
                 risks[outgoing.0] = .missed
-            } else if sameStop && (gap < 120
-                || outgoing.1.recommendedTotalTransferSeconds.map { gap < Double($0) } == true) {
+            } else if gap < 120 {
                 risks[outgoing.0] = .tight
             }
         }

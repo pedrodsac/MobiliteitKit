@@ -123,7 +123,7 @@ extension Raptor {
 
     /// An explicit rider choice can use the normal boarding buffer at an
     /// aggregate bus stop. The larger feed buffer remains recommendation
-    /// evidence, so these connections are published with a tight-transfer risk.
+    /// evidence; only changes under two minutes carry a tight-transfer risk.
     /// Specific rules, different stops and rail/platform changes stay strict.
     private static func permitsTightSameStopBusTransfer(_ rule: SnapshotRule,
         snapshot: RoutingSnapshot, incoming: TransitLeg, at stop: Int, outgoing: Int,

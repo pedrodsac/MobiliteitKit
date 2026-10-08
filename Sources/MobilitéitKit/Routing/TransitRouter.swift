@@ -45,7 +45,7 @@ public enum BikePreference: String, Hashable, Sendable, Codable { case noPrefere
 public struct RoutingPreferences: Hashable, Sendable, Codable {
     public var maxTransfers: Int?
     public var minimumTransferSeconds: Int
-    /// Permit risk-labelled bus changes below an unscoped aggregate-stop feed buffer.
+    /// Permit bus changes below an unscoped aggregate-stop feed buffer.
     public var allowTightSameStopBusTransfers: Bool
     /// Legacy decoding field. This value is ignored; use the explicit bus-transfer policy.
     public var sameStopTransferShortfallSeconds: Int

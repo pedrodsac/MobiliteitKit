@@ -72,12 +72,14 @@ public struct JourneyPlanningRequest: Hashable, Sendable {
 }
 
 extension RoutingPreferences {
-    /// The rider-facing transfer choice; mode preference remains soft.
+    /// Tight means less than two minutes. The normal rider minimum already
+    /// excludes these changes, including when avoidance is requested.
+    /// Aggregate feed buffers must not turn longer changes into tight transfers.
     public init(preferredMode: TransitModeMask?, avoidTightTransfers: Bool) {
-        self.init(maxTransfers: 3, minimumTransferSeconds: avoidTightTransfers ? 180 : 120,
+        self.init(maxTransfers: 3, minimumTransferSeconds: 120,
                   sameStopTransferShortfallSeconds: 0,
                   preferredMode: preferredMode,
-                  allowTightSameStopBusTransfers: !avoidTightTransfers)
+                  allowTightSameStopBusTransfers: true)
     }
 }
 
