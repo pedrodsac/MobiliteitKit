@@ -20,6 +20,8 @@ public struct JourneyTimingLeg: Sendable {
 }
 
 public enum JourneyItineraryValidator {
+    public static let tightTransferThresholdSeconds: TimeInterval = 180
+
     public static func assess(_ journey: Journey, context: JourneyValidationContext) -> JourneyFeasibility {
         assess(journey.legs.map { leg in
             switch leg {
@@ -50,7 +52,7 @@ public enum JourneyItineraryValidator {
             let slack = gap - movement - Double(outgoing.1.requiredTransferSecondsAfterWalking)
             if slack < 0 {
                 risks[outgoing.0] = .missed
-            } else if gap < 120 {
+            } else if gap < tightTransferThresholdSeconds {
                 risks[outgoing.0] = .tight
             }
         }

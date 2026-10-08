@@ -31,7 +31,7 @@ struct JourneyPlannerTests {
         #expect(empty.journeys.map(\.id) == later.journeys.map(\.id))
         #expect(!empty.hasLater)
         let updated = try await session.updatePreferences(.init(preferredMode: nil, avoidTightTransfers: true))
-        #expect(updated.validationContext.minimumTransferSeconds == 120)
+        #expect(updated.validationContext.minimumTransferSeconds == 180)
         #expect(updated.validationContext.sameStopTransferShortfallSeconds == 0)
         #expect(updated.refinementTokens.values.first?.generation != initial.refinementTokens.values.first?.generation)
     }
