@@ -45,7 +45,7 @@ extension JourneyPlanningSession {
         var targets: [RealtimeBoardTarget] = []
         var matchingTripIDs: Set<String> = []
         var plannedInstances = requestedInstances
-        for _ in 0..<maxRides {
+        for ride in 0..<maxRides {
             guard !Task.isCancelled, !frontier.isEmpty, ContinuousClock.now < deadline else { break }
             // Existing itinerary stops keep priority and can acquire other lines.
             let available = max(0, 24 - queried.union(preferred).count)
@@ -58,6 +58,10 @@ extension JourneyPlanningSession {
                 plannedInstances: &plannedInstances,
                 matchingTripIDs: &matchingTripIDs)
             queried.formUnion(frontier)
+            // Every preferred stop was considered in the first wave. Once the
+            // remaining board slots or rides are spent, another envelope cannot
+            // produce a target for this acquisition.
+            guard queried.count < 24, ride + 1 < maxRides else { break }
             frontier = realtimeFrontier(arrivalByStop: &arrivals, egress: egress, from: from, through: through,
                 lookback: configuration.scheduledLookbackSeconds, deadline: deadline,
                 patches: latestPatchesByInstance, excluding: queried, excludingInstances: plannedInstances,
@@ -78,46 +82,10 @@ extension JourneyPlanningSession {
             $0.start <= through && $0.start.addingTimeInterval(Double(snapshot.info.maximumServiceTime.rawValue))
                 >= from.addingTimeInterval(-Double(lookback))
         }
-        // Carry an optimistic reachability envelope forward one ride per wave.
-        // Recomputing all prior rides would make four waves perform ten scans.
-        // Reports can improve the envelope; final RAPTOR alone proves feasibility.
-        var improved = arrivalByStop
-        for (stop, reach) in arrivalByStop {
-            if Task.isCancelled || ContinuousClock.now >= deadline { return [] }
-            for tripIndex in snapshot.tripIndicesByDepartureStop[stop] {
-                if Task.isCancelled || ContinuousClock.now >= deadline { return [] }
-                let trip = snapshot.trips[tripIndex]
-                guard query.preferences.allowedModes.contains(routeType: snapshot.routes[trip.route].type)
-                else { continue }
-                for day in serviceDays where day.activeServices.contains(trip.service) {
-                    let patch = patches[.init(tripID: trip.id, serviceDate: day.date)]
-                    guard patch?.status != .cancelled, patch?.status != .unreachable else { continue }
-                    for position in trip.times.indices where trip.times[position].stop == stop {
-                        let board = trip.times[position]
-                        guard board.pickup == 0, let time = board.departure else { continue }
-                        let event = patch?.event(stopID: snapshot.stops[stop].id, sequence: board.sequence)
-                        let departure = event?.effectiveDeparture ?? day.start.addingTimeInterval(Double(time))
-                        guard event?.boardingAllowed != false,
-                              departure >= reach.addingTimeInterval(freshBoardingReport(event) ? 0 : -Double(lookback)), departure <= through
-                        else { continue }
-                        let rescue = max(0, reach.timeIntervalSince(departure))
-                        for downstream in trip.times[(position + 1)...] where downstream.dropoff == 0 {
-                            guard let scheduled = downstream.arrival else { continue }
-                            let report = patch?.event(stopID: snapshot.stops[downstream.stop].id,
-                                                      sequence: downstream.sequence)
-                            guard report?.alightingAllowed != false else { continue }
-                            let arrival = (report?.effectiveArrival ?? day.start.addingTimeInterval(Double(scheduled)))
-                                .addingTimeInterval(rescue)
-                            guard arrival <= through else { continue }
-                            improved[downstream.stop] = min(improved[downstream.stop] ?? .distantFuture, arrival)
-                            for neighbor in snapshot.nearbyTransferStopsByStop[downstream.stop] {
-                                improved[neighbor] = min(improved[neighbor] ?? .distantFuture, arrival)
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        guard let improved = RealtimeReachability.advance(arrivalByStop, snapshot: snapshot,
+            serviceDays: serviceDays, allowedModes: query.preferences.allowedModes, through: through,
+            lookback: lookback, deadline: deadline, patches: patches, freshBoardingReport: freshBoardingReport)
+        else { return [] }
         arrivalByStop = improved
         guard !Task.isCancelled, ContinuousClock.now < deadline else { return [] }
         let reachableAfterBoarding = reachability.stopsByRemainingRides[reachability.stopsByRemainingRides.count - 2]
