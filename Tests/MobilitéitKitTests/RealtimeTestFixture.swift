@@ -39,7 +39,13 @@ struct RealtimeTestFixture {
 
 /// URLProtocol fixtures never contact the network. Each host owns its response
 /// closure and request history, so parallel Swift Testing cases stay isolated.
-final class RealtimeBoardProtocol: URLProtocol, @unchecked Sendable {
+final class RealtimeBoardProtocol: URLProtocol {
+    // URLProtocol's SDK Sendable conformance is unavailable in Swift 6.4.
+    // Own fixture state is lock-protected; transfer only this response callback.
+    private struct Delivery: @unchecked Sendable {
+        let handler: RealtimeBoardProtocol
+        func send(_ response: String) { handler.deliver(response) }
+    }
     typealias Response = @Sendable (URLRequest) -> String
     private struct State: Sendable {
         let response: Response
@@ -74,11 +80,12 @@ final class RealtimeBoardProtocol: URLProtocol, @unchecked Sendable {
         let delay = state.responseDelay(request)
         if delay > .zero {
             let pendingRequest = request
+            let delivery = Delivery(handler: self)
             taskLock.withLock {
-                responseTask = Task.detached { @Sendable [self, state, pendingRequest] in
+                responseTask = Task.detached { @Sendable [delivery, state, pendingRequest] in
                     do { try await Task.sleep(for: delay) } catch { return }
                     guard !Task.isCancelled else { return }
-                    deliver(state.response(pendingRequest))
+                    delivery.send(state.response(pendingRequest))
                 }
             }
         } else { deliver(state.response(request)) }
