@@ -93,9 +93,9 @@ public struct RealtimeConfiguration: Hashable, Sendable, Codable {
     public var maximumConcurrentBoardRequests: Int
     public var maximumRefinementWaves: Int
     public var acquisitionBudgetMilliseconds: Int
-    /// Limit additional live waves after the initial acquisition and final scan.
-    /// An explicit zero disables acquisition; slow scans cannot consume the
-    /// first acquisition allowance when this value is positive.
+    /// Legacy work allowance. An explicit zero disables acquisition; positive
+    /// values cannot suppress required checks on initially or newly selected
+    /// vehicles. Acquisition time and the wave limit bound those checks.
     public var searchWorkBudgetMilliseconds: Int?
     public init(scheduledLookbackSeconds: Int = 7_200, minimumForwardHorizonSeconds: Int = 5_400, maximumConcurrentBoardRequests: Int = 4, maximumRefinementWaves: Int = 4, acquisitionBudgetMilliseconds: Int = 4_000, searchWorkBudgetMilliseconds: Int? = nil) {
         self.scheduledLookbackSeconds = scheduledLookbackSeconds; self.minimumForwardHorizonSeconds = minimumForwardHorizonSeconds
@@ -714,7 +714,6 @@ public actor JourneyPlanningSession {
         var built: (journeys: [Journey], validCandidates: Int, representativeCount: Int)
         let rejectionsBefore = diagnostics.rejections
         while true {
-            let scanStarted = ContinuousClock.now
             metrics.pointRaptorScans += 1
             let raptorStarted = ContinuousClock.now
             searchResult = try await Raptor.search(snapshot: snapshot, query: query, access: access, egress: egress,
@@ -727,15 +726,11 @@ public actor JourneyPlanningSession {
             diagnostics.rejections = rejectionsBefore
             built = buildJourneys(searchResult.candidates, access: access, egress: egress, accepting: accepting)
             diagnostics.record(.candidateBuilding, since: candidateStarted)
-            if let searchWorkBudget, refinementWaves > 0 || searchWorkBudget == 0 {
-                // The last full scan is a useful estimate for the required
-                // post-overlay scan. Initial acquisition has its own deadline;
-                // CPU work must not silently turn a live search into schedules.
-                // This allowance limits subsequent refinement waves.
-                let reserve = Int((RoutingDiagnostics.elapsed(since: scanStarted) * 1.05 + 100).rounded(.up))
-                let available = max(0, searchWorkBudget - Int(RoutingDiagnostics.elapsed(since: started).rounded(.up)) - reserve)
-                remainingRealtimeMilliseconds = min(remainingRealtimeMilliseconds, available)
-            }
+            // Both acquisition passes check selected vehicles. Delays can make
+            // a previously unselected connection viable on the second scan;
+            // spent CPU time must not suppress that vehicle's live board.
+            // The shared acquisition deadline and wave limit bound this work.
+            if searchWorkBudget == 0 { remainingRealtimeMilliseconds = 0 }
             guard remainingRealtimeMilliseconds > 0, refinementWaves < maximumCompletionWaves else { break }
             let completionStarted = ContinuousClock.now
             let changed = try await completeItineraryRealtime(
