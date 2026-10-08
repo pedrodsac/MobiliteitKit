@@ -27,15 +27,15 @@ extension HafasRealtimeRoutingProvider {
         let identityMatches = [live.externalID, live.id].compactMap { $0 }.contains {
             Self.sameStopID($0, scheduled.stop.id)
         }
-        let nameMatches = live.name.map { Self.normalized($0) == Self.normalized(scheduled.stop.name) } ?? false
-        guard identityMatches || nameMatches else { return false }
+        guard identityMatches || live.name.map({ normalizedName($0) == normalizedName(scheduled.stop.name) }) == true
+        else { return false }
         let liveDeparture = date(date: live.departureDate, time: live.departureTime)
         let liveArrival = date(date: live.arrivalDate, time: live.arrivalTime)
         if let liveTime = liveDeparture, let departure = scheduled.departure {
-            return abs(Self.serviceDate(serviceDate, time: departure).timeIntervalSince(liveTime)) <= 90
+            return abs(serviceInstant(serviceDate, time: departure).timeIntervalSince(liveTime)) <= 90
         }
         if let liveTime = liveArrival, let arrival = scheduled.arrival {
-            return abs(Self.serviceDate(serviceDate, time: arrival).timeIntervalSince(liveTime)) <= 90
+            return abs(serviceInstant(serviceDate, time: arrival).timeIntervalSince(liveTime)) <= 90
         }
         // A name without a timestamp cannot identify a repeated/platform stop.
         return identityMatches
@@ -58,7 +58,7 @@ extension HafasRealtimeRoutingProvider {
                 guard Self.sameStopID(value.stop.id, boardingStopID), let departure = value.departure else {
                     return .infinity
                 }
-                return abs(Self.serviceDate(candidate.serviceDate, time: departure)
+                return abs(serviceInstant(candidate.serviceDate, time: departure)
                     .timeIntervalSince(candidate.scheduledDate))
             }
             return distance(left) < distance(right)
@@ -72,8 +72,8 @@ extension HafasRealtimeRoutingProvider {
             if Task.isCancelled || deadline.map({ ContinuousClock.now >= $0 }) == true { return nil }
             let value = stopTimes[position]
             let pass = aligned[position]
-            let arrival = value.arrival.map { Self.serviceDate(candidate.serviceDate, time: $0) }
-            let departure = value.departure.map { Self.serviceDate(candidate.serviceDate, time: $0) }
+            let arrival = value.arrival.map { serviceInstant(candidate.serviceDate, time: $0) }
+            let departure = value.departure.map { serviceInstant(candidate.serviceDate, time: $0) }
             let reportedArrival = date(date: pass?.realtimeArrivalDate ?? pass?.arrivalDate,
                                        time: pass?.realtimeArrivalTime)
             let reportedDeparture = date(date: pass?.realtimeDepartureDate ?? pass?.departureDate,

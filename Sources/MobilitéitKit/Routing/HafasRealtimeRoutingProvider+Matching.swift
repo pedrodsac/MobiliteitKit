@@ -20,7 +20,7 @@ extension HafasRealtimeRoutingProvider {
         for value in scheduled[lower...] {
             guard !Task.isCancelled, ContinuousClock.now < deadline else { return .failure(.init(reason: .deadline)) }
             guard value.scheduledDate <= upperBound else { break }
-            guard let lineScore = Self.lineScore(live.product, route: value.departure.route)
+            guard let lineScore = lineScore(live.product, route: value.departure.route)
             else { continue }
 
             // A cancelled board row has no realtime position to disambiguate
@@ -28,7 +28,7 @@ extension HafasRealtimeRoutingProvider {
             // trip based on line and departure time alone.
             if live.cancelled == true {
                 let directionMatches = live.direction.flatMap { direction in
-                    value.departure.headsign.map { Self.normalized(direction) == Self.normalized($0) }
+                    value.departure.headsign.map { normalizedName(direction) == normalizedName($0) }
                 } == true
                 let stopTimes = await cachedStopTimes(forTripID: value.departure.tripID)
                 let passlistMatches = align(live.passlist.values, to: stopTimes, serviceDate: value.serviceDate, deadline: deadline).count
@@ -38,7 +38,7 @@ extension HafasRealtimeRoutingProvider {
             var score = lineScore
             if let direction = live.direction,
                let headsign = value.departure.headsign,
-               Self.normalized(direction) == Self.normalized(headsign) {
+               normalizedName(direction) == normalizedName(headsign) {
                 score += 2
             }
             if !live.passlist.values.isEmpty {
@@ -81,19 +81,19 @@ extension HafasRealtimeRoutingProvider {
         return values
     }
 
-    nonisolated static func lineScore(
+    func lineScore(
         _ product: HafasProduct?,
         route: TransitRoute
     ) -> Int? {
         guard let product else { return nil }
         if let lineID = product.lineID,
-           normalized(lineID) == normalized(route.id) {
+           normalizedName(lineID) == normalizedName(route.id) {
             return 6
         }
         let liveNames = [product.line, product.name, product.categoryShort]
-            .compactMap { $0.map(normalized) }
+            .compactMap { $0.map(normalizedName) }
         let routeNames = [route.shortName, route.longName]
-            .compactMap { $0.map(normalized) }
+            .compactMap { $0.map(normalizedName) }
         return liveNames.contains(where: routeNames.contains) ? 4 : nil
     }
 
@@ -141,8 +141,13 @@ extension HafasRealtimeRoutingProvider {
     func date(date: String?, time: String?) -> Date? {
         guard let date, let time else { return nil }
         let timestamp = "\(date) \(time)"
+        if let cached = timestampCache[timestamp] { return cached }
+        if invalidTimestamps.contains(timestamp) { return nil }
         guard let parsed = fullTimestampFormatter.date(from: timestamp)
-            ?? minuteTimestampFormatter.date(from: timestamp) else { return nil }
+            ?? minuteTimestampFormatter.date(from: timestamp) else {
+            if invalidTimestamps.count < 8_192 { invalidTimestamps.insert(timestamp) }
+            return nil
+        }
         let earlier = parsed.addingTimeInterval(-3_600)
         let later = parsed.addingTimeInterval(3_600)
         let zone = Calendar.luxembourg.timeZone
@@ -152,9 +157,11 @@ extension HafasRealtimeRoutingProvider {
             if formatter.string(from: earlier) == timestamp || formatter.string(from: later) == timestamp {
                 // TODO: resolve the repeated autumn hour only if ATP supplies
                 // a verified UTC-offset/fold contract. Wall time alone is ambiguous.
+                if invalidTimestamps.count < 8_192 { invalidTimestamps.insert(timestamp) }
                 return nil
             }
         }
+        if timestampCache.count < 8_192 { timestampCache[timestamp] = parsed }
         return parsed
     }
 

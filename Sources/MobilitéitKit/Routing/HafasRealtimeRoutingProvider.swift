@@ -50,6 +50,10 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
     let now: @Sendable () -> Date
     let fullTimestampFormatter: DateFormatter
     let minuteTimestampFormatter: DateFormatter
+    var timestampCache: [String: Date] = [:]
+    var invalidTimestamps: Set<String> = []
+    var normalizedNames: [String: String] = [:]
+    var serviceDayStarts: [GTFSDate: Date] = [:]
     var schedulesByStopID: [String: ScheduleCache] = [:]
     var matchedJourneys: [String: MatchedJourney] = [:]
     var stopTimesByTripID: [String: [TripStopTime]] = [:]
@@ -90,6 +94,8 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
 
     public func patches(for request: RealtimeRoutingRequest) async throws -> RealtimePatchBatch {
         try Task.checkCancellation()
+        clearMatchingMemoization()
+        defer { clearMatchingMemoization() }
         var seen: Set<String> = []
         let stopIDs = request.stopIDs.filter { !$0.isEmpty && seen.insert($0).inserted }
         let requested = Set(stopIDs)
@@ -216,7 +222,7 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
                       let time = value.departure else { return nil }
                 let date = feed.firstServiceDate.adding(days: Int(value.serviceDay.index))
                 return .init(departure: value, serviceDate: date,
-                             scheduledDate: Self.serviceDate(date, time: time))
+                             scheduledDate: serviceInstant(date, time: time))
             }.sorted { $0.scheduledDate < $1.scheduledDate }
             result[stopID] = values
             schedulesByStopID[stopID] = .init(from: start, through: end, values: values)
