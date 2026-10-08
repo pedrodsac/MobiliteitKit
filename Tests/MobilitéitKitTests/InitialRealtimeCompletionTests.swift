@@ -50,6 +50,46 @@ import Testing
         })
     }
 
+    @Test func onTimeReportsUpdateEvidenceWithoutRepeatingTheFullScan() async throws {
+        let fixture = try await RealtimeTestFixture(); defer { fixture.remove() }
+        let (client, host) = RealtimeBoardProtocol.client { _ in
+            Self.board("201", "trip", "a", "c", "08:00:00", "08:20:00", "08:00:00", "08:20:00")
+        }
+        defer { RealtimeBoardProtocol.remove(host) }
+        let provider = EmptyDiscoveryBatch(hafas: try HafasRealtimeRoutingProvider(databaseURL: fixture.database, client: client))
+        let router = try await TransitRouter(databaseURL: fixture.database, realtimeProvider: provider)
+        let page = try await router.makeSession(for: .init(origin: .stop(id: "a"), destination: .stop(id: "c"),
+            departureTime: RealtimeTestFixture.date("07:55:00"), realtimePolicy: .bestEffort()))
+            .initial(count: 10, searchHorizon: 10_800)
+        #expect(page.journeys.first?.statusEvidence.coverage == .live)
+        #expect(page.journeys.first?.effectiveArrival == RealtimeTestFixture.date("08:20:00"))
+        #expect(page.metrics.pointRaptorScans == 1)
+        #expect(await provider.requests == 2)
+    }
+
+    @Test func confirmedDelayReplacesTheConservativeEstimatedBoardingDeadline() async throws {
+        let fixture = try await RealtimeTestFixture(); defer { fixture.remove() }
+        let serviceDate = try GTFSDate(parsing: "20260930")
+        func patch(_ source: RealtimeTimingSource) -> RealtimeTripPatch {
+            .init(tripID: "trip", serviceDate: serviceDate, events: [
+                .init(stopID: "a", effectiveDeparture: RealtimeTestFixture.date("08:05:00"),
+                      departureSource: source, stopSequence: 1),
+                .init(stopID: "b", effectiveDeparture: RealtimeTestFixture.date("08:15:00"), departureSource: source,
+                      effectiveArrival: RealtimeTestFixture.date("08:15:00"), arrivalSource: source, stopSequence: 2),
+                .init(stopID: "c", effectiveDeparture: RealtimeTestFixture.date("08:25:00"), departureSource: source,
+                      effectiveArrival: RealtimeTestFixture.date("08:25:00"), arrivalSource: source, stopSequence: 3)
+            ])
+        }
+        let provider = ConfirmingDelayProvider(estimated: patch(.estimated), confirmed: patch(.reported))
+        let router = try await TransitRouter(databaseURL: fixture.database, realtimeProvider: provider)
+        let page = try await router.makeSession(for: .init(origin: .stop(id: "a"), destination: .stop(id: "c"),
+            departureTime: RealtimeTestFixture.date("07:55:00"), realtimePolicy: .bestEffort()))
+            .initial(count: 10, searchHorizon: 10_800)
+        #expect(page.journeys.first?.statusEvidence.coverage == .live)
+        #expect(page.journeys.first?.effectiveDeparture == RealtimeTestFixture.date("08:05:00"))
+        #expect(page.metrics.pointRaptorScans == 2)
+    }
+
     private static func board(_ line: String, _ trip: String, _ from: String, _ to: String,
                               _ departure: String, _ arrival: String,
                               _ predictedDeparture: String, _ predictedArrival: String) -> String {
@@ -79,5 +119,35 @@ private actor FirstBatchWithoutThirdStop: RealtimeRoutingProvider {
             refreshPolicy: request.refreshPolicy, maximumConcurrentRequests: request.maximumConcurrentRequests,
             timeout: request.timeout, deadline: request.deadline, targets: request.targets.filter { $0.stopID != "c" },
             tripIDs: request.tripIDs))
+    }
+}
+
+private actor EmptyDiscoveryBatch: RealtimeRoutingProvider {
+    let hafas: HafasRealtimeRoutingProvider
+    var requests = 0
+    init(hafas: HafasRealtimeRoutingProvider) { self.hafas = hafas }
+    func patches(for stopIDs: [String], from: Date, through: Date,
+                 refreshPolicy: RealtimeRefreshPolicy) async throws -> RealtimePatchBatch {
+        try await patches(for: .init(stopIDs: stopIDs, from: from, through: through, refreshPolicy: refreshPolicy))
+    }
+    func patches(for request: RealtimeRoutingRequest) async throws -> RealtimePatchBatch {
+        requests += 1
+        if requests == 1 { return .init(patches: [], requestedStopIDs: Set(request.stopIDs), coveredStopIDs: []) }
+        return try await hafas.patches(for: request)
+    }
+}
+
+private actor ConfirmingDelayProvider: RealtimeRoutingProvider {
+    let estimated: RealtimeTripPatch
+    let confirmed: RealtimeTripPatch
+    var requests = 0
+    init(estimated: RealtimeTripPatch, confirmed: RealtimeTripPatch) {
+        self.estimated = estimated; self.confirmed = confirmed
+    }
+    func patches(for stopIDs: [String], from: Date, through: Date,
+                 refreshPolicy: RealtimeRefreshPolicy) async throws -> RealtimePatchBatch {
+        requests += 1
+        return .init(patches: [requests == 1 ? estimated : confirmed],
+                     requestedStopIDs: Set(stopIDs), coveredStopIDs: Set(stopIDs))
     }
 }

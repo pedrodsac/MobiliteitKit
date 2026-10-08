@@ -98,7 +98,7 @@ extension JourneyPlanningSession {
         if before != latestPatchesByInstance {
             metrics.realtimeOverlayRevisions += 1
             if state == .unavailable { state = .partial }
-            return true
+            return routingEffectChanged(from: before)
         }
         return false
     }
