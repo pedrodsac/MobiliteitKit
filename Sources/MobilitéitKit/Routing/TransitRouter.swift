@@ -584,6 +584,52 @@ public actor JourneyPlanningSession {
     public func initial(count: Int = 5) async throws -> JourneyPage { if all.isEmpty { all = try await generate(anchor: query.departureTime, searchHorizon: Raptor.fullProfileHorizon); visibleStart = 0 }; visibleEnd = min(all.count, max(0, count)); return page() }
     public func initial(count: Int = 5, searchHorizon: TimeInterval) async throws -> JourneyPage { all = try await generate(anchor: query.departureTime, searchHorizon: max(0, searchHorizon)); visibleStart = 0; visibleEnd = min(all.count, max(0, count)); revision &+= 1; return page() }
     public func expanded(count: Int = 5) async throws -> JourneyPage { all = try await generate(anchor: query.departureTime, searchHorizon: Raptor.fullProfileHorizon); visibleStart = 0; visibleEnd = min(all.count, max(0, count)); revision &+= 1; return page() }
+    /// Latest arrivals can stop at a proven recent profile; sparse services or
+    /// overlapping vehicle choices expand through the full 24-hour lookback.
+    func initialArrivals(count: Int = 10) async throws -> JourneyPage {
+        let started = ContinuousClock.now
+        let realtimeBefore = metrics.realtimePreparationMilliseconds
+        var cumulative = RoutingDiagnostics()
+        var cpu = 0, walkingPairs = 0
+        var horizon: TimeInterval = 3 * 3_600
+        let budget: Int
+        if case let .bestEffort(configuration, _) = query.realtimePolicy { budget = configuration.acquisitionBudgetMilliseconds }
+        else { budget = 0 }
+        while true {
+            let spent = metrics.realtimePreparationMilliseconds - realtimeBefore
+            all = try await generate(anchor: query.departureTime, searchHorizon: horizon,
+                reusingRealtime: horizon > 3 * 3_600, realtimeBudgetLimit: max(0, budget - spent))
+            for (stage, value) in diagnostics.milliseconds { cumulative.milliseconds[stage, default: 0] += value }
+            for (reason, value) in diagnostics.realtimeMatchingRejections { cumulative.realtimeMatchingRejections[reason, default: 0] += value }
+            for (reason, value) in diagnostics.rejections { cumulative.rejections[reason, default: 0] += value }
+            let gauges: Set<RoutingDiagnostics.Counter> = [.predictedEvents, .boardsCovered, .incompleteBoards,
+                .workers, .candidates, .retainedAlternatives]
+            for (counter, value) in diagnostics.counters {
+                if gauges.contains(counter) { cumulative.counters[counter] = value }
+                else { cumulative.counters[counter, default: 0] += value }
+            }
+            cumulative.rounds = diagnostics.rounds
+            cpu += metrics.raptorCPUMilliseconds
+            walkingPairs += metrics.walkingTransferPairs
+            let chosen = JourneyQualityPolicy.primarySuggestions(all, count: count, query: query)
+            if horizon == Raptor.fullProfileHorizon || ArrivalSearchStoppingPolicy.canStop(
+                chosen, count: count, lower: query.departureTime.addingTimeInterval(-horizon),
+                snapshot: snapshot, patches: latestPatchesByInstance,
+                access: cachedEndpointEdges?.access ?? []) { break }
+            horizon = min(Raptor.fullProfileHorizon, horizon * 2)
+        }
+        cumulative.totalMilliseconds = RoutingDiagnostics.elapsed(since: started)
+        diagnostics = cumulative
+        metrics.raptorSearchMilliseconds = Int(cumulative.milliseconds[.raptor, default: 0])
+        metrics.candidateBuildingMilliseconds = Int(cumulative.milliseconds[.candidateBuilding, default: 0])
+        metrics.walkingTransferMilliseconds = Int(cumulative.milliseconds[.walkingTransfers, default: 0])
+        metrics.raptorCPUMilliseconds = cpu
+        metrics.walkingTransferPairs = walkingPairs
+        metrics.profileGenerationMilliseconds = Int(cumulative.totalMilliseconds)
+        visibleStart = 0; visibleEnd = min(all.count, max(0, count)); revision &+= 1
+        return page()
+    }
+
     public func later(count: Int = 3) async throws -> JourneyPage {
         if all.isEmpty {
             all = try await generate(anchor: query.departureTime, searchHorizon: Raptor.fullProfileHorizon)
@@ -651,8 +697,8 @@ public actor JourneyPlanningSession {
         diagnostics = RoutingDiagnostics()
         return result
     }
-    private func generate(anchor: Date, searchHorizon: TimeInterval, forceRealtime: Bool = false,
-                          accepting: (@Sendable (Journey) -> Bool)? = nil) async throws -> [Journey] {
+    private func generate(anchor: Date, searchHorizon: TimeInterval, forceRealtime: Bool = false, reusingRealtime: Bool = false,
+                          realtimeBudgetLimit: Int? = nil, accepting: (@Sendable (Journey) -> Bool)? = nil) async throws -> [Journey] {
         let started = ContinuousClock.now
         diagnostics = RoutingDiagnostics()
         let countersBefore = metrics
@@ -679,7 +725,7 @@ public actor JourneyPlanningSession {
         let maximumCompletionWaves: Int
         let searchWorkBudget: Int?
         if case let .bestEffort(configuration, _) = query.realtimePolicy {
-            realtimeBudget = configuration.acquisitionBudgetMilliseconds
+            realtimeBudget = min(configuration.acquisitionBudgetMilliseconds, realtimeBudgetLimit ?? Int.max)
             searchWorkBudget = configuration.searchWorkBudgetMilliseconds
             maximumCompletionWaves = min(2, max(1, configuration.maximumRefinementWaves))
         } else {
@@ -687,10 +733,10 @@ public actor JourneyPlanningSession {
             searchWorkBudget = nil
             maximumCompletionWaves = 0
         }
-        let refreshing = forceRealtime || {
+        let refreshing = !reusingRealtime && (forceRealtime || {
             if case let .bestEffort(_, refresh) = query.realtimePolicy { return refresh == .forceRefresh }
             return false
-        }()
+        }())
         let acquiring = realtimeProvider != nil && query.realtimePolicy != .disabled
         let seeds = refreshing || !acquiring ? [] : (frozenPatches ?? Array(latestRawPatchesByInstance.values))
             .map { $0.retainingFreshObservations(at: clock()) }
@@ -715,7 +761,7 @@ public actor JourneyPlanningSession {
             let acquisitionStarted = ContinuousClock.now
             _ = try await completeItineraryRealtime([], access: access, egress: egress,
                 anchor: anchor, searchHorizon: searchHorizon, force: forceRealtime,
-                budgetMilliseconds: remainingRealtimeMilliseconds, includeDiscovery: true, attempted: &attempted)
+                budgetMilliseconds: remainingRealtimeMilliseconds, includeDiscovery: true, reusingRealtime: reusingRealtime, attempted: &attempted)
             let elapsed = RoutingDiagnostics.elapsed(since: acquisitionStarted)
             remainingRealtimeMilliseconds = max(0, remainingRealtimeMilliseconds - Int(elapsed.rounded(.up)))
             metrics.realtimePreparationMilliseconds += Int(elapsed)
@@ -752,7 +798,7 @@ public actor JourneyPlanningSession {
                 JourneyQualityPolicy.primarySuggestions(built.journeys, count: 10, query: query),
                 access: access, egress: egress, anchor: anchor,
                 searchHorizon: searchHorizon, force: forceRealtime,
-                budgetMilliseconds: remainingRealtimeMilliseconds, includeDiscovery: !discovered, attempted: &attempted)
+                budgetMilliseconds: remainingRealtimeMilliseconds, includeDiscovery: !discovered, reusingRealtime: reusingRealtime, attempted: &attempted)
             discovered = true
             let elapsed = RoutingDiagnostics.elapsed(since: completionStarted)
             remainingRealtimeMilliseconds = max(0, remainingRealtimeMilliseconds - Int(elapsed.rounded(.up)))
