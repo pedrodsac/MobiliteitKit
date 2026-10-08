@@ -13,10 +13,14 @@ extension JourneyPlanningSession {
             : anchor.addingTimeInterval(searchHorizon)
         let started = ContinuousClock.now
         let deadline = started.advanced(by: .milliseconds(max(0, budgetMilliseconds ?? configuration.acquisitionBudgetMilliseconds)))
-        var queried = seedPatches == nil ? Set<String>() : (cachedRealtimeBatch?.requestedStopIDs ?? [])
+        // Itinerary targets cover selected lines, not every outgoing vehicle at
+        // a stop. Reuse their observations without excluding those stops from
+        // discovery: a different delayed line may create a new connection.
+        var queried: Set<String> = []
         var covered: Set<String> = []
         var incomplete: Set<String> = []
         let previousBatch = seedPatches == nil ? nil : cachedRealtimeBatch
+        let itineraryStops = previousBatch?.requestedStopIDs ?? []
         let seeds = seedPatches ?? (force || requestedRefresh == .forceRefresh ? []
             : (frozenPatches ?? []).map { $0.retainingFreshObservations(at: clock()) })
         var patches = Dictionary(seeds.map { (RealtimePatchKey(tripID: $0.tripID, serviceDate: $0.serviceDate), $0) },
@@ -39,8 +43,12 @@ extension JourneyPlanningSession {
         }.prefix(8).map { snapshot.stops[$0.stop].id }
         for _ in 0..<min(4, max(1, configuration.maximumRefinementWaves)) {
             try Task.checkCancellation()
-            guard !frontier.isEmpty, ContinuousClock.now < deadline, queried.count < 24 else { break }
-            frontier = Array(frontier.prefix(24 - queried.count))
+            guard !frontier.isEmpty, ContinuousClock.now < deadline else { break }
+            // Revisit selected-line stops without increasing the stop budget.
+            let availableStops = max(0, 24 - queried.union(itineraryStops).count)
+            let additionalStops = Set(frontier.filter { !itineraryStops.contains($0) }.prefix(availableStops))
+            frontier = frontier.filter { itineraryStops.contains($0) || additionalStops.contains($0) }
+            guard !frontier.isEmpty else { break }
             let targets = realtimeTargets(stopIDs: frontier, arrivalByStop: discoveryArrivals,
                 from: from, through: through, configuration: configuration, deadline: deadline, patches: patches, reachability: reachability)
             let targetedStops = frontier.filter { stopID in targets.contains { $0.stopID == stopID } }

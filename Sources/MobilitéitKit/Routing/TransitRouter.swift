@@ -735,20 +735,25 @@ public actor JourneyPlanningSession {
             }
             guard remainingRealtimeMilliseconds > 0, refinementWaves < maximumCompletionWaves else { break }
             let completionStarted = ContinuousClock.now
+            // Scheduled candidates establish acquisition priority, but cannot
+            // enumerate transfers made feasible only by live delays. Reserve
+            // half the first allowance for discovering those other vehicles.
+            let completionBudget = discovered ? remainingRealtimeMilliseconds
+                : max(1, remainingRealtimeMilliseconds / 2)
             var changed = try await completeItineraryRealtime(
                 JourneyQualityPolicy.primarySuggestions(built.journeys, count: 10, query: query), anchor: anchor,
                 searchHorizon: searchHorizon, force: forceRealtime,
-                budgetMilliseconds: remainingRealtimeMilliseconds, attempted: &attempted)
+                budgetMilliseconds: completionBudget, attempted: &attempted)
             let elapsed = RoutingDiagnostics.elapsed(since: completionStarted)
             remainingRealtimeMilliseconds = max(0, remainingRealtimeMilliseconds - Int(elapsed.rounded(.up)))
             metrics.realtimePreparationMilliseconds += Int(elapsed)
             diagnostics.record(.realtime, since: completionStarted)
-            if !discovered, !changed, remainingRealtimeMilliseconds > 0 {
+            if !discovered, remainingRealtimeMilliseconds > 0 {
                 let discoveryStarted = ContinuousClock.now
                 let before = latestPatchesByInstance
                 let acquired = try await acquireRealtime(access: access, egress: egress, anchor: anchor,
                     searchHorizon: searchHorizon, force: forceRealtime,
-                    budgetMilliseconds: min(remainingRealtimeMilliseconds, max(0, realtimeBudget / 8)),
+                    budgetMilliseconds: remainingRealtimeMilliseconds,
                     seedPatches: Array(latestRawPatchesByInstance.values))
                 latestRawPatchesByInstance = Dictionary(acquired.map {
                     (RealtimePatchKey(tripID: $0.tripID, serviceDate: $0.serviceDate), $0)

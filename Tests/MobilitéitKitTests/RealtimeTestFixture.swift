@@ -8,7 +8,7 @@ struct RealtimeTestFixture {
     let database: URL
     init(stopTimes: String? = nil, trips: String? = nil,
          serviceDates: String = "service,20260930,1\n",
-         additionalStops: String = "") async throws {
+         additionalStops: String = "", additionalRoutes: String = "") async throws {
         directory = FileManager.default.temporaryDirectory.appendingPathComponent("LiveRouting-\(UUID())")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         database = directory.appendingPathComponent("fixture.sqlite")
@@ -16,7 +16,7 @@ struct RealtimeTestFixture {
         let files = [
             "agency.txt": "agency_id,agency_name,agency_url,agency_timezone\noperator,Operator,https://example.com,Europe/Luxembourg\n",
             "calendar_dates.txt": "service_id,date,exception_type\n" + serviceDates,
-            "routes.txt": "route_id,agency_id,route_short_name,route_long_name,route_type\nroute,operator,201,Bus 201,3\n",
+            "routes.txt": "route_id,agency_id,route_short_name,route_long_name,route_type\nroute,operator,201,Bus 201,3\n" + additionalRoutes,
             "stops.txt": "stop_id,stop_name,stop_lat,stop_lon\na,Origin,49.60,6.10\nb,Transfer,49.65,6.15\nc,Destination,49.70,6.20\n" + additionalStops,
             "trips.txt": "route_id,service_id,trip_id,trip_headsign\n" + (trips ?? "route,service,trip,Destination\n"),
             "stop_times.txt": "trip_id,arrival_time,departure_time,stop_id,stop_sequence\n" + (stopTimes ?? "trip,08:00:00,08:00:00,a,1\ntrip,08:10:00,08:10:00,b,2\ntrip,08:20:00,08:20:00,c,3\n"),
