@@ -135,22 +135,28 @@ extension Raptor {
             let patternStartPositionSnapshot = patternStartPositions
             let reachableStops = destinationReachability?.stopsByRemainingRides[remainingRides]
             let scanStarted = ContinuousClock.now
-            let scanResults = try await withThrowingTaskGroup(of: PatternScanResult.self) { group in
+            var merge = PatternScanMerge(nextID: nextLabelID)
+            try await withThrowingTaskGroup(of: PatternScanResult.self) { group in
                 // Schedule costly chunks first, but merge in the original index order.
-                let scheduled = chunks.sorted { a, b in
-                    func cost(_ patterns: [Int]) -> Int {
-                        patterns.reduce(0) { total, pattern in
-                            total + (activeInstanceSnapshot[pattern]?.count ?? 0)
-                                * snapshot.patterns[pattern].stops.count
+                let schedulingWindow = max(1, workerCount * 2)
+                let scheduled = stride(from: 0, to: chunks.count, by: schedulingWindow).flatMap { start in
+                    chunks[start..<min(start + schedulingWindow, chunks.count)].sorted { a, b in
+                        func cost(_ patterns: [Int]) -> Int {
+                            patterns.reduce(0) { total, pattern in
+                                total + (activeInstanceSnapshot[pattern]?.count ?? 0)
+                                    * snapshot.patterns[pattern].stops.count
+                            }
                         }
+                        let left = cost(a.patterns), right = cost(b.patterns)
+                        return left == right ? a.index < b.index : left > right
                     }
-                    let left = cost(a.patterns), right = cost(b.patterns)
-                    return left == right ? a.index < b.index : left > right
                 }
                 var cursor = 0
+                var active = 0
                 func enqueue() {
                     let chunk = scheduled[cursor]
                     cursor += 1
+                    active += 1
                     group.addTask(priority: .userInitiated) {
                         try scanPatterns(
                             chunkIndex: chunk.index,
@@ -169,90 +175,31 @@ extension Raptor {
                     }
                 }
                 for _ in 0..<min(workerCount, scheduled.count) { enqueue() }
-                var values: [PatternScanResult] = []
+                var pending: [Int: PatternScanResult] = [:]
+                var nextChunk = 0
                 while let value = try await group.next() {
-                    values.append(value)
-                    if cursor < scheduled.count { enqueue() }
+                    active -= 1
+                    pending[value.chunkIndex] = value
+                    while let ready = pending.removeValue(forKey: nextChunk) {
+                        merge.append(ready)
+                        nextChunk += 1
+                    }
+                    // Every earlier chunk in this window has already started
+                    // before the completed buffer can fill. Bound that buffer
+                    // instead of retaining all workers' full profile arrays.
+                    while active < workerCount, cursor < scheduled.count, pending.count < schedulingWindow {
+                        enqueue()
+                    }
                 }
-                return values.sorted { $0.chunkIndex < $1.chunkIndex }
+                precondition(pending.isEmpty && nextChunk == chunks.count)
             }
-            let scanMilliseconds = Int(RoutingDiagnostics.elapsed(since: scanStarted))
+            // Charge serial merge work once, even when worker scans overlap it.
+            let scanMilliseconds = Int(max(0, RoutingDiagnostics.elapsed(since: scanStarted) - merge.elapsedMilliseconds))
             let mergeStarted = ContinuousClock.now
-            var roundBoardingChecks = 0
-            var roundFeasibleBoardings = 0
-            var roundAlightingChecks = 0
-            var roundLabelAttempts = 0
-            var roundRetainedLabels = 0
-            var roundRejectedBeforeAllocation = 0
-            var mergedCompact: [Int: CompactProfile] = [:]
-            var referenceNext: [Int: LabelProfile] = [:]
-            var referenceID = nextLabelID
-            for result in scanResults {
-                scannedPatterns += result.scannedPatterns
-                scannedTripInstances += result.scannedTripInstances
-                roundBoardingChecks += result.boardingChecks
-                roundFeasibleBoardings += result.feasibleBoardings
-                roundAlightingChecks += result.alightingChecks
-                roundLabelAttempts += result.labelAttempts
-                roundRetainedLabels += result.retainedLabels
-                roundRejectedBeforeAllocation += result.rejectedBeforeAllocation
-                if let compact = result.compactLabels {
-                    for stop in compact.keys.sorted() {
-                        let profile = compact[stop]!
-                        for slot in profile.ordered {
-                            var key = profile.keys[slot]!
-                            key.id = nextLabelID; nextLabelID += 1
-                            if mergedCompact[stop] == nil { mergedCompact[stop] = CompactProfile() }
-                            let peers = mergedCompact[stop]!.byIncomingTrip[key.incomingTrip, default: 0]
-                            if !mergedCompact[stop]!.isDominated(key, peers: peers),
-                               !mergedCompact[stop]!.cannotEnter(key, peers: peers) {
-                                _ = mergedCompact[stop]!.insert(key, path: profile.paths[slot]!)
-                            }
-                        }
-                    }
-                    if verifyKernel {
-                        for stop in result.labels.keys.sorted() {
-                            for label in result.labels[stop]!.ordered {
-                                _ = insert(label.replacingID(with: referenceID), at: stop, into: &referenceNext)
-                                referenceID += 1
-                            }
-                        }
-                    }
-                } else {
-                    for stop in result.labels.keys.sorted() {
-                        for candidate in result.labels[stop]?.ordered ?? [] {
-                            let candidate = candidate.replacingID(with: nextLabelID)
-                            nextLabelID += 1
-                            _ = insert(candidate, at: stop, into: &next)
-                        }
-                    }
-                }
-            }
-            if !mergedCompact.isEmpty {
-                next = materialize(mergedCompact, boardings: boardings)
-                if verifyKernel {
-                    precondition(next.keys.sorted() == referenceNext.keys.sorted(), "Merged stops mismatch")
-                    for stop in next.keys {
-                        let profile = next[stop]!, reference = referenceNext[stop]!
-                        precondition(profile.byWalk.map(\.id) == reference.byWalk.map(\.id)
-                            && profile.byArrival.map(\.id) == reference.byArrival.map(\.id)
-                            && profile.lastUnprotectedArrival?.id == reference.lastUnprotectedArrival?.id
-                            && profile.lastPreferredArrival?.id == reference.lastPreferredArrival?.id,
-                            "Materialized profile index mismatch")
-                        let peers = profile.byIncomingTrip.filter { !$0.value.isEmpty }.mapValues { $0.map(\.id).sorted() }
-                        let expectedPeers = reference.byIncomingTrip.filter { !$0.value.isEmpty }.mapValues { $0.map(\.id).sorted() }
-                        precondition(peers == expectedPeers, "Materialized incoming-trip index mismatch")
-                        let actual = next[stop]!.ordered, expected = referenceNext[stop]!.ordered
-                        precondition(actual.count == expected.count, "Merged profile count mismatch")
-                        for (a, b) in zip(actual, expected) {
-                            precondition(a.id == b.id && a.time == b.time && a.firstDeparture == b.firstDeparture
-                                && a.minimumSlack == b.minimumSlack && a.totalSlack == b.totalSlack
-                                && a.tripKey == b.tripKey && a.walkingSeconds == b.walkingSeconds
-                                && String(reflecting: a.legs) == String(reflecting: b.legs), "Merged label mismatch")
-                        }
-                    }
-                }
-            }
+            next = merge.materialized(boardings: boardings)
+            nextLabelID = merge.nextID
+            scannedPatterns += merge.patterns
+            scannedTripInstances += merge.tripInstances
 
             if snapshot.hasContinuations {
                 try relaxContinuations(snapshot: snapshot, query: query, serviceDays: relevantServiceDays,
@@ -260,21 +207,21 @@ extension Raptor {
                     upperBound: profileUpperBound, labels: &next, nextLabelID: &nextLabelID)
             }
 
-            let mergeMilliseconds = Int(RoutingDiagnostics.elapsed(since: mergeStarted))
+            let mergeMilliseconds = Int(merge.elapsedMilliseconds + RoutingDiagnostics.elapsed(since: mergeStarted))
             roundMetrics.append(.init(
                 tripPreparationMilliseconds: preparationMilliseconds,
                 patternScanMilliseconds: scanMilliseconds,
                 labelMergeMilliseconds: mergeMilliseconds,
                 patterns: markedPatternIDs.count,
-                tripInstances: scanResults.reduce(0) { $0 + $1.scannedTripInstances },
-                boardingChecks: roundBoardingChecks,
-                feasibleBoardings: roundFeasibleBoardings,
-                alightingChecks: roundAlightingChecks,
-                labelAttempts: roundLabelAttempts,
-                retainedLabels: roundRetainedLabels,
-                rejectedBeforeAllocation: roundRejectedBeforeAllocation,
-                slowestChunkMilliseconds: scanResults.map(\.elapsedMilliseconds).max() ?? 0,
-                summedChunkMilliseconds: scanResults.reduce(0) { $0 + $1.elapsedMilliseconds }
+                tripInstances: merge.tripInstances,
+                boardingChecks: merge.boardingChecks,
+                feasibleBoardings: merge.feasibleBoardings,
+                alightingChecks: merge.alightingChecks,
+                labelAttempts: merge.labelAttempts,
+                retainedLabels: merge.retainedLabels,
+                rejectedBeforeAllocation: merge.rejectedBeforeAllocation,
+                slowestChunkMilliseconds: merge.slowestChunkMilliseconds,
+                summedChunkMilliseconds: merge.summedChunkMilliseconds
             ))
             if verifyKernel {
                 var reference = next, referenceID = nextLabelID
