@@ -109,7 +109,7 @@ import Testing
             #expect(rides.allSatisfy { $0.board.timingSource == .reported && $0.alight.timingSource == .reported })
             #expect(journey.effectiveArrival == RealtimeTestFixture.date("08:47:00"))
             #expect(journey.statusEvidence.coverage == .live)
-            #expect(page.metrics.pointRaptorScans == 2)
+            #expect(page.metrics.pointRaptorScans == 1)
             // Fresh boards cover the whole itinerary on the next calculation.
             let cached = try await router.makeSession(for: query).initial(count: 10, searchHorizon: 3 * 3_600)
             #expect(cached.journeys.first?.statusEvidence.coverage == .live)

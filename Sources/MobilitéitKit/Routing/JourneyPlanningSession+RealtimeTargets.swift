@@ -14,6 +14,7 @@ extension JourneyPlanningSession {
                          patches: [RealtimePatchKey: RealtimeTripPatch],
                          reachability: Raptor.DestinationReachability,
                          excludingInstances: Set<RealtimePatchKey> = [],
+                         plannedInstances: inout Set<RealtimePatchKey>,
                          matchingTripIDs: inout Set<String>) -> [RealtimeBoardTarget] {
         let days = snapshot.serviceDays.filter {
             $0.start <= through && $0.start.addingTimeInterval(Double(snapshot.info.maximumServiceTime.rawValue))
@@ -25,6 +26,7 @@ extension JourneyPlanningSession {
             if Task.isCancelled || ContinuousClock.now >= deadline { break }
             guard let stop = snapshot.stopByID[stopID], let reach = arrivalByStop[stop] else { continue }
             var departures: [Date] = []
+            var shortInstances: [(RealtimePatchKey, Date)] = []
             var lines: Set<String> = []
             var hasUnnamedLine = false
             for tripIndex in snapshot.tripIndicesByDepartureStop[stop] {
@@ -51,6 +53,11 @@ extension JourneyPlanningSession {
                         guard departure >= reach.addingTimeInterval(-Double(configuration.scheduledLookbackSeconds)),
                               departure <= through else { continue }
                         departures.append(departure)
+                        if let last = trip.times.last?.arrival,
+                           day.start.addingTimeInterval(Double(last)).timeIntervalSince(departure)
+                            <= RealtimeTimeline.maximumPropagation {
+                            shortInstances.append((key, departure))
+                        }
                         matchingTripIDs.insert(trip.id)
                         if let name = snapshot.routes[trip.route].shortName, !name.isEmpty { lines.insert(name) }
                         else { hasUnnamedLine = true }
@@ -66,8 +73,16 @@ extension JourneyPlanningSession {
             for departure in ordered.prefix(8) {
                 let start = max(from, departure.addingTimeInterval(-60))
                 let end = min(through, start.addingTimeInterval(Double(configuration.minimumForwardHorizonSeconds)))
-                if end >= start { targets.append(.init(stopID: stopID, from: start, through: end,
-                    lines: hasUnnamedLine ? [] : lines.sorted())) }
+                if end >= start {
+                    targets.append(.init(stopID: stopID, from: start, through: end,
+                        lines: hasUnnamedLine ? [] : lines.sorted()))
+                    // The upstream passlist already covers this short vehicle
+                    // instance. Keep downstream boards for other vehicles and
+                    // for rides beyond the forecast propagation limit.
+                    for (key, date) in shortInstances where date >= start && date <= end {
+                        plannedInstances.insert(key)
+                    }
+                }
             }
         }
         return targets

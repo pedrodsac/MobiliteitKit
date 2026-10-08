@@ -44,7 +44,8 @@ extension JourneyPlanningSession {
         var queried: Set<String> = []
         var targets: [RealtimeBoardTarget] = []
         var matchingTripIDs: Set<String> = []
-        for _ in 0..<min(4, max(1, configuration.maximumRefinementWaves)) {
+        var plannedInstances = requestedInstances
+        for _ in 0..<maxRides {
             guard !Task.isCancelled, !frontier.isEmpty, ContinuousClock.now < deadline else { break }
             // Existing itinerary stops keep priority and can acquire other lines.
             let available = max(0, 24 - queried.union(preferred).count)
@@ -53,12 +54,14 @@ extension JourneyPlanningSession {
             guard !frontier.isEmpty else { break }
             targets += realtimeTargets(stopIDs: frontier, arrivalByStop: arrivals,
                 from: from, through: through, configuration: configuration, deadline: deadline,
-                patches: latestPatchesByInstance, reachability: reachability, excludingInstances: requestedInstances,
+                patches: latestPatchesByInstance, reachability: reachability, excludingInstances: plannedInstances,
+                plannedInstances: &plannedInstances,
                 matchingTripIDs: &matchingTripIDs)
             queried.formUnion(frontier)
             frontier = realtimeFrontier(arrivalByStop: &arrivals, egress: egress, from: from, through: through,
                 lookback: configuration.scheduledLookbackSeconds, deadline: deadline,
-                patches: latestPatchesByInstance, excluding: queried, reachability: reachability)
+                patches: latestPatchesByInstance, excluding: queried, excludingInstances: plannedInstances,
+                reachability: reachability)
         }
         return (targets, matchingTripIDs)
     }
@@ -69,7 +72,8 @@ extension JourneyPlanningSession {
     private func realtimeFrontier(arrivalByStop: inout [Int: Date], egress: [Edge], from: Date, through: Date,
                                   lookback: Int, deadline: ContinuousClock.Instant,
                                   patches: [RealtimePatchKey: RealtimeTripPatch],
-                                  excluding: Set<String>, reachability: Raptor.DestinationReachability) -> [String] {
+                                  excluding: Set<String>, excludingInstances: Set<RealtimePatchKey>,
+                                  reachability: Raptor.DestinationReachability) -> [String] {
         let serviceDays = snapshot.serviceDays.filter {
             $0.start <= through && $0.start.addingTimeInterval(Double(snapshot.info.maximumServiceTime.rawValue))
                 >= from.addingTimeInterval(-Double(lookback))
@@ -128,7 +132,8 @@ extension JourneyPlanningSession {
                     guard query.preferences.allowedModes.contains(routeType: snapshot.routes[trip.route].type)
                     else { return false }
                     return serviceDays.contains { day in
-                        guard day.activeServices.contains(trip.service) else { return false }
+                        guard day.activeServices.contains(trip.service),
+                              !excludingInstances.contains(.init(tripID: trip.id, serviceDate: day.date)) else { return false }
                         let patch = patches[.init(tripID: trip.id, serviceDate: day.date)]
                         guard patch?.status != .cancelled, patch?.status != .unreachable else { return false }
                         return trip.times.indices.contains { position in
@@ -148,12 +153,13 @@ extension JourneyPlanningSession {
             if remainingRides[left] != remainingRides[right] {
                 return remainingRides[left] < remainingRides[right]
             }
+            if let target {
+                let a = distance(snapshot.stops[left].model.coordinate, target)
+                let b = distance(snapshot.stops[right].model.coordinate, target)
+                if a != b { return a < b }
+            }
             let a = arrivalByStop[left]!; let b = arrivalByStop[right]!
             if a != b { return a < b }
-            if let target {
-                return distance(snapshot.stops[left].model.coordinate, target)
-                    < distance(snapshot.stops[right].model.coordinate, target)
-            }
             return snapshot.stops[left].id < snapshot.stops[right].id
         }.prefix(8).map { snapshot.stops[$0].id }
     }

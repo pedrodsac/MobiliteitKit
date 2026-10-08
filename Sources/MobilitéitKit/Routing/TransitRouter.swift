@@ -708,6 +708,20 @@ public actor JourneyPlanningSession {
         async let directJourney = Self.directWalk(snapshot: snapshot, query: query, walking: walking, anchor: anchor)
         var attempted: Set<ItineraryBoarding> = []
         var refinementWaves = 0
+        // The optimistic frontier needs only endpoint edges and the timetable.
+        // Acquire its observations before the first full profile, so routing
+        // does not spend a complete scan discovering schedule-only winners.
+        if remainingRealtimeMilliseconds > 0, searchWorkBudget != 0 {
+            let acquisitionStarted = ContinuousClock.now
+            _ = try await completeItineraryRealtime([], access: access, egress: egress,
+                anchor: anchor, searchHorizon: searchHorizon, force: forceRealtime,
+                budgetMilliseconds: remainingRealtimeMilliseconds, includeDiscovery: true, attempted: &attempted)
+            let elapsed = RoutingDiagnostics.elapsed(since: acquisitionStarted)
+            remainingRealtimeMilliseconds = max(0, remainingRealtimeMilliseconds - Int(elapsed.rounded(.up)))
+            metrics.realtimePreparationMilliseconds += Int(elapsed)
+            diagnostics.record(.realtime, since: acquisitionStarted)
+            discovered = true
+        }
         var cpuMilliseconds = 0
         var walkingPairs = 0
         var searchResult: Raptor.SearchResult
