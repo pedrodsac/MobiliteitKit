@@ -21,6 +21,7 @@ extension JourneyPlanningSession {
         var stopIDs: [String] = []
         var seenStops: Set<String> = []
         var requestedInstances: Set<RealtimePatchKey> = []
+        var matchingTripIDs: Set<String> = []
         for journey in journeys {
             guard ContinuousClock.now < deadline else { break }
             for leg in journey.legs {
@@ -39,6 +40,7 @@ extension JourneyPlanningSession {
                 let end = min(upper, max(ride.effectiveDeparture.addingTimeInterval(60),
                     ride.scheduledDeparture.addingTimeInterval(RealtimeTimeline.maximumDelay + 60)))
                 guard end >= start else { continue }
+                matchingTripIDs.insert(ride.tripID)
                 // A passlist can cover nearby downstream boardings. Long rides
                 // need another board before forecast propagation expires.
                 if ride.scheduledArrival.timeIntervalSince(ride.scheduledDeparture) <= RealtimeTimeline.maximumPropagation {
@@ -57,8 +59,9 @@ extension JourneyPlanningSession {
             let discovered = discoveryRealtimeTargets(access: access, egress: egress, journeys: journeys,
                 preferredStops: stopIDs, anchor: anchor, searchHorizon: searchHorizon, deadline: planningDeadline,
                 requestedInstances: requestedInstances)
-            targets += discovered
-            for target in discovered where seenStops.insert(target.stopID).inserted { stopIDs.append(target.stopID) }
+            targets += discovered.targets
+            matchingTripIDs.formUnion(discovered.tripIDs)
+            for target in discovered.targets where seenStops.insert(target.stopID).inserted { stopIDs.append(target.stopID) }
             diagnostics.record(.realtimeDiscovery, since: discoveryStarted)
         }
         guard !targets.isEmpty, ContinuousClock.now < deadline else { return false }
@@ -70,7 +73,8 @@ extension JourneyPlanningSession {
                 scheduledLookbackSeconds: configuration.scheduledLookbackSeconds,
                 refreshPolicy: force ? .forceRefresh : refresh,
                 maximumConcurrentRequests: min(16, configuration.maximumConcurrentBoardRequests),
-                timeout: max(.zero, ContinuousClock.now.duration(to: deadline)), deadline: deadline, targets: targets))
+                timeout: max(.zero, ContinuousClock.now.duration(to: deadline)), deadline: deadline, targets: targets,
+                tripIDs: matchingTripIDs))
         } catch is CancellationError { throw CancellationError() }
         catch { return false }
         try Task.checkCancellation()

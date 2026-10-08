@@ -132,7 +132,8 @@ public struct RealtimeRoutingRequest: Sendable {
     public let timeout: Duration
     public let deadline: ContinuousClock.Instant?
     public let targets: [RealtimeBoardTarget]
-    /// Optional itinerary filter. Empty requests retain broad discovery matching.
+    /// Optional selected/discovered vehicle filter. Ambiguity is still resolved
+    /// against the full timetable; empty requests match the complete board.
     public let tripIDs: Set<String>
     public init(stopIDs: [String], from: Date, through: Date,
                 scheduledLookbackSeconds: Int = 7_200,

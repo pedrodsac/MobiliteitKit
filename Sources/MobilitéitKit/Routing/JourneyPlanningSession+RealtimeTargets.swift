@@ -13,7 +13,8 @@ extension JourneyPlanningSession {
                          configuration: RealtimeConfiguration, deadline: ContinuousClock.Instant,
                          patches: [RealtimePatchKey: RealtimeTripPatch],
                          reachability: Raptor.DestinationReachability,
-                         excludingInstances: Set<RealtimePatchKey> = []) -> [RealtimeBoardTarget] {
+                         excludingInstances: Set<RealtimePatchKey> = [],
+                         matchingTripIDs: inout Set<String>) -> [RealtimeBoardTarget] {
         let days = snapshot.serviceDays.filter {
             $0.start <= through && $0.start.addingTimeInterval(Double(snapshot.info.maximumServiceTime.rawValue))
                 >= from.addingTimeInterval(-Double(configuration.scheduledLookbackSeconds))
@@ -50,6 +51,7 @@ extension JourneyPlanningSession {
                         guard departure >= reach.addingTimeInterval(-Double(configuration.scheduledLookbackSeconds)),
                               departure <= through else { continue }
                         departures.append(departure)
+                        matchingTripIDs.insert(trip.id)
                         if let name = snapshot.routes[trip.route].shortName, !name.isEmpty { lines.insert(name) }
                         else { hasUnnamedLine = true }
                     }

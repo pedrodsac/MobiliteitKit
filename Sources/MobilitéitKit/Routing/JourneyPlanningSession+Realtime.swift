@@ -7,8 +7,9 @@ extension JourneyPlanningSession {
     func discoveryRealtimeTargets(access: [Edge], egress: [Edge], journeys: [Journey],
                                   preferredStops: [String], anchor: Date, searchHorizon: TimeInterval,
                                   deadline: ContinuousClock.Instant,
-                                  requestedInstances: Set<RealtimePatchKey>) -> [RealtimeBoardTarget] {
-        guard case let .bestEffort(configuration, _) = query.realtimePolicy else { return [] }
+                                  requestedInstances: Set<RealtimePatchKey>)
+        -> (targets: [RealtimeBoardTarget], tripIDs: Set<String>) {
+        guard case let .bestEffort(configuration, _) = query.realtimePolicy else { return ([], []) }
         let from = query.direction == .arriveBy ? anchor.addingTimeInterval(-searchHorizon) : anchor
         let through = query.direction == .arriveBy ? anchor : anchor.addingTimeInterval(searchHorizon)
         let maxRides = min(8, max(1, (query.preferences.maxTransfers ?? 7) + 1))
@@ -42,6 +43,7 @@ extension JourneyPlanningSession {
         var frontier = (preferredStops + accessStops).filter { seen.insert($0).inserted }
         var queried: Set<String> = []
         var targets: [RealtimeBoardTarget] = []
+        var matchingTripIDs: Set<String> = []
         for _ in 0..<min(4, max(1, configuration.maximumRefinementWaves)) {
             guard !Task.isCancelled, !frontier.isEmpty, ContinuousClock.now < deadline else { break }
             // Existing itinerary stops keep priority and can acquire other lines.
@@ -51,13 +53,14 @@ extension JourneyPlanningSession {
             guard !frontier.isEmpty else { break }
             targets += realtimeTargets(stopIDs: frontier, arrivalByStop: arrivals,
                 from: from, through: through, configuration: configuration, deadline: deadline,
-                patches: latestPatchesByInstance, reachability: reachability, excludingInstances: requestedInstances)
+                patches: latestPatchesByInstance, reachability: reachability, excludingInstances: requestedInstances,
+                matchingTripIDs: &matchingTripIDs)
             queried.formUnion(frontier)
             frontier = realtimeFrontier(arrivalByStop: &arrivals, egress: egress, from: from, through: through,
                 lookback: configuration.scheduledLookbackSeconds, deadline: deadline,
                 patches: latestPatchesByInstance, excluding: queried, reachability: reachability)
         }
-        return targets
+        return (targets, matchingTripIDs)
     }
 
     /// Temporal, destination-aware discovery includes delayed-past candidates,
