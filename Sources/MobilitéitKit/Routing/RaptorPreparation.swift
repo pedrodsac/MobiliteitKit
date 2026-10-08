@@ -111,10 +111,31 @@ extension Raptor {
         switch rule.type {
         case 3: return nil
         default:
+            if permitsTightSameStopBusTransfer(rule, snapshot: snapshot, incoming: incoming,
+                                              at: stop, outgoing: outgoing, preferences: preferences) {
+                return .init(requiredSeconds: max(120, preferences.minimumTransferSeconds), allowedShortfallSeconds: 0)
+            }
             // Feed minima describe total interchange time, including walking.
             return .init(requiredSeconds: max(preferences.minimumTransferSeconds, rule.minimum ?? 0),
                          allowedShortfallSeconds: 0)
         }
+    }
+
+    /// An explicit rider choice can use the normal boarding buffer at an
+    /// aggregate bus stop. The larger feed buffer remains recommendation
+    /// evidence, so these connections are published with a tight-transfer risk.
+    /// Specific rules, different stops and rail/platform changes stay strict.
+    private static func permitsTightSameStopBusTransfer(_ rule: SnapshotRule,
+        snapshot: RoutingSnapshot, incoming: TransitLeg, at stop: Int, outgoing: Int,
+        preferences: RoutingPreferences) -> Bool {
+        func bus(_ type: Int) -> Bool { type == 3 || (700...799).contains(type) }
+        let model = snapshot.stops[stop].model
+        return preferences.allowTightSameStopBusTransfers && preferences.wheelchair != .required
+            && incoming.alight == stop && rule.type == 2 && rule.from == stop && rule.to == stop
+            && rule.fromRoute == nil && rule.toRoute == nil && rule.fromTrip == nil && rule.toTrip == nil
+            && model.locationType == 0 && model.parentStationID == nil && model.platformCode == nil
+            && bus(snapshot.routes[snapshot.trips[incoming.trip].route].type)
+            && bus(snapshot.routes[snapshot.trips[outgoing].route].type)
     }
     static func selectedTransferRule(snapshot: RoutingSnapshot, incoming: TransitLeg,
                                      at stop: Int, outgoing: Int) -> SnapshotRule? {

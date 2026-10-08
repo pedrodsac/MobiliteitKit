@@ -34,6 +34,7 @@ extension JourneyQualityPolicy {
               other.walkingDuration <= candidate.walkingDuration + transferPenaltySeconds,
               preferences.routePreference != .lessWalking || other.walkingDuration <= candidate.walkingDuration
         else { return false }
+        guard !other.statusEvidence.tightTransfer || candidate.statusEvidence.tightTransfer else { return false }
         let rides = candidate.legs.compactMap { if case let .transit(t) = $0 { t } else { nil } }
         let replacement = other.legs.compactMap { if case let .transit(t) = $0 { t } else { nil } }
         guard !replacement.isEmpty, replacement.count < rides.count else { return false }
@@ -59,7 +60,8 @@ extension JourneyQualityPolicy {
         journeys.contains { other in
             guard other.id != candidate.id, other.accessibility == candidate.accessibility,
                   other.matchesPreferredMode == candidate.matchesPreferredMode,
-                  !other.hasCancelledTransitLeg else { return false }
+                  !other.hasCancelledTransitLeg,
+                  !other.statusEvidence.tightTransfer || candidate.statusEvidence.tightTransfer else { return false }
             func vehicles(_ journey: Journey) -> [String] {
                 journey.legs.compactMap { if case let .transit(t) = $0 { t.instance?.stableKey ?? t.tripID } else { nil } }
             }

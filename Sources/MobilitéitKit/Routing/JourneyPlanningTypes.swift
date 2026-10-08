@@ -76,7 +76,8 @@ extension RoutingPreferences {
     public init(preferredMode: TransitModeMask?, avoidTightTransfers: Bool) {
         self.init(maxTransfers: 3, minimumTransferSeconds: avoidTightTransfers ? 180 : 120,
                   sameStopTransferShortfallSeconds: 0,
-                  preferredMode: preferredMode)
+                  preferredMode: preferredMode,
+                  allowTightSameStopBusTransfers: !avoidTightTransfers)
     }
 }
 

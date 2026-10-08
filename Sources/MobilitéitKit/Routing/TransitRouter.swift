@@ -45,7 +45,9 @@ public enum BikePreference: String, Hashable, Sendable, Codable { case noPrefere
 public struct RoutingPreferences: Hashable, Sendable, Codable {
     public var maxTransfers: Int?
     public var minimumTransferSeconds: Int
-    /// Legacy decoding field. Transfer minima are always strict; this value is ignored.
+    /// Permit risk-labelled bus changes below an unscoped aggregate-stop feed buffer.
+    public var allowTightSameStopBusTransfers: Bool
+    /// Legacy decoding field. This value is ignored; use the explicit bus-transfer policy.
     public var sameStopTransferShortfallSeconds: Int
     public var suggestionPolicy: JourneySuggestionPolicy = .init()
     public var boardingBufferSeconds: Int = 0
@@ -57,7 +59,8 @@ public struct RoutingPreferences: Hashable, Sendable, Codable {
     public var bike: BikePreference
     public var routePreference: JourneyPreference
     public var frequencyPolicy: FrequencyRoutingPolicy
-    public init(maxTransfers: Int? = 3, minimumTransferSeconds: Int = 120, sameStopTransferShortfallSeconds: Int = 0, allowedModes: TransitModeMask = .all, preferredMode: TransitModeMask? = nil, wheelchair: WheelchairPreference = .noPreference, preferWheelchairAccessible: Bool = false, bike: BikePreference = .noPreference, routePreference: JourneyPreference = .fastest, frequencyPolicy: FrequencyRoutingPolicy = .conservative, boardingBufferSeconds: Int = 0, maximumWalkingSeconds: Int? = nil, suggestionPolicy: JourneySuggestionPolicy = .init()) {
+    public init(maxTransfers: Int? = 3, minimumTransferSeconds: Int = 120, sameStopTransferShortfallSeconds: Int = 0, allowedModes: TransitModeMask = .all, preferredMode: TransitModeMask? = nil, wheelchair: WheelchairPreference = .noPreference, preferWheelchairAccessible: Bool = false, bike: BikePreference = .noPreference, routePreference: JourneyPreference = .fastest, frequencyPolicy: FrequencyRoutingPolicy = .conservative, boardingBufferSeconds: Int = 0, maximumWalkingSeconds: Int? = nil, suggestionPolicy: JourneySuggestionPolicy = .init(), allowTightSameStopBusTransfers: Bool = false) {
+        self.allowTightSameStopBusTransfers = allowTightSameStopBusTransfers
         self.suggestionPolicy = suggestionPolicy
         self.boardingBufferSeconds = boardingBufferSeconds; self.maximumWalkingSeconds = maximumWalkingSeconds
         self.maxTransfers = maxTransfers; self.minimumTransferSeconds = minimumTransferSeconds; self.sameStopTransferShortfallSeconds = max(0, sameStopTransferShortfallSeconds); self.allowedModes = allowedModes
@@ -65,11 +68,12 @@ public struct RoutingPreferences: Hashable, Sendable, Codable {
         self.bike = bike; self.routePreference = routePreference; self.frequencyPolicy = frequencyPolicy
     }
     private enum CodingKeys: String, CodingKey {
-        case maxTransfers, minimumTransferSeconds, sameStopTransferShortfallSeconds, allowedModes, preferredMode
+        case maxTransfers, minimumTransferSeconds, sameStopTransferShortfallSeconds, allowedModes, preferredMode, allowTightSameStopBusTransfers
         case wheelchair, preferWheelchairAccessible, bike, routePreference, frequencyPolicy, boardingBufferSeconds, maximumWalkingSeconds, suggestionPolicy
     }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
+        allowTightSameStopBusTransfers = try values.decodeIfPresent(Bool.self, forKey: .allowTightSameStopBusTransfers) ?? false
         suggestionPolicy = try values.decodeIfPresent(JourneySuggestionPolicy.self, forKey: .suggestionPolicy) ?? .init()
         boardingBufferSeconds = try values.decodeIfPresent(Int.self, forKey: .boardingBufferSeconds) ?? 0
         maximumWalkingSeconds = try values.decodeIfPresent(Int.self, forKey: .maximumWalkingSeconds)
@@ -218,7 +222,7 @@ public struct JourneyStopEvent: Hashable, Sendable {
         self.platform = platform
     }
 }
-public struct TransitLeg: Hashable, Sendable { public let tripID: String; public let route: TransitRoute; public let headsign: String?; public let board: JourneyStopEvent; public let alight: JourneyStopEvent; public var intermediateStops: [JourneyStopEvent]; public let scheduledDeparture: Date; public let scheduledArrival: Date; public let effectiveDeparture: Date; public let effectiveArrival: Date; public let status: RealtimeTripStatus; public var requiredTransferSecondsAfterWalking: Int; public var boardingDeadline: Date? = nil; public var requiredTotalTransferSeconds: Int? = nil; public var instance: TransitInstanceIdentity? = nil; public var boardSequence: Int? = nil; public var alightSequence: Int? = nil; public var polyline: [Coordinate] = [] }
+public struct TransitLeg: Hashable, Sendable { public let tripID: String; public let route: TransitRoute; public let headsign: String?; public let board: JourneyStopEvent; public let alight: JourneyStopEvent; public var intermediateStops: [JourneyStopEvent]; public let scheduledDeparture: Date; public let scheduledArrival: Date; public let effectiveDeparture: Date; public let effectiveArrival: Date; public let status: RealtimeTripStatus; public var requiredTransferSecondsAfterWalking: Int; public var boardingDeadline: Date? = nil; public var requiredTotalTransferSeconds: Int? = nil; public var recommendedTotalTransferSeconds: Int? = nil; public var instance: TransitInstanceIdentity? = nil; public var boardSequence: Int? = nil; public var alightSequence: Int? = nil; public var polyline: [Coordinate] = [] }
 public struct InSeatContinuationLeg: Hashable, Sendable { public let fromTripID: String; public let toTripID: String }
 public enum JourneyLeg: Hashable, Sendable { case walk(WalkingLeg), transit(TransitLeg), inSeatContinuation(InSeatContinuationLeg) }
 public struct JourneySignature: Hashable, Sendable, Codable, Comparable, Identifiable { public let value: String; public var id: String { value }; public init(_ value: String) { self.value = value }; public static func < (l: Self, r: Self) -> Bool { l.value < r.value } }
@@ -1104,7 +1108,14 @@ public actor JourneyPlanningSession {
                     ride.boardSequence = trip.times[item.boardPos].sequence
                     ride.alightSequence = trip.times[item.alightPos].sequence
                     if !item.continuesFromPrevious, let previous = candidate.transitLegs.last(where: { $0.boardTime < item.boardTime }) {
-                        ride.requiredTotalTransferSeconds = Raptor.transferDecision(snapshot: snapshot, incoming: previous, at: item.board, outgoing: item.trip, preferences: query.preferences)?.requiredSeconds
+                        let required = Raptor.transferDecision(snapshot: snapshot, incoming: previous,
+                            at: item.board, outgoing: item.trip, preferences: query.preferences)?.requiredSeconds
+                        ride.requiredTotalTransferSeconds = required
+                        let declared = Raptor.selectedTransferRule(snapshot: snapshot, incoming: previous,
+                            at: item.board, outgoing: item.trip)?.minimum
+                        if let declared, let required, declared > required {
+                            ride.recommendedTotalTransferSeconds = declared
+                        }
                     }
                     legs[legs.count - 1] = .transit(ride)
                 }

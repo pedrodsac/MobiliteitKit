@@ -22,6 +22,7 @@ public enum JourneyQualityPolicy {
             || a.transferCount < b.transferCount
             || a.walkingDuration < b.walkingDuration
         return noWorse && better
+            && (!a.statusEvidence.tightTransfer || b.statusEvidence.tightTransfer)
     }
 
     /// Keep the initial list useful when a nearby earlier departure is better
@@ -32,7 +33,8 @@ public enum JourneyQualityPolicy {
             guard other.id != candidate.id,
                   !other.hasCancelledTransitLeg,
                   other.accessibility == candidate.accessibility,
-                  other.matchesPreferredMode == candidate.matchesPreferredMode else { return false }
+                  other.matchesPreferredMode == candidate.matchesPreferredMode,
+                  !other.statusEvidence.tightTransfer || candidate.statusEvidence.tightTransfer else { return false }
             let departureGap = candidate.effectiveDeparture.timeIntervalSince(other.effectiveDeparture)
             return departureGap >= 0 && departureGap <= 20 * 60
                 && candidate.effectiveArrival.timeIntervalSince(other.effectiveArrival) >= 10 * 60

@@ -48,6 +48,7 @@ extension Journey {
                     $0.addingTimeInterval(departure.timeIntervalSince(ride.effectiveDeparture))
                 }
                 replacement.requiredTotalTransferSeconds = ride.requiredTotalTransferSeconds
+                replacement.recommendedTotalTransferSeconds = ride.recommendedTotalTransferSeconds
                 replacement.instance = instance; replacement.boardSequence = boardSequence
                 replacement.alightSequence = alightSequence; replacement.polyline = ride.polyline
                 updated.append(.transit(replacement))

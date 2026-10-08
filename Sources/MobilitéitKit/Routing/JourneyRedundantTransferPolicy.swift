@@ -16,6 +16,7 @@ extension JourneyQualityPolicy {
               other.walkingDuration <= candidate.walkingDuration + transferPenaltySeconds,
               preferences.routePreference != .lessWalking || other.walkingDuration <= candidate.walkingDuration
         else { return false }
+        guard !other.statusEvidence.tightTransfer || candidate.statusEvidence.tightTransfer else { return false }
         let rides = candidate.legs.compactMap { if case let .transit(ride) = $0 { ride } else { nil } }
         let replacement = other.legs.compactMap { if case let .transit(ride) = $0 { ride } else { nil } }
         guard replacement.count >= 2, replacement.count < rides.count else { return false }

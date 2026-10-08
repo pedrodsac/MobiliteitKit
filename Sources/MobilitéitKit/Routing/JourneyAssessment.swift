@@ -51,7 +51,10 @@ public enum JourneyItineraryValidator {
             let sameStop = incoming.1.alight.stop.id == outgoing.1.board.stop.id && movement == 0
             if slack < 0 {
                 risks[outgoing.0] = .missed
-            } else if sameStop && gap < 120 { risks[outgoing.0] = .tight }
+            } else if sameStop && (gap < 120
+                || outgoing.1.recommendedTotalTransferSeconds.map { gap < Double($0) } == true) {
+                risks[outgoing.0] = .tight
+            }
         }
         return risks
     }
