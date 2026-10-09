@@ -23,7 +23,8 @@ enum DisplayedJourneyRealtime {
     }
 
     static func acquire(targets: [RealtimeBoardTarget], router: TransitRouter,
-                        refresh: RealtimeRefreshPolicy, timeout: Duration) async throws -> [RealtimePatchBatch] {
+                        refresh: RealtimeRefreshPolicy, timeout: Duration,
+                        tripIDs: Set<String> = []) async throws -> [RealtimePatchBatch] {
         var seen: Set<String> = []
         let stopIDs = targets.map(\.stopID).filter { seen.insert($0).inserted }
         var batches: [RealtimePatchBatch] = []
@@ -39,7 +40,8 @@ enum DisplayedJourneyRealtime {
             do {
                 if let batch = try await router.realtimePatches(for: .init(stopIDs: ids,
                     from: from, through: through, refreshPolicy: refresh,
-                    maximumConcurrentRequests: 8, timeout: timeout, deadline: deadline, targets: selected)) {
+                    maximumConcurrentRequests: 8, timeout: timeout, deadline: deadline, targets: selected,
+                    tripIDs: tripIDs)) {
                     batches.append(batch)
                 }
             } catch is CancellationError { throw CancellationError() }

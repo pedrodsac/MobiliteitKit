@@ -38,6 +38,38 @@ import Testing
         }
     }
 
+    @Test func selectedJourneyRefreshLeavesOtherItinerariesUnchanged() async throws {
+        let fixture = try await RealtimeTestFixture(
+            stopTimes: "first,08:00:00,08:00:00,a,1\nfirst,08:10:00,08:10:00,b,2\n"
+                + "second,08:15:00,08:15:00,b,1\nsecond,08:25:00,08:25:00,c,2\n"
+                + "direct,08:30:00,08:30:00,a,1\ndirect,08:40:00,08:40:00,c,2\n",
+            trips: "route,service,first,Transfer\nroute,service,second,Destination\nroute,service,direct,Destination\n")
+        defer { fixture.remove() }
+        let provider = DisplayedRealtimeProvider()
+        let planner = JourneyPlanner(realtimeProvider: provider)
+        let anchor = RealtimeTestFixture.date("07:55:00")
+        let session = try await planner.makePlanningSession(databaseURL: fixture.database, request: .init(
+            origin: .stop(id: "a"), destination: .stop(id: "c"), time: .departAt(anchor),
+            preferences: .init(maxTransfers: 1), realtimeAcquisitionBudgetMilliseconds: 0))
+        let initial = try await session.calculate()
+        let direct = try #require(initial.journeys.first { journey in
+            journey.legs.contains { if case let .transit(ride) = $0 { ride.tripID == "direct" } else { false } }
+        })
+        let others = initial.journeys.filter { $0.id != direct.id }
+        #expect(!others.isEmpty)
+        let updated = try await session.refreshDisplayedRealtime(journeyID: direct.id, refresh: .forceRefresh, now: anchor)
+        let requests = await provider.requests
+        #expect(requests.count == 1)
+        #expect(requests.first?.stopIDs == ["a"])
+        #expect(requests.first?.tripIDs == ["direct"])
+        #expect(requests.first?.refreshPolicy == .forceRefresh)
+        #expect(updated.journeys.first { $0.id == direct.id }?.statusEvidence.coverage == .live)
+        #expect(updated.journeys.filter { $0.id != direct.id } == others)
+        #expect(updated.browsingWindow == initial.browsingWindow)
+        #expect(updated.laterCursor == initial.laterCursor)
+        #expect(await session.replacementSearchCount == 0)
+    }
+
     @Test func everyBoardGetsAnOpportunityWhenAnEarlierGroupFails() async throws {
         let fixture = try await RealtimeTestFixture(); defer { fixture.remove() }
         let provider = DisplayedRealtimeProvider(failFirst: true)
@@ -177,6 +209,7 @@ private actor DisplayedRealtimeProvider: RealtimeRoutingProvider {
             ])
         }
         return .init(patches: [
+            patch("direct", from: "a", to: "c", departure: "08:30:00", arrival: "08:40:00", delay: 60),
             patch("first", from: "a", to: "b", departure: "08:00:00", arrival: "08:10:00",
                   delay: outcome == "missed" ? 600 : 60),
             patch("second", from: "b", to: "c", departure: "08:15:00", arrival: "08:25:00",

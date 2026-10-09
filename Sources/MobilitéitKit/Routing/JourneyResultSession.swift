@@ -196,16 +196,26 @@ public actor JourneyResultSession {
     public func result() -> JourneyPlanningResult { snapshot() }
 
     /// Updates every accumulated itinerary without restarting search or paging.
-    /// Hosts can call immediately after publication and periodically while visible.
-    public func refreshDisplayedRealtime(refresh: RealtimeRefreshPolicy = .useCache,
+    /// Supply a journey ID to refresh only that itinerary, without changing alternatives.
+    public func refreshDisplayedRealtime(journeyID: JourneySignature? = nil,
+                                         refresh: RealtimeRefreshPolicy = .useCache,
                                          timeout: Duration = .seconds(8),
                                          now: Date? = nil) async throws -> JourneyPlanningResult {
         let expectedOperation = operation
         let expectedGeneration = generation
-        let targets = DisplayedJourneyRealtime.targets(for: journeys.filter { !invalidated.contains($0.id) },
-                                                       now: now ?? clock())
+        let selected = journeys.filter {
+            !invalidated.contains($0.id) && (journeyID == nil || $0.id == journeyID)
+        }
+        let targets = DisplayedJourneyRealtime.targets(for: selected, now: now ?? clock())
+        let selectedInstances = Set(selected.flatMap { journey in
+            journey.legs.compactMap { leg -> RealtimePatchKey? in
+                guard case let .transit(ride) = leg, let instance = ride.instance else { return nil }
+                return .init(tripID: ride.tripID, serviceDate: instance.serviceDate)
+            }
+        })
         let batches = try await DisplayedJourneyRealtime.acquire(targets: targets, router: router,
-                                                                 refresh: refresh, timeout: timeout)
+                                                                 refresh: refresh, timeout: timeout,
+                                                                 tripIDs: journeyID == nil ? [] : Set(selectedInstances.map(\.tripID)))
         try Task.checkCancellation()
         guard operation == expectedOperation, generation == expectedGeneration else {
             throw JourneyPlanningError.supersededRequest
@@ -215,6 +225,7 @@ public actor JourneyResultSession {
         }, uniquingKeysWith: { old, new in old.merging(new) })
         for patch in batches.flatMap(\.patches) {
             let key = RealtimePatchKey(tripID: patch.tripID, serviceDate: patch.serviceDate)
+            guard journeyID == nil || selectedInstances.contains(key) else { continue }
             evidence[key] = evidence[key].map { $0.merging(patch) } ?? patch
         }
         let observedNow = clock()
@@ -224,6 +235,7 @@ public actor JourneyResultSession {
         }
         frozenPatches = Array(evidence.values)
         journeys = journeys.compactMap { journey in
+            guard journeyID == nil || journey.id == journeyID else { return journey }
             guard let revised = journey.applyingRealtime(evidence) else {
                 invalidated.insert(journey.id); return nil
             }
