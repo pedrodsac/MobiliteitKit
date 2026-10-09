@@ -113,7 +113,12 @@ extension HafasRealtimeRoutingProvider {
                                     : pass?.realtimeBoarding ?? pass?.boarding,
                                 alightingAllowed: pass?.cancelled == true ? false
                                     : pass?.realtimeAlighting ?? pass?.alighting,
-                                observedAt: observedAt))
+                                observedAt: observedAt,
+                                departurePrognosisType: pass?.departurePrognosisType
+                                    ?? (position == boarding ? live.prognosisType : nil),
+                                arrivalPrognosisType: pass?.arrivalPrognosisType,
+                                cancelledDeparture: pass?.cancelled == true ? true : pass?.cancelledDeparture,
+                                cancelledArrival: pass?.cancelled == true ? true : pass?.cancelledArrival))
         }
         let result = RealtimeTimeline.constrainingMinutePrecision(RealtimeTripPatch(tripID: candidate.departure.tripID,
                                        serviceDate: candidate.serviceDate, status: status, events: events))

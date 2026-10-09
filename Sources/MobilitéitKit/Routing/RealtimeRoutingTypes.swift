@@ -18,6 +18,10 @@ public struct RealtimeStopEventPatch: Hashable, Sendable {
     public let effectiveArrival: Date?
     public let arrivalSource: RealtimeTimingSource
     public let platform: String?
+    public let departurePrognosisType: String?
+    public let arrivalPrognosisType: String?
+    public let cancelledDeparture: Bool?
+    public let cancelledArrival: Bool?
     public init(
         stopID: String,
         scheduledDeparture: Date? = nil,
@@ -30,7 +34,9 @@ public struct RealtimeStopEventPatch: Hashable, Sendable {
         stopSequence: Int? = nil,
         boardingAllowed: Bool? = nil,
         alightingAllowed: Bool? = nil,
-        observedAt: Date? = nil, departureObservedAt: Date? = nil, arrivalObservedAt: Date? = nil
+        observedAt: Date? = nil, departureObservedAt: Date? = nil, arrivalObservedAt: Date? = nil,
+        departurePrognosisType: String? = nil, arrivalPrognosisType: String? = nil,
+        cancelledDeparture: Bool? = nil, cancelledArrival: Bool? = nil
     ) {
         self.stopID = stopID
         self.stopSequence = stopSequence
@@ -46,6 +52,10 @@ public struct RealtimeStopEventPatch: Hashable, Sendable {
         self.effectiveArrival = effectiveArrival
         self.arrivalSource = arrivalSource
         self.platform = platform
+        self.departurePrognosisType = departurePrognosisType
+        self.arrivalPrognosisType = arrivalPrognosisType
+        self.cancelledDeparture = cancelledDeparture
+        self.cancelledArrival = cancelledArrival
     }
 }
 /// A high-confidence, already matched GTFS trip-instance update. The mapping

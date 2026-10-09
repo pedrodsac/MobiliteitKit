@@ -59,7 +59,11 @@ extension RealtimeTripPatch {
                                 boardingAllowed: boarding, alightingAllowed: alighting,
                                 observedAt: observation,
                                 departureObservedAt: departure ? update.departureObservedAt : old.departureObservedAt,
-                                arrivalObservedAt: arrival ? update.arrivalObservedAt : old.arrivalObservedAt)
+                                arrivalObservedAt: arrival ? update.arrivalObservedAt : old.arrivalObservedAt,
+                                departurePrognosisType: departure ? update.departurePrognosisType : old.departurePrognosisType,
+                                arrivalPrognosisType: arrival ? update.arrivalPrognosisType : old.arrivalPrognosisType,
+                                cancelledDeparture: latest ? update.cancelledDeparture : old.cancelledDeparture,
+                                cancelledArrival: latest ? update.cancelledArrival : old.cancelledArrival)
         }
         let oldDate = events.compactMap(\.observedAt).max() ?? .distantPast
         let newDate = incoming.events.compactMap(\.observedAt).max() ?? .distantPast
@@ -103,7 +107,11 @@ extension RealtimeTripPatch {
                 alightingAllowed: metadata ? event.alightingAllowed : nil,
                 observedAt: stamps.max(),
                 departureObservedAt: departure ? event.departureObservedAt : nil,
-                arrivalObservedAt: arrival ? event.arrivalObservedAt : nil)
+                arrivalObservedAt: arrival ? event.arrivalObservedAt : nil,
+                departurePrognosisType: departure ? event.departurePrognosisType : nil,
+                arrivalPrognosisType: arrival ? event.arrivalPrognosisType : nil,
+                cancelledDeparture: metadata ? event.cancelledDeparture : nil,
+                cancelledArrival: metadata ? event.cancelledArrival : nil)
         }
         let latest = events.compactMap(\.observedAt).max()
         return .init(tripID: tripID, serviceDate: serviceDate,

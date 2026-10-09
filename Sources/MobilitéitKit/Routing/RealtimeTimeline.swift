@@ -35,7 +35,9 @@ enum RealtimeTimeline {
                 effectiveArrival: arrival.0, arrivalSource: arrival.1, platform: event.platform,
                 stopSequence: event.stopSequence, boardingAllowed: event.boardingAllowed,
                 alightingAllowed: event.alightingAllowed, observedAt: event.observedAt,
-                departureObservedAt: departure.2, arrivalObservedAt: arrival.2)
+                departureObservedAt: departure.2, arrivalObservedAt: arrival.2,
+                departurePrognosisType: event.departurePrognosisType, arrivalPrognosisType: event.arrivalPrognosisType,
+                cancelledDeparture: event.cancelledDeparture, cancelledArrival: event.cancelledArrival)
         }
         return .init(tripID: patch.tripID, serviceDate: patch.serviceDate,
                      status: patch.status, events: events.reversed())
@@ -120,7 +122,9 @@ enum RealtimeTimeline {
                 departureSource: d.1, scheduledArrival: arrival, effectiveArrival: a.0, arrivalSource: a.1,
                 platform: event?.platform, stopSequence: time.sequence,
                 boardingAllowed: event?.boardingAllowed, alightingAllowed: event?.alightingAllowed,
-                observedAt: event?.observedAt ?? delay?.observed, departureObservedAt: event?.departureObservedAt ?? delay?.observed, arrivalObservedAt: event?.arrivalObservedAt ?? delay?.observed))
+                observedAt: event?.observedAt ?? delay?.observed, departureObservedAt: event?.departureObservedAt ?? delay?.observed, arrivalObservedAt: event?.arrivalObservedAt ?? delay?.observed,
+                departurePrognosisType: event?.departurePrognosisType, arrivalPrognosisType: event?.arrivalPrognosisType,
+                cancelledDeparture: event?.cancelledDeparture, cancelledArrival: event?.cancelledArrival))
         }
         let result = constrainingMinutePrecision(RealtimeTripPatch(tripID: patch.tripID, serviceDate: patch.serviceDate, events: events))
         return result.isChronological ? result : rejected()

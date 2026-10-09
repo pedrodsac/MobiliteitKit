@@ -722,6 +722,10 @@ public struct HafasPasslistStop: Hashable, Sendable, Codable {
     public let realtimeArrivalDate: String?
     public let realtimeDepartureTrack: String?
     public let realtimeArrivalTrack: String?
+    public let departurePrognosisType: String?
+    public let arrivalPrognosisType: String?
+    public let cancelledDeparture: Bool?
+    public let cancelledArrival: Bool?
     public let cancelled: Bool?
     public let boarding: Bool?
     public let alighting: Bool?
@@ -733,6 +737,8 @@ public struct HafasPasslistStop: Hashable, Sendable, Codable {
         case realtimeDepartureTime = "rtDepTime", realtimeDepartureDate = "rtDepDate"
         case realtimeArrivalTime = "rtArrTime", realtimeArrivalDate = "rtArrDate"
         case realtimeDepartureTrack = "rtDepTrack", realtimeArrivalTrack = "rtArrTrack"
+        case departurePrognosisType = "depPrognosisType", arrivalPrognosisType = "arrPrognosisType"
+        case cancelledDeparture, cancelledArrival
         case cancelled, boarding, alighting, realtimeBoarding = "rtBoarding", realtimeAlighting = "rtAlighting"
     }
 
@@ -754,6 +760,10 @@ public struct HafasPasslistStop: Hashable, Sendable, Codable {
         realtimeArrivalDate = try values.decodeIfPresent(String.self, forKey: .realtimeArrivalDate)
         realtimeDepartureTrack = try values.decodeIfPresent(String.self, forKey: .realtimeDepartureTrack)
         realtimeArrivalTrack = try values.decodeIfPresent(String.self, forKey: .realtimeArrivalTrack)
+        departurePrognosisType = try values.decodeIfPresent(String.self, forKey: .departurePrognosisType)
+        arrivalPrognosisType = try values.decodeIfPresent(String.self, forKey: .arrivalPrognosisType)
+        cancelledDeparture = try values.decodeIfPresent(Bool.self, forKey: .cancelledDeparture)
+        cancelledArrival = try values.decodeIfPresent(Bool.self, forKey: .cancelledArrival)
         cancelled = try values.decodeIfPresent(Bool.self, forKey: .cancelled)
         boarding = try values.decodeIfPresent(Bool.self, forKey: .boarding)
         alighting = try values.decodeIfPresent(Bool.self, forKey: .alighting)
