@@ -22,6 +22,10 @@ struct BlockContinuationTests {
         let journey = try #require(result.journeys.first)
         #expect(transitTripInstanceSequence(journey) == ["seven", "twentyfive"])
         #expect(journey.transferCount == 0)
+        let linked = try await fixture.router.continuingTrips(for: .init(feedGeneration: 7, tripID: "seven", serviceDate: try GTFSDate(parsing: "20260904")))
+        #expect(linked.map(\.instance.tripID) == ["twentyfive"])
+        #expect(linked.first?.route.shortName == "25")
+        #expect(linked.first?.boardingSequence == 1)
         let planning = try await fixture.planning(.init(origin: .stop(id: "a"), destination: .stop(id: "d"),
             time: arriveBy ? .arriveBy(date(hour: 21)) : .departAt(date(hour: 20)), preferences: .init(maxTransfers: 0)))
         let published = try await planning.calculate(refresh: .scheduleOnly)
@@ -35,6 +39,7 @@ struct BlockContinuationTests {
         files["transfers.txt"] = "from_stop_id,to_stop_id,from_trip_id,to_trip_id,transfer_type\nb,b,seven,twentyfive,\(type)\n"
         let fixture = try await RoutingPreventionFixture(files: files); defer { fixture.remove() }
         #expect(try await fixture.profile(fixture.query(preferences: .init(maxTransfers: 0), anchor: date(hour: 20))).journeys.isEmpty)
+        #expect(try await fixture.router.continuingTrips(for: .init(feedGeneration: 7, tripID: "seven", serviceDate: try GTFSDate(parsing: "20260904"))).isEmpty)
     }
 
     @Test(arguments: ["missing", "differentStop", "overlap", "ambiguous", "intervening", "inactive"])
@@ -51,5 +56,6 @@ struct BlockContinuationTests {
         }
         let fixture = try await RoutingPreventionFixture(files: files); defer { fixture.remove() }
         #expect(try await fixture.profile(fixture.query(preferences: .init(maxTransfers: 0), anchor: date(hour: 20))).journeys.isEmpty)
+        #expect(try await fixture.router.continuingTrips(for: .init(feedGeneration: 7, tripID: "seven", serviceDate: try GTFSDate(parsing: "20260904"))).isEmpty)
     }
 }
