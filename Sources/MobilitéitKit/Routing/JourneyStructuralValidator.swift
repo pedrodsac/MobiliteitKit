@@ -64,7 +64,8 @@ enum JourneyStructuralValidator {
                       time.map({ ride.boardTime >= $0 }) != false else { return .overlappingLegs }
                 if let incoming, ride.continuesFromPrevious {
                     guard incoming.alightPos == snapshot.trips[incoming.trip].times.count - 1, ride.boardPos == 0,
-                          Raptor.selectedTransferRule(snapshot: snapshot, incoming: incoming, at: ride.board, outgoing: ride.trip)?.type == 4
+                          Raptor.permitsContinuation(snapshot: snapshot, incoming: incoming, outgoing: ride.trip,
+                              blockTarget: ride.day == incoming.day ? Raptor.blockSuccessor(snapshot: snapshot, incoming: incoming) : nil)
                     else { return .invalidContinuation }
                 } else if let incoming {
                     guard let allowance = Raptor.transferDecision(snapshot: snapshot, incoming: incoming,

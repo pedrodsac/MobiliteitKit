@@ -41,8 +41,8 @@ struct RoutingPreventionSearchTests {
         if type != 0 { files["transfers.txt"] = "from_trip_id,to_trip_id,transfer_type\nin,out,\(type)\n" }
         let fixture = try await RoutingPreventionFixture(files: files); defer { fixture.remove() }
         let result = try await fixture.profile(fixture.query(preferences: .init(maxTransfers: 0)))
-        #expect(result.journeys.isEmpty == (type != 4))
-        if type == 4 {
+        #expect(result.journeys.isEmpty == (type == 5))
+        if type != 5 {
             let ride = try #require(result.journeys.first)
             #expect(ride.transferCount == 0)
             #expect(ride.summary.transferGaps.isEmpty)

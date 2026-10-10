@@ -1,8 +1,8 @@
 import Foundation
 
 extension Raptor {
-    /// Closure within a vehicle-change round. Only explicit, linked type-4 rules
-    /// can extend a ride. A block ID or matching line label never grants this permission.
+    /// Closure within a vehicle-change round for explicit links and consecutive
+    /// trips in a GTFS vehicle block. Explicit transfer restrictions take precedence.
     static func relaxContinuations(snapshot: RoutingSnapshot, query: RouteQuery,
         serviceDays: [SnapshotServiceDay], patches: [PatchKey: PatchOverlay], searchStart: Date,
         scheduledLowerBound: Date, upperBound: Date,
@@ -13,7 +13,20 @@ extension Raptor {
         let patternByTrip = Dictionary(uniqueKeysWithValues: snapshot.patterns.enumerated().flatMap { index, pattern in
             pattern.trips.map { ($0, index) }
         })
+        let blocks = Dictionary(grouping: snapshot.trips.indices.filter {
+            snapshot.trips[$0].blockID?.isEmpty == false && !snapshot.trips[$0].isFrequencyTemplate
+        }, by: { snapshot.trips[$0].blockID! })
         var instances: [Int: [ActiveTripInstance]] = [:]
+        func activeInstances(_ target: Int) -> [ActiveTripInstance] {
+            guard let pattern = patternByTrip[target] else { return [] }
+            if instances[pattern] == nil {
+                instances[pattern] = activeTripInstances(patternID: pattern, snapshot: snapshot, query: query,
+                    relevantServiceDays: serviceDays, patchesByInstance: patches,
+                    scheduledLowerBound: scheduledLowerBound, searchStart: searchStart,
+                    profileUpperBound: upperBound, includeUnboardable: true)
+            }
+            return (instances[pattern] ?? []).filter { $0.tripIndex == target }
+        }
         var queue = labels.keys.sorted().flatMap { labels[$0]?.ordered ?? [] }
         var cursor = 0
         while cursor < queue.count {
@@ -21,19 +34,15 @@ extension Raptor {
             let source = queue[cursor]; cursor += 1
             guard let incoming = source.lastTransit, incoming.alightPos == snapshot.trips[incoming.trip].times.count - 1,
                   source.transferWalkSeconds == 0, source.time == incoming.alightTime else { continue }
-            let targets = Set((links[incoming.trip] ?? []).compactMap(\.toTrip)).sorted()
+            let blockTarget = blockSuccessor(snapshot: snapshot, incoming: incoming, members: snapshot.trips[incoming.trip].blockID.flatMap { blocks[$0] } ?? [])
+            let targets = Set((links[incoming.trip] ?? []).compactMap(\.toTrip) + [blockTarget].compactMap { $0 }).sorted()
             for target in targets {
                 let trip = snapshot.trips[target]
+                let explicitLink = selectedTransferRule(snapshot: snapshot, incoming: incoming, at: incoming.alight, outgoing: target)?.type == 4
                 guard trip.times[0].stop == incoming.alight,
-                      selectedTransferRule(snapshot: snapshot, incoming: incoming, at: incoming.alight, outgoing: target)?.type == 4,
-                      let pattern = patternByTrip[target] else { continue }
-                if instances[pattern] == nil {
-                    instances[pattern] = activeTripInstances(patternID: pattern, snapshot: snapshot, query: query,
-                        relevantServiceDays: serviceDays, patchesByInstance: patches,
-                        scheduledLowerBound: scheduledLowerBound, searchStart: searchStart,
-                        profileUpperBound: upperBound, includeUnboardable: true)
-                }
-                for instance in instances[pattern] ?? [] where instance.tripIndex == target {
+                      permitsContinuation(snapshot: snapshot, incoming: incoming, outgoing: target, blockTarget: blockTarget) else { continue }
+                for instance in activeInstances(target) {
+                    if !explicitLink && instance.serviceDay.date != incoming.day { continue }
                     let day = instance.serviceDay.date
                     guard !source.tripKey.contains(.init(trip: target, day: day)),
                           let departure = instance.effectiveDepartures[0], let scheduled = instance.scheduledDepartures[0],
