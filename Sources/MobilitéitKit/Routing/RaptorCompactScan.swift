@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 extension Raptor {
     struct BoardingIndex: Sendable {
@@ -53,8 +54,13 @@ extension Raptor {
     }
 
     struct CompactScratch: Sendable {
-        var profiles: [CompactProfile?] = []
-        var peers: [UInt64] = []
+        struct Storage: Sendable {
+            var profiles: [CompactProfile?] = []
+            var peers: [UInt64] = []
+        }
+        // Ownership transfers only after a worker finishes. The lock also
+        // enforces exclusive access without unchecked Sendable or array copies.
+        let storage = OSAllocatedUnfairLock(initialState: Storage())
     }
 
     static func scanPatternsCompact(chunkIndex: Int, patternIDs: [Int], snapshot: RoutingSnapshot,
@@ -62,114 +68,127 @@ extension Raptor {
         activeInstancesByPattern: [Int: [ActiveTripInstance]], reachableStops: [Bool]?,
         round: Int, maxRounds: Int, finalRoundAlightStops: Set<Int>,
         scratch: CompactScratch = .init()) throws -> PatternScanResult {
-        let started = ContinuousClock.now
-        var next = scratch.profiles
-        var incomingPeers = scratch.peers
-        next.removeAll(keepingCapacity: true)
-        next.append(contentsOf: repeatElement(nil, count: snapshot.stops.count))
-        incomingPeers.removeAll(keepingCapacity: true)
-        incomingPeers.append(contentsOf: repeatElement(0, count: snapshot.stops.count))
-        var nextID = (chunkIndex + 1) * 1_000_000_000
-        var scannedInstances = 0, boardingChecks = 0, feasibleBoardings = 0
-        var alightingChecks = 0, attempts = 0, retained = 0, rejected = 0
-        var decisions: [TransferDecisionKey: CachedTransferDecision] = [:]
-        for patternID in patternIDs {
-            try Task.checkCancellation()
-            let startPosition = patternStartPositions[patternID]
-            guard startPosition != Int.max else { continue }
-            let instances = activeInstancesByPattern[patternID] ?? []
-            scannedInstances += instances.count
-            for instance in instances {
+        try scratch.storage.withLock { storage in
+            let started = ContinuousClock.now
+            var next: [CompactProfile?] = []
+            var incomingPeers: [UInt64] = []
+            swap(&next, &storage.profiles)
+            swap(&incomingPeers, &storage.peers)
+            defer {
+                for index in next.indices { next[index] = nil }
+                swap(&next, &storage.profiles)
+                swap(&incomingPeers, &storage.peers)
+            }
+            if next.count != snapshot.stops.count {
+                next = Array(repeating: nil, count: snapshot.stops.count)
+            }
+            if incomingPeers.count != snapshot.stops.count {
+                incomingPeers = Array(repeating: 0, count: snapshot.stops.count)
+            } else {
+                for index in incomingPeers.indices { incomingPeers[index] = 0 }
+            }
+            var nextID = (chunkIndex + 1) * 1_000_000_000
+            var scannedInstances = 0, boardingChecks = 0, feasibleBoardings = 0
+            var alightingChecks = 0, attempts = 0, retained = 0, rejected = 0
+            var decisions: [TransferDecisionKey: CachedTransferDecision] = [:]
+            for patternID in patternIDs {
                 try Task.checkCancellation()
-                let tripIndex = instance.tripIndex
-                let trip = snapshot.trips[tripIndex]
-                let day = instance.serviceDay.date
-                let preferred = query.preferences.preferredMode?.contains(
-                    routeType: snapshot.routes[trip.route].type) ?? false
-                // This eligibility is invariant for every boarding on the instance.
-                let alights = trip.times.indices.compactMap { position -> (position: Int, stop: Int, arrival: Double)? in
-                    let time = trip.times[position]
-                    guard transitAllowed(snapshot: snapshot, trip: tripIndex, stop: time.stop, preferences: query.preferences, stayingAboard: snapshot.hasContinuations && position == trip.times.count - 1), (time.dropoff == 0 || (snapshot.hasContinuations && position == trip.times.count - 1)), instance.alightingAllowed[position],
-                          instance.scheduledArrivals[position] != nil,
-                          let arrival = instance.effectiveArrivals[position],
-                          reachableStops?[time.stop] != false,
-                          snapshot.hasContinuations || round + 1 < maxRounds || finalRoundAlightStops.contains(time.stop)
-                    else { return nil }
-                    return (position, time.stop, arrival.timeIntervalSinceReferenceDate)
-                }
-                // Every boarding/alighting candidate below has this incoming
-                // trip. Reuse its peer mask instead of hashing the same key
-                // for every rejected candidate. Insertions refresh the mask.
-                for alight in alights {
-                    incomingPeers[alight.stop] = next[alight.stop]?.byIncomingTrip[tripIndex, default: 0] ?? 0
-                }
-                var firstAlight = 0
-                for boardPos in startPosition..<trip.times.count {
+                let startPosition = patternStartPositions[patternID]
+                guard startPosition != Int.max else { continue }
+                let instances = activeInstancesByPattern[patternID] ?? []
+                scannedInstances += instances.count
+                for instance in instances {
                     try Task.checkCancellation()
-                    while firstAlight < alights.count && alights[firstAlight].position <= boardPos { firstAlight += 1 }
-                    let board = trip.times[boardPos]
-                    guard let scheduled = instance.scheduledDepartures[boardPos],
-                          let effective = instance.effectiveDepartures[boardPos],
-                          board.pickup == 0, instance.boardingAllowed[boardPos],
-                          transitAllowed(snapshot: snapshot, trip: tripIndex, stop: board.stop, preferences: query.preferences)
-                    else { continue }
-                    let deadline = instance.conservativeDepartures[boardPos] ?? effective
-                    let departure = deadline.timeIntervalSinceReferenceDate
-                    let eligible = boardings.eligibleSources(at: board.stop,
-                        through: departure)
-                    // Counts include the excluded arrivals for compatibility with
-                    // the reference's logical work counters.
-                    boardingChecks += boardings.profiles[board.stop]?.range.count ?? 0
-                    var mask = eligible.mask
-                    while mask != 0 {
-                        let sourceIndex = eligible.start + mask.trailingZeroBitCount
-                        mask &= mask - 1
-                        let source = boardings.sources[sourceIndex]
-                        guard !source.tripKey.contains(.init(trip: tripIndex, day: day)),
-                              let transfer = cachedTransferDecision(snapshot: snapshot, incoming: source.lastTransit,
-                                at: board.stop, outgoing: tripIndex, preferences: query.preferences, cache: &decisions)
+                    let tripIndex = instance.tripIndex
+                    let trip = snapshot.trips[tripIndex]
+                    let day = instance.serviceDay.date
+                    let preferred = query.preferences.preferredMode?.contains(
+                        routeType: snapshot.routes[trip.route].type) ?? false
+                    // This eligibility is invariant for every boarding on the instance.
+                    let alights = trip.times.indices.compactMap { position -> (position: Int, stop: Int, arrival: Double)? in
+                        let time = trip.times[position]
+                        guard transitAllowed(snapshot: snapshot, trip: tripIndex, stop: time.stop, preferences: query.preferences, stayingAboard: snapshot.hasContinuations && position == trip.times.count - 1), (time.dropoff == 0 || (snapshot.hasContinuations && position == trip.times.count - 1)), instance.alightingAllowed[position],
+                              instance.scheduledArrivals[position] != nil,
+                              let arrival = instance.effectiveArrivals[position],
+                              reachableStops?[time.stop] != false,
+                              snapshot.hasContinuations || round + 1 < maxRounds || finalRoundAlightStops.contains(time.stop)
+                        else { return nil }
+                        return (position, time.stop, arrival.timeIntervalSinceReferenceDate)
+                    }
+                    // Every boarding/alighting candidate below has this incoming
+                    // trip. Reuse its peer mask instead of hashing the same key
+                    // for every rejected candidate. Insertions refresh the mask.
+                    for alight in alights {
+                        incomingPeers[alight.stop] = next[alight.stop]?.byIncomingTrip[tripIndex, default: 0] ?? 0
+                    }
+                    var firstAlight = 0
+                    for boardPos in startPosition..<trip.times.count {
+                        try Task.checkCancellation()
+                        while firstAlight < alights.count && alights[firstAlight].position <= boardPos { firstAlight += 1 }
+                        let board = trip.times[boardPos]
+                        guard let scheduled = instance.scheduledDepartures[boardPos],
+                              let effective = instance.effectiveDepartures[boardPos],
+                              board.pickup == 0, instance.boardingAllowed[boardPos],
+                              transitAllowed(snapshot: snapshot, trip: tripIndex, stop: board.stop, preferences: query.preferences)
                         else { continue }
-                        let additional = source.lastTransit == nil ? 0
-                            : max(query.preferences.boardingBufferSeconds, transfer.requiredSeconds - source.transferWalkSeconds)
-                        let shortfall = source.transferWalkSeconds == 0 ? transfer.allowedShortfallSeconds : 0
-                        guard departure >= source.timeSeconds + Double(additional - shortfall) else { continue }
-                        feasibleBoardings += 1
-                        let slack = Int(departure - source.timeSeconds) - additional
-                        let minimumSlack = source.lastTransit == nil ? source.minimumSlack : min(source.minimumSlack, slack)
-                        let totalSlack = source.lastTransit == nil ? source.totalSlack : source.totalSlack + slack
-                        let firstDeparture = source.firstDepartureSeconds ?? departure
-                        var key = ScanKey(id: 0, arrival: 0, departure: firstDeparture,
-                            doorDeparture: firstDeparture - Double(source.accessSeconds),
-                            walkingSeconds: source.walkingSeconds, minimumSlack: minimumSlack,
-                            totalSlack: totalSlack, preferred: source.containsPreferredMode || preferred,
-                            prefixRank: boardings.prefixRanks[sourceIndex], incomingTrip: tripIndex, serviceDate: day)
-                        for position in firstAlight..<alights.count {
-                            let alight = alights[position]
-                            let alightPos = alight.position
-                            let stop = alight.stop
-                            alightingChecks += 1
-                            key.alightPosition = alightPos
-                            key.arrival = alight.arrival
-                            key.id = nextID
-                            if consider(key, profile: &next[stop], peers: &incomingPeers[stop], nextID: &nextID, attempts: &attempts,
-                                rejected: &rejected, path: {
-                                    .init(sourceIndex: sourceIndex, trip: tripIndex, board: board.stop, alight: stop,
-                                        boardPos: boardPos, alightPos: alightPos, day: day, scheduledBoard: scheduled,
-                                        scheduledAlight: instance.scheduledArrivals[alightPos]!, boardTime: effective,
-                                        alightTime: instance.effectiveArrivals[alightPos]!, requiredTransferSeconds: additional, boardingDeadline: deadline)
-                                }) { retained += 1 }
+                        let deadline = instance.conservativeDepartures[boardPos] ?? effective
+                        let departure = deadline.timeIntervalSinceReferenceDate
+                        let eligible = boardings.eligibleSources(at: board.stop,
+                            through: departure)
+                        // Counts include the excluded arrivals for compatibility with
+                        // the reference's logical work counters.
+                        boardingChecks += boardings.profiles[board.stop]?.range.count ?? 0
+                        var mask = eligible.mask
+                        while mask != 0 {
+                            let sourceIndex = eligible.start + mask.trailingZeroBitCount
+                            mask &= mask - 1
+                            let source = boardings.sources[sourceIndex]
+                            guard !source.tripKey.contains(.init(trip: tripIndex, day: day)),
+                                  let transfer = cachedTransferDecision(snapshot: snapshot, incoming: source.lastTransit,
+                                    at: board.stop, outgoing: tripIndex, preferences: query.preferences, cache: &decisions)
+                            else { continue }
+                            let additional = source.lastTransit == nil ? 0
+                                : max(query.preferences.boardingBufferSeconds, transfer.requiredSeconds - source.transferWalkSeconds)
+                            let shortfall = source.transferWalkSeconds == 0 ? transfer.allowedShortfallSeconds : 0
+                            guard departure >= source.timeSeconds + Double(additional - shortfall) else { continue }
+                            feasibleBoardings += 1
+                            let slack = Int(departure - source.timeSeconds) - additional
+                            let minimumSlack = source.lastTransit == nil ? source.minimumSlack : min(source.minimumSlack, slack)
+                            let totalSlack = source.lastTransit == nil ? source.totalSlack : source.totalSlack + slack
+                            let firstDeparture = source.firstDepartureSeconds ?? departure
+                            var key = ScanKey(id: 0, arrival: 0, departure: firstDeparture,
+                                doorDeparture: firstDeparture - Double(source.accessSeconds),
+                                walkingSeconds: source.walkingSeconds, minimumSlack: minimumSlack,
+                                totalSlack: totalSlack, preferred: source.containsPreferredMode || preferred,
+                                prefixRank: boardings.prefixRanks[sourceIndex], incomingTrip: tripIndex, serviceDate: day)
+                            for position in firstAlight..<alights.count {
+                                let alight = alights[position]
+                                let alightPos = alight.position
+                                let stop = alight.stop
+                                alightingChecks += 1
+                                key.alightPosition = alightPos
+                                key.arrival = alight.arrival
+                                key.id = nextID
+                                if consider(key, profile: &next[stop], peers: &incomingPeers[stop], nextID: &nextID, attempts: &attempts,
+                                    rejected: &rejected, path: {
+                                        .init(sourceIndex: sourceIndex, trip: tripIndex, board: board.stop, alight: stop,
+                                            boardPos: boardPos, alightPos: alightPos, day: day, scheduledBoard: scheduled,
+                                            scheduledAlight: instance.scheduledArrivals[alightPos]!, boardTime: effective,
+                                            alightTime: instance.effectiveArrivals[alightPos]!, requiredTransferSeconds: additional, boardingDeadline: deadline)
+                                    }) { retained += 1 }
+                            }
                         }
                     }
                 }
             }
+            let compactLabels = Dictionary(uniqueKeysWithValues: next.indices.compactMap { stop in
+                next[stop].map { (stop, $0) }
+            })
+            return .init(chunkIndex: chunkIndex, labels: [:], scannedPatterns: patternIDs.count,
+                scannedTripInstances: scannedInstances, boardingChecks: boardingChecks, feasibleBoardings: feasibleBoardings,
+                alightingChecks: alightingChecks, labelAttempts: attempts, retainedLabels: retained,
+                rejectedBeforeAllocation: rejected, elapsedMilliseconds: Int(RoutingDiagnostics.elapsed(since: started)), compactLabels: compactLabels, scratch: scratch)
         }
-        let compactLabels = Dictionary(uniqueKeysWithValues: next.indices.compactMap { stop in
-            next[stop].map { (stop, $0) }
-        })
-        return .init(chunkIndex: chunkIndex, labels: [:], scannedPatterns: patternIDs.count,
-            scannedTripInstances: scannedInstances, boardingChecks: boardingChecks, feasibleBoardings: feasibleBoardings,
-            alightingChecks: alightingChecks, labelAttempts: attempts, retainedLabels: retained,
-            rejectedBeforeAllocation: rejected, elapsedMilliseconds: Int(RoutingDiagnostics.elapsed(since: started)), compactLabels: compactLabels, scratch: .init(profiles: next, peers: incomingPeers))
     }
 
     static func materialize(_ compactLabels: [Int: CompactProfile], boardings: BoardingIndex) -> [Int: LabelProfile] {

@@ -3,6 +3,15 @@ import Testing
 @testable import MobiliteitKit
 
 @Suite struct RoutingCacheEquivalenceTests {
+    @Test func occurrenceIndexHandlesExtremeSequencesWithoutOverflow() {
+        let time = SnapshotTime(stop: 0, sequence: Int.max, arrival: 0, departure: 0, pickup: 0, dropoff: 0)
+        let single = SnapshotTrip(id: "single", route: 0, service: 0, times: [time], headsign: nil, wheelchairAccessible: 0)
+        #expect(single.position(of: Int.min) == nil)
+        #expect(single.position(of: Int.max) == 0)
+        let repeated = SnapshotTrip(id: "repeat", route: 0, service: 0, times: [time, time], headsign: nil, wheelchairAccessible: 0)
+        #expect(repeated.position(of: Int.max) == 0)
+    }
+
     @Test func transportRedactsCredentialsFromDiagnosticURLs() throws {
         let input = try #require(URL(string: "https://name:secret@example.com/board?accessId=secret&APIKey=secret&token=secret&requestId=private&id=123"))
         let result = HTTPTaskMetricsDelegate.sanitized(input)

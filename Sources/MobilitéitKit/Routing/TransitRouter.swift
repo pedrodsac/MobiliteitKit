@@ -308,14 +308,17 @@ struct SnapshotTrip: Sendable {
     init(id: String, route: Int, service: Int, times: [SnapshotTime], headsign: String?, wheelchairAccessible: Int) {
         self.id = id; self.route = route; self.service = service; self.times = times; self.headsign = headsign
         self.wheelchairAccessible = wheelchairAccessible
-        consecutiveSequences = times.enumerated().allSatisfy { $0.element.sequence == (times.first?.sequence ?? 0) + $0.offset }
+        consecutiveSequences = times.enumerated().allSatisfy {
+            let (expected, overflow) = (times.first?.sequence ?? 0).addingReportingOverflow($0.offset)
+            return !overflow && $0.element.sequence == expected
+        }
         firstServiceTime = times.lazy.compactMap { $0.departure ?? $0.arrival }.first ?? 0
         lastServiceTime = times.lazy.reversed().compactMap { $0.departure ?? $0.arrival }.first ?? 0
     }
     func position(of sequence: Int) -> Int? {
         if consecutiveSequences, let first = times.first {
-            let index = sequence - first.sequence
-            return times.indices.contains(index) ? index : nil
+            let (index, overflow) = sequence.subtractingReportingOverflow(first.sequence)
+            return !overflow && times.indices.contains(index) ? index : nil
         }
         return times.firstIndex { $0.sequence == sequence }
     }

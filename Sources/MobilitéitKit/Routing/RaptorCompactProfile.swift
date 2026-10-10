@@ -66,8 +66,8 @@ extension Raptor {
     struct CompactProfile: Sendable {
         // 48 retained records plus one insertion slot. Sorted arrays hold slot
         // numbers rather than copies or reference-counted Label objects.
-        var keys: [ScanKey?] = []
-        var paths: [ScanPath?] = []
+        var keys = [ScanKey?](repeating: nil, count: 8)
+        var paths = [ScanPath?](repeating: nil, count: 8)
         var ordered: [Int] = []
         var byArrival: [Int] = []
         var byWalk: [Int] = []
