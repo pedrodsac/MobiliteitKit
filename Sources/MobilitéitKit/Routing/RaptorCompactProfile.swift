@@ -66,8 +66,8 @@ extension Raptor {
     struct CompactProfile: Sendable {
         // 48 retained records plus one insertion slot. Sorted arrays hold slot
         // numbers rather than copies or reference-counted Label objects.
-        var keys = [ScanKey?](repeating: nil, count: profileWidth + 1)
-        var paths = [ScanPath?](repeating: nil, count: profileWidth + 1)
+        var keys: [ScanKey?] = []
+        var paths: [ScanPath?] = []
         var ordered: [Int] = []
         var byArrival: [Int] = []
         var byWalk: [Int] = []
@@ -77,10 +77,10 @@ extension Raptor {
         var lastPreferred: Int?
 
         init() {
-            ordered.reserveCapacity(profileWidth + 1)
-            byArrival.reserveCapacity(profileWidth + 1)
-            byWalk.reserveCapacity(profileWidth + 1)
-            byIncomingTrip.reserveCapacity(profileWidth + 1)
+            ordered.reserveCapacity(8)
+            byArrival.reserveCapacity(8)
+            byWalk.reserveCapacity(8)
+            byIncomingTrip.reserveCapacity(8)
         }
 
         @inline(__always) func isDominated(_ candidate: ScanKey, peers suppliedPeers: UInt64? = nil) -> Bool {
@@ -122,7 +122,14 @@ extension Raptor {
             }
             let slot = available.trailingZeroBitCount
             available &= ~(1 << slot)
-            keys[slot] = key; paths[slot] = path
+            if slot == 16, slot == keys.count {
+                keys.reserveCapacity(profileWidth + 1); paths.reserveCapacity(profileWidth + 1)
+                ordered.reserveCapacity(profileWidth + 1)
+                byArrival.reserveCapacity(profileWidth + 1); byWalk.reserveCapacity(profileWidth + 1)
+            }
+            if slot == keys.count {
+                keys.append(key); paths.append(path)
+            } else { keys[slot] = key; paths[slot] = path }
             byIncomingTrip[key.incomingTrip, default: 0] |= 1 << slot
             insertIndex(slot, into: &ordered, keys: keys, order: .departure)
             insertIndex(slot, into: &byArrival, keys: keys, order: .arrival)
