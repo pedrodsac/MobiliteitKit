@@ -22,6 +22,10 @@ struct BlockContinuationTests {
         let journey = try #require(result.journeys.first)
         #expect(transitTripInstanceSequence(journey) == ["seven", "twentyfive"])
         #expect(journey.transferCount == 0)
+        let planning = try await fixture.planning(.init(origin: .stop(id: "a"), destination: .stop(id: "d"),
+            time: arriveBy ? .arriveBy(date(hour: 21)) : .departAt(date(hour: 20)), preferences: .init(maxTransfers: 0)))
+        let published = try await planning.calculate(refresh: .scheduleOnly)
+        #expect(!published.journeys.isEmpty)
         #expect(journey.legs.contains { if case .inSeatContinuation = $0 { true } else { false } })
     }
 

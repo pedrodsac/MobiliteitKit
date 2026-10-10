@@ -35,8 +35,9 @@ enum JourneyFeedValidator {
                     day: previous.1.instance!.serviceDate, scheduledBoard: previous.1.scheduledDeparture,
                     scheduledAlight: previous.1.scheduledArrival, boardTime: previous.1.effectiveDeparture,
                     alightTime: previous.1.effectiveArrival, requiredTransferSecondsAfterWalking: 0)
-                guard Raptor.selectedTransferRule(snapshot: snapshot, incoming: incoming, at: trip.times[board].stop,
-                    outgoing: tripIndex)?.type == 4 else { return .invalidContinuation }
+                guard Raptor.permitsContinuation(snapshot: snapshot, incoming: incoming, outgoing: tripIndex,
+                    blockTarget: identity.serviceDate == incoming.day ? Raptor.blockSuccessor(snapshot: snapshot, incoming: incoming) : nil)
+                else { return .invalidContinuation }
             }
         }
         return nil
