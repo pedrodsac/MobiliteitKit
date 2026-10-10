@@ -145,7 +145,21 @@ public struct WalkingRequest: Hashable, Sendable { public let source: Coordinate
 public struct WalkingEstimate: Hashable, Sendable { public let durationSeconds: Int; public let distanceMeters: Double; public init(durationSeconds: Int, distanceMeters: Double) { self.durationSeconds = durationSeconds; self.distanceMeters = distanceMeters } }
 public struct WalkingStep: Hashable, Sendable { public let instruction: String; public let coordinate: Coordinate?; public init(instruction: String, coordinate: Coordinate? = nil) { self.instruction = instruction; self.coordinate = coordinate } }
 public enum WalkingEvidence: String, Hashable, Sendable, Codable { case routedPedestrian, estimate }
-public struct WalkingRoute: Hashable, Sendable { public let durationSeconds: Int; public let distanceMeters: Double; public let polyline: [Coordinate]; public let steps: [WalkingStep]; public let evidence: WalkingEvidence; public init(durationSeconds: Int, distanceMeters: Double, polyline: [Coordinate] = [], steps: [WalkingStep] = [], evidence: WalkingEvidence = .routedPedestrian) { self.durationSeconds = durationSeconds; self.distanceMeters = distanceMeters; self.polyline = polyline; self.steps = steps; self.evidence = evidence } }
+public struct WalkingRoute: Hashable, Sendable {
+    public let durationSeconds: Int
+    public let distanceMeters: Double
+    public let polyline: [Coordinate]
+    public let steps: [WalkingStep]
+    public let evidence: WalkingEvidence
+    public let segments: [WalkingRouteSegment]
+    public init(durationSeconds: Int, distanceMeters: Double, polyline: [Coordinate] = [],
+                steps: [WalkingStep] = [], evidence: WalkingEvidence = .routedPedestrian,
+                segments: [WalkingRouteSegment] = []) {
+        self.durationSeconds = durationSeconds; self.distanceMeters = distanceMeters
+        self.polyline = polyline; self.steps = steps; self.evidence = evidence
+        self.segments = segments
+    }
+}
 public protocol WalkingRoutingProvider: Sendable {
     /// Immutable graph/provider identity; nil preserves the original fixture contract.
     func cacheRevision() async -> String?
@@ -205,7 +219,7 @@ struct RealtimePatchKey: Hashable, Sendable {
 
 public enum WalkingSource: String, Hashable, Sendable, Codable { case provider, pathway }
 public struct JourneyLocation: Hashable, Sendable { public let stop: TransitStop?; public let coordinate: Coordinate; public let label: String?; public init(stop: TransitStop? = nil, coordinate: Coordinate, label: String? = nil) { self.stop = stop; self.coordinate = coordinate; self.label = label } }
-public struct WalkingLeg: Hashable, Sendable { public let from: JourneyLocation; public let to: JourneyLocation; public let departure: Date; public let arrival: Date; public let duration: TimeInterval; public let distanceMeters: Double; public let polyline: [Coordinate]; public let steps: [WalkingStep]; public let source: WalkingSource; public let evidence: WalkingEvidence; public var nativeRange: Range<Int>? = nil }
+public struct WalkingLeg: Hashable, Sendable { public let from: JourneyLocation; public let to: JourneyLocation; public let departure: Date; public let arrival: Date; public let duration: TimeInterval; public let distanceMeters: Double; public let polyline: [Coordinate]; public let steps: [WalkingStep]; public let source: WalkingSource; public let evidence: WalkingEvidence; public var segments: [WalkingRouteSegment] = []; public var nativeRange: Range<Int>? = nil }
 public struct JourneyStopEvent: Hashable, Sendable {
     public let stop: TransitStop
     public let scheduledTime: Date
@@ -1081,8 +1095,8 @@ public actor JourneyPlanningSession {
         let departure = query.direction == .arriveBy
             ? anchor.addingTimeInterval(-TimeInterval(route.durationSeconds)) : anchor
         let arrival = departure.addingTimeInterval(TimeInterval(route.durationSeconds))
-        let leg = WalkingLeg(from: origin, to: destination, departure: departure, arrival: arrival, duration: TimeInterval(route.durationSeconds), distanceMeters: route.distanceMeters, polyline: route.polyline, steps: route.steps, source: .provider, evidence: route.evidence)
-        return .init(id: .init("walk:\(a.latitude),\(a.longitude):\(b.latitude),\(b.longitude)"), origin: query.origin, destination: query.destination, scheduledDeparture: departure, scheduledArrival: arrival, effectiveDeparture: departure, effectiveArrival: arrival, transferCount: 0, walkingDuration: TimeInterval(route.durationSeconds), walkingDistance: route.distanceMeters, waitingDuration: 0, inVehicleDuration: 0, legs: [.walk(leg)], feedGeneration: snapshot.info.generation, accessibility: .unknown, matchesPreferredMode: query.preferences.preferredMode == nil)
+        let leg = WalkingLeg(from: origin, to: destination, departure: departure, arrival: arrival, duration: TimeInterval(route.durationSeconds), distanceMeters: route.distanceMeters, polyline: route.polyline, steps: route.steps, source: .provider, evidence: route.evidence, segments: route.segments)
+        return .init(id: .init("walk:\(a.latitude),\(a.longitude):\(b.latitude),\(b.longitude)"), origin: query.origin, destination: query.destination, scheduledDeparture: departure, scheduledArrival: arrival, effectiveDeparture: departure, effectiveArrival: arrival, transferCount: 0, walkingDuration: leg.pedestrianDuration, walkingDistance: leg.pedestrianDistance, waitingDuration: 0, inVehicleDuration: leg.connectionDuration, legs: [.walk(leg)], feedGeneration: snapshot.info.generation, accessibility: .unknown, matchesPreferredMode: query.preferences.preferredMode == nil)
     }
     private func buildJourney(_ candidate: Raptor.Candidate, access: [Edge], egress: [Edge]) -> BuiltJourney? {
         if let failure = JourneyStructuralValidator.assess(candidate, snapshot: snapshot, query: query) {
@@ -1100,7 +1114,7 @@ public actor JourneyPlanningSession {
         if let walk = a.walk {
             let from = endpointLocation(query.origin)
             let to = JourneyLocation(stop: snapshot.stops[candidate.firstStop].model, coordinate: snapshot.stops[candidate.firstStop].model.coordinate, label: snapshot.stops[candidate.firstStop].model.name)
-            legs.append(.walk(.init(from: from, to: to, departure: depart, arrival: candidate.firstDeparture, duration: TimeInterval(walk.durationSeconds), distanceMeters: walk.distanceMeters, polyline: walk.polyline, steps: walk.steps, source: .provider, evidence: walk.evidence)))
+            legs.append(.walk(.init(from: from, to: to, departure: depart, arrival: candidate.firstDeparture, duration: TimeInterval(walk.durationSeconds), distanceMeters: walk.distanceMeters, polyline: walk.polyline, steps: walk.steps, source: .provider, evidence: walk.evidence, segments: walk.segments)))
         }
         for item in candidate.legs {
             switch item {
@@ -1166,7 +1180,8 @@ public actor JourneyPlanningSession {
                     polyline: item.route.polyline,
                     steps: item.route.steps,
                     source: .provider,
-                    evidence: item.route.evidence
+                    evidence: item.route.evidence,
+                    segments: item.route.segments
                 )))
             }
         }
@@ -1174,16 +1189,18 @@ public actor JourneyPlanningSession {
             let from = JourneyLocation(stop: snapshot.stops[candidate.lastStop].model, coordinate: snapshot.stops[candidate.lastStop].model.coordinate, label: snapshot.stops[candidate.lastStop].model.name)
             let to = endpointLocation(query.destination)
             let departure = candidate.lastArrival
-            legs.append(.walk(.init(from: from, to: to, departure: departure, arrival: departure.addingTimeInterval(TimeInterval(walk.durationSeconds)), duration: TimeInterval(walk.durationSeconds), distanceMeters: walk.distanceMeters, polyline: walk.polyline, steps: walk.steps, source: .provider, evidence: walk.evidence)))
+            legs.append(.walk(.init(from: from, to: to, departure: departure, arrival: departure.addingTimeInterval(TimeInterval(walk.durationSeconds)), duration: TimeInterval(walk.durationSeconds), distanceMeters: walk.distanceMeters, polyline: walk.polyline, steps: walk.steps, source: .provider, evidence: walk.evidence, segments: walk.segments)))
         }
         let signature = "g\(snapshot.info.generation):" + candidate.tripInstanceKey(snapshot: snapshot)
+        let walks = legs.compactMap { if case let .walk(walk) = $0 { walk } else { nil } }
         let inVehicle = candidate.transitLegs.reduce(0) { $0 + $1.alightTime.timeIntervalSince($1.boardTime) }
-        let walkingDuration = TimeInterval(a.seconds + e.seconds + candidate.pathwaySeconds)
+            + walks.reduce(0) { $0 + $1.connectionDuration }
+        let walkingDuration = walks.reduce(0) { $0 + $1.pedestrianDuration }
         let waiting = max(0, arrive.timeIntervalSince(depart) - inVehicle - walkingDuration)
         let matchesPreferredMode = query.preferences.preferredMode.map { preferred in
             candidate.transitLegs.contains { preferred.contains(routeType: snapshot.routes[snapshot.trips[$0.trip].route].type) }
         } ?? true
-        let journey = Journey(id: .init(signature), origin: query.origin, destination: query.destination, scheduledDeparture: scheduledDepart, scheduledArrival: scheduledArrive, effectiveDeparture: depart, effectiveArrival: arrive, transferCount: max(0, candidate.transitLegs.filter { !$0.continuesFromPrevious }.count - 1), walkingDuration: walkingDuration, walkingDistance: a.distance + e.distance + candidate.pathwayDistance, waitingDuration: waiting, inVehicleDuration: inVehicle, legs: legs, feedGeneration: snapshot.info.generation, accessibility: accessibility, matchesPreferredMode: matchesPreferredMode)
+        let journey = Journey(id: .init(signature), origin: query.origin, destination: query.destination, scheduledDeparture: scheduledDepart, scheduledArrival: scheduledArrive, effectiveDeparture: depart, effectiveArrival: arrive, transferCount: max(0, candidate.transitLegs.filter { !$0.continuesFromPrevious }.count - 1), walkingDuration: walkingDuration, walkingDistance: walks.reduce(0) { $0 + $1.pedestrianDistance }, waitingDuration: waiting, inVehicleDuration: inVehicle, legs: legs, feedGeneration: snapshot.info.generation, accessibility: accessibility, matchesPreferredMode: matchesPreferredMode)
         if case let .invalid(failure) = JourneyPublicationValidator.assess(journey, query: query) {
             diagnostics.rejections[failure, default: 0] += 1; return nil
         }

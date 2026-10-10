@@ -115,7 +115,7 @@ public enum JourneyPublicationValidator {
         for leg in journey.legs {
             switch leg {
             case let .walk(walk):
-                guard walk.duration >= 0, walk.evidence == .routedPedestrian, walk.distanceMeters.isFinite, walk.distanceMeters >= 0,
+                guard walk.hasValidSegments, walk.duration >= 0, walk.evidence == .routedPedestrian, walk.distanceMeters.isFinite, walk.distanceMeters >= 0,
                       walk.arrival.timeIntervalSince(walk.departure) == walk.duration,
                       walk.from.coordinate == walk.to.coordinate || walk.duration > 0 else { return .invalid(.invalidMovement) }
                 if let at, at != walk.from.coordinate { return .invalid(.disconnectedLegs) }

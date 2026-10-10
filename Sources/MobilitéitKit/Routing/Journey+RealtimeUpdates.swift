@@ -58,7 +58,7 @@ extension Journey {
                     departure: walk.departure.addingTimeInterval(arrivalShift),
                     arrival: walk.arrival.addingTimeInterval(arrivalShift), duration: walk.duration,
                     distanceMeters: walk.distanceMeters, polyline: walk.polyline, steps: walk.steps,
-                    source: walk.source, evidence: walk.evidence)
+                    source: walk.source, evidence: walk.evidence, segments: walk.segments)
                 replacement.nativeRange = walk.nativeRange
                 updated.append(.walk(replacement))
             case .inSeatContinuation: updated.append(leg)
@@ -66,8 +66,11 @@ extension Journey {
         }
         let revised = replacing(legs: updated)
         let vehicle = updated.reduce(0.0) { total, leg in
-            if case let .transit(ride) = leg { total + ride.effectiveArrival.timeIntervalSince(ride.effectiveDeparture) }
-            else { total }
+            switch leg {
+            case let .transit(ride): total + ride.effectiveArrival.timeIntervalSince(ride.effectiveDeparture)
+            case let .walk(walk): total + walk.connectionDuration
+            case .inSeatContinuation: total
+            }
         }
         return .init(id: id, origin: origin, destination: destination,
             scheduledDeparture: scheduledDeparture, scheduledArrival: scheduledArrival,

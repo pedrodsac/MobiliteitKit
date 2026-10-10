@@ -266,7 +266,7 @@ public actor JourneyResultSession {
         var replacement = WalkingLeg(from: first.from, to: last.to, departure: update.departure,
             arrival: update.arrival, duration: update.arrival.timeIntervalSince(update.departure),
             distanceMeters: update.route.distanceMeters, polyline: update.route.polyline,
-            steps: update.route.steps, source: .provider, evidence: update.route.evidence)
+            steps: update.route.steps, source: .provider, evidence: update.route.evidence, segments: update.route.segments)
         replacement.nativeRange = update.range
         legs[update.range.lowerBound] = .walk(replacement)
         // Retain native indices for other in-flight span updates. Presentation omits these placeholders.

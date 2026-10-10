@@ -21,6 +21,14 @@ import ZIPFoundation
         let journey = try #require(page.journeys.first)
         let trips = journey.legs.compactMap { if case let .transit(ride) = $0 { ride.tripID } else { nil } }
         #expect(trips == ["in-110", "out-110"])
+        let walk = try #require(journey.legs.compactMap { if case let .walk(w) = $0 { w } else { nil } }.first)
+        #expect(walk.segments.map(\.mode) == [.walking, .funicular, .walking])
+        #expect(journey.walkingDuration == 177)
+        #expect(journey.walkingDistance == 125)
+        let refreshed = try #require(journey.applyingRealtime([:]))
+        #expect(refreshed.legs == journey.legs)
+        #expect(refreshed.walkingDuration == 177)
+        #expect(refreshed.inVehicleDuration == journey.inVehicleDuration)
         #expect(journey.scheduledArrival == ISO8601DateFormatter().date(from: "2026-10-11T01:25:00+02:00"))
     }
 
@@ -67,7 +75,14 @@ private struct InterchangeWalking: WalkingRoutingProvider {
     func route(_ request: WalkingRequest) async throws -> WalkingRoute {
         guard request.source.latitude == 49.6, request.destination.latitude == 49.601,
               request.source.longitude == request.destination.longitude else { throw NoRoute.unavailable }
-        return .init(durationSeconds: 300, distanceMeters: 350, polyline: [request.source, request.destination])
+        let middle = Coordinate(latitude: 49.6005, longitude: request.source.longitude)
+        let end = Coordinate(latitude: 49.6008, longitude: request.source.longitude)
+        return .init(durationSeconds: 300, distanceMeters: 350,
+            polyline: [request.source, middle, end, request.destination], segments: [
+                .init(mode: .walking, durationSeconds: 120, distanceMeters: 100, polyline: [request.source, middle]),
+                .init(mode: .funicular, name: "Funicular", durationSeconds: 123, distanceMeters: 225, polyline: [middle, end]),
+                .init(mode: .walking, durationSeconds: 57, distanceMeters: 25, polyline: [end, request.destination])
+            ])
     }
     private enum NoRoute: Error { case unavailable }
 }

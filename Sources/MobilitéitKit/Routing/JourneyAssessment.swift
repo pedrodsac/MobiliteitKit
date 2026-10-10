@@ -164,13 +164,20 @@ extension Journey {
         }
         let departure = times.first?.0 ?? effectiveDeparture
         let arrival = times.last?.1 ?? effectiveArrival
-        let walking = walks.reduce(0) { $0 + $1.duration }
+        let walking = walks.reduce(0) { $0 + $1.pedestrianDuration }
+        let vehicle = legs.reduce(0.0) { total, leg in
+            switch leg {
+            case let .transit(ride): total + ride.effectiveArrival.timeIntervalSince(ride.effectiveDeparture)
+            case let .walk(walk): total + walk.connectionDuration
+            case .inSeatContinuation: total
+            }
+        }
         return Journey(id: id, origin: origin, destination: destination,
             scheduledDeparture: scheduledDeparture, scheduledArrival: scheduledArrival,
             effectiveDeparture: departure, effectiveArrival: arrival, transferCount: transferCount,
-            walkingDuration: walking, walkingDistance: walks.reduce(0) { $0 + $1.distanceMeters },
-            waitingDuration: max(0, arrival.timeIntervalSince(departure) - inVehicleDuration - walking),
-            inVehicleDuration: inVehicleDuration, legs: legs, feedGeneration: feedGeneration,
+            walkingDuration: walking, walkingDistance: walks.reduce(0) { $0 + $1.pedestrianDistance },
+            waitingDuration: max(0, arrival.timeIntervalSince(departure) - vehicle - walking),
+            inVehicleDuration: vehicle, legs: legs, feedGeneration: feedGeneration,
             accessibility: accessibility, matchesPreferredMode: matchesPreferredMode)
     }
 }
