@@ -99,15 +99,21 @@ extension HafasRealtimeRoutingProvider {
             if let departure, let reportedDeparture {
                 precedingDelay = (reportedDeparture.timeIntervalSince(departure), departure)
             }
+            let terminus = position == stopTimes.count - 1
+            let liveTracks = terminus ? [pass?.realtimeArrivalTrack, pass?.realtimeDepartureTrack]
+                : [pass?.realtimeDepartureTrack, pass?.realtimeArrivalTrack]
+            let plannedTracks = terminus ? [pass?.arrivalTrack, pass?.departureTrack]
+                : [pass?.departureTrack, pass?.arrivalTrack]
+            let platforms = liveTracks + [position == boarding ? live.realtimePlatform?.text : nil]
+                + plannedTracks + [position == boarding ? live.platform?.text : nil, value.stop.platformCode]
+            let platform = platforms.compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .first { !$0.isEmpty }
             events.append(.init(stopID: value.stop.id,
                                 scheduledDeparture: departure, effectiveDeparture: departureTiming.0,
                                 departureSource: departureTiming.1,
                                 scheduledArrival: arrival, effectiveArrival: arrivalTiming.0,
                                 arrivalSource: arrivalTiming.1,
-                                platform: pass?.realtimeDepartureTrack ?? pass?.realtimeArrivalTrack
-                                    ?? (position == boarding
-                                        ? live.realtimePlatform?.text ?? live.platform?.text : nil)
-                                    ?? value.stop.platformCode,
+                                platform: platform,
                                 stopSequence: value.sequence,
                                 boardingAllowed: pass?.cancelled == true ? false
                                     : pass?.realtimeBoarding ?? pass?.boarding,

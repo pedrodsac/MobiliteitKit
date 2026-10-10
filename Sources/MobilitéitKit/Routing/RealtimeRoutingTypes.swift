@@ -145,12 +145,15 @@ public struct RealtimeRoutingRequest: Sendable {
     /// Optional selected/discovered vehicle filter. Ambiguity is still resolved
     /// against the full timetable; empty requests match the complete board.
     public let tripIDs: Set<String>
+    /// Keep matched timetable-only trips when a detail screen needs platform
+    /// metadata. Their timings remain scheduled, never live predictions.
+    public let includeTripMetadata: Bool
     public init(stopIDs: [String], from: Date, through: Date,
                 scheduledLookbackSeconds: Int = 7_200,
                 refreshPolicy: RealtimeRefreshPolicy = .useCache,
                 maximumConcurrentRequests: Int = 4, timeout: Duration = .seconds(4),
                 deadline: ContinuousClock.Instant? = nil, targets: [RealtimeBoardTarget] = [],
-                tripIDs: Set<String> = []) {
+                tripIDs: Set<String> = [], includeTripMetadata: Bool = false) {
         self.stopIDs = stopIDs; self.from = from; self.through = through
         self.scheduledLookbackSeconds = max(0, scheduledLookbackSeconds)
         self.refreshPolicy = refreshPolicy
@@ -159,6 +162,7 @@ public struct RealtimeRoutingRequest: Sendable {
         self.deadline = deadline
         self.targets = targets
         self.tripIDs = tripIDs
+        self.includeTripMetadata = includeTripMetadata
     }
 }
 

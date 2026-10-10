@@ -720,6 +720,8 @@ public struct HafasPasslistStop: Hashable, Sendable, Codable {
     public let realtimeDepartureDate: String?
     public let realtimeArrivalTime: String?
     public let realtimeArrivalDate: String?
+    public let departureTrack: String?
+    public let arrivalTrack: String?
     public let realtimeDepartureTrack: String?
     public let realtimeArrivalTrack: String?
     public let departurePrognosisType: String?
@@ -736,6 +738,7 @@ public struct HafasPasslistStop: Hashable, Sendable, Codable {
         case departureTime = "depTime", departureDate = "depDate", arrivalTime = "arrTime", arrivalDate = "arrDate"
         case realtimeDepartureTime = "rtDepTime", realtimeDepartureDate = "rtDepDate"
         case realtimeArrivalTime = "rtArrTime", realtimeArrivalDate = "rtArrDate"
+        case departureTrack = "depTrack", arrivalTrack = "arrTrack"
         case realtimeDepartureTrack = "rtDepTrack", realtimeArrivalTrack = "rtArrTrack"
         case departurePrognosisType = "depPrognosisType", arrivalPrognosisType = "arrPrognosisType"
         case cancelledDeparture, cancelledArrival
@@ -758,6 +761,8 @@ public struct HafasPasslistStop: Hashable, Sendable, Codable {
         realtimeDepartureDate = try values.decodeIfPresent(String.self, forKey: .realtimeDepartureDate)
         realtimeArrivalTime = try values.decodeIfPresent(String.self, forKey: .realtimeArrivalTime)
         realtimeArrivalDate = try values.decodeIfPresent(String.self, forKey: .realtimeArrivalDate)
+        departureTrack = try values.decodeIfPresent(String.self, forKey: .departureTrack)
+        arrivalTrack = try values.decodeIfPresent(String.self, forKey: .arrivalTrack)
         realtimeDepartureTrack = try values.decodeIfPresent(String.self, forKey: .realtimeDepartureTrack)
         realtimeArrivalTrack = try values.decodeIfPresent(String.self, forKey: .realtimeArrivalTrack)
         departurePrognosisType = try values.decodeIfPresent(String.self, forKey: .departurePrognosisType)

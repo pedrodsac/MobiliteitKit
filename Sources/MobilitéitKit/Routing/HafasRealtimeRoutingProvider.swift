@@ -132,7 +132,7 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
             for live in board.departures.values {
                 try Task.checkCancellation()
                 guard ContinuousClock.now < deadline else { unfinished.insert(stopID); break }
-                guard Self.hasRealtimeSignal(live) else { continue }
+                guard request.includeTripMetadata || Self.hasRealtimeSignal(live) else { continue }
                 guard let planned = date(date: live.plannedDate, time: live.plannedTime) else {
                     rejections[.invalidTimestamp, default: 0] += 1; continue
                 }

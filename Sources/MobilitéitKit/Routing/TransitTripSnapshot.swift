@@ -48,19 +48,28 @@ extension TransitRouter {
         }
         let trip = snapshot.trips[index]
         guard let boarding = trip.times.first(where: { $0.sequence == boardingSequence }),
-              let boardingTime = boarding.departure else {
+              boarding.departure != nil else {
             throw TransitTripSnapshotError.invalidBoardingOccurrence
         }
-        let scheduled = snapshot.converter.date(serviceDate: instance.serviceDate, serviceSeconds: boardingTime)
-        let from = scheduled.addingTimeInterval(-90)
-        let through = scheduled.addingTimeInterval(RealtimeTimeline.maximumDelay + 90)
         let stopID = snapshot.stops[boarding.stop].id
         let lines = snapshot.routes[trip.route].shortName.map { [$0] } ?? []
+        // A boarding-stop pass list can begin at that stop. Also request the
+        // origin so earlier occurrences and their own reports remain available.
+        // Keep the boarding board as well: the origin may have already departed.
+        let occurrences = [trip.times.first(where: { $0.departure != nil }), boarding].compactMap { $0 }
+        let targets = occurrences.compactMap { time -> RealtimeBoardTarget? in
+            guard let seconds = time.departure else { return nil }
+            let scheduled = snapshot.converter.date(serviceDate: instance.serviceDate, serviceSeconds: seconds)
+            return .init(stopID: snapshot.stops[time.stop].id, from: scheduled.addingTimeInterval(-90),
+                through: scheduled.addingTimeInterval(RealtimeTimeline.maximumDelay + 90), lines: lines)
+        }
+        guard let from = targets.map(\.from).min(), let through = targets.map(\.through).max() else {
+            throw TransitTripSnapshotError.invalidBoardingOccurrence
+        }
         let batch = try await realtimePatches(for: .init(
-            stopIDs: [stopID], from: from, through: through,
+            stopIDs: targets.map(\.stopID), from: from, through: through,
             refreshPolicy: refreshPolicy,
-            targets: [.init(stopID: stopID, from: from, through: through, lines: lines)],
-            tripIDs: [instance.tripID]
+            targets: targets, tripIDs: [instance.tripID], includeTripMetadata: true
         ))
         try Task.checkCancellation()
         let patch = batch?.patches.first {
