@@ -143,13 +143,13 @@ struct RoutingWastefulConnectionTests {
         #expect(!page.journeys.isEmpty)
         if walkingSeconds == 0 {
             #expect(page.journeys.allSatisfy { transitTripInstanceSequence($0) == ["326", "850", "16"] })
-        } else if walkingSeconds <= 660 {
+        } else if walkingSeconds <= 720 {
             #expect(page.journeys.allSatisfy { transitTripInstanceSequence($0) == ["850", "16"] })
         } else {
             #expect(page.journeys.contains { transitTripInstanceSequence($0) == ["326", "850", "16"] })
             #expect(page.journeys.contains { transitTripInstanceSequence($0) == ["850", "16"] })
         }
-        if walkingSeconds > 0 && walkingSeconds <= 660 {
+        if walkingSeconds > 0 && walkingSeconds <= 720 {
             #expect(page.journeys.first?.effectiveDeparture == date(hour: 8, minute: 44).addingTimeInterval(-Double(walkingSeconds)))
         }
         let request = JourneyPlanningRequest(origin: .coordinate(origin, label: nil), destination: .stop(id: "d"), time: .departAt(date(hour: 8)))

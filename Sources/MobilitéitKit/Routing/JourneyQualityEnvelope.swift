@@ -15,11 +15,11 @@ extension JourneyQualityPolicy {
                       other.accessibility == candidate.accessibility,
                       other.matchesPreferredMode == candidate.matchesPreferredMode,
                       other.transferCount <= candidate.transferCount,
-                      other.walkingDuration <= candidate.walkingDuration + walkingAllowance,
                       other.id != candidate.id else { continue }
-                if dominates(other, candidate)
-                    || redundantAccessFeeder(candidate, replacedBy: other, preferences: preferences)
-                    || redundantIntermediateTransfer(candidate, replacedBy: other, preferences: preferences) {
+                if redundantAccessFeeder(candidate, replacedBy: other, preferences: preferences)
+                    || (other.walkingDuration <= candidate.walkingDuration + walkingAllowance
+                        && (dominates(other, candidate)
+                            || redundantIntermediateTransfer(candidate, replacedBy: other, preferences: preferences))) {
                     replaced = true
                     break
                 }

@@ -20,8 +20,9 @@ extension Journey {
 
 extension JourneyQualityPolicy {
     /// Remove a feeder only when a verified access walk catches the identical
-    /// remaining trip occurrences, leaves home no earlier, and adds at most
-    /// five minutes of walking. Keep a requested lower-walking choice.
+    /// remaining trip occurrences and leaves home no earlier. The validated
+    /// walking budget bounds access; a fixed walking penalty must not keep
+    /// an earlier, more complicated ride. Keep a requested lower-walking choice.
     static func redundantAccessFeeder(_ candidate: Journey, replacedBy other: Journey,
                                       preferences: RoutingPreferences) -> Bool {
         guard other.id != candidate.id, !other.hasCancelledTransitLeg, !candidate.hasCancelledTransitLeg,
@@ -31,7 +32,6 @@ extension JourneyQualityPolicy {
               other.transferCount < candidate.transferCount,
               other.effectiveDeparture >= candidate.effectiveDeparture,
               other.effectiveArrival <= candidate.effectiveArrival,
-              other.walkingDuration <= candidate.walkingDuration + transferPenaltySeconds,
               preferences.routePreference != .lessWalking || other.walkingDuration <= candidate.walkingDuration
         else { return false }
         guard !other.statusEvidence.tightTransfer || candidate.statusEvidence.tightTransfer else { return false }
