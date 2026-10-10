@@ -7,7 +7,6 @@ enum Raptor {
     // Walking providers can be backed by a detailed local graph or a network
     // fallback. Bound automatic interchange probes so a broad regional search
     // never turns into one directions request for every alighting stop.
-    static let maximumWalkingTransferRequestsPerRound = 96
     static let minimumPatternsForParallelScan = 32
     static let maximumPatternWorkers = 10
     #if DEBUG

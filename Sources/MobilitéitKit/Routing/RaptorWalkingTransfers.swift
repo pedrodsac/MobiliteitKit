@@ -28,15 +28,15 @@ extension Raptor {
         snapshot: RoutingSnapshot,
         labels: inout [Int: LabelProfile],
         nextLabelID: inout Int,
-        walking: WalkingRouteCache?
+        walking: WalkingRouteCache?,
+        reachableStops: [Bool]? = nil
     ) async throws -> Int {
         guard let walking else { return 0 }
         struct Pair: Hashable { let from: Int; let to: Int }
         var requests: [(from: Int, to: Int, source: Label, routeIndex: Int)] = []
-        requests.reserveCapacity(maximumWalkingTransferRequestsPerRound * 3)
+        requests.reserveCapacity(labels.count * 3)
         var uniqueRequests: [WalkingRequest] = []
         var routeIndexByPair: [Pair: Int] = [:]
-        var distinctPairs = 0
         let sourceStops = labels.keys.sorted { lhs, rhs in
             let a = labels[lhs]?.byArrival.first?.time ?? .distantFuture
             let b = labels[rhs]?.byArrival.first?.time ?? .distantFuture
@@ -49,9 +49,11 @@ extension Raptor {
                 .sorted { $0.time == $1.time ? $0.id < $1.id : $0.time < $1.time }
             guard !eligible.isEmpty else { continue }
             for to in targets {
+                // A global pair quota silently loses later interchanges in
+                // dense profiles. Keep every potentially useful transfer;
+                // destination topology can safely exclude impossible targets.
+                guard reachableStops?[to] != false else { continue }
                 guard eligible.contains(where: { !$0.walkingStopsVisited.contains(to) }) else { continue }
-                guard distinctPairs < maximumWalkingTransferRequestsPerRound else { break }
-                distinctPairs += 1
                 try Task.checkCancellation()
                 let fromCoordinate = snapshot.stops[from].model.coordinate
                 let toCoordinate = snapshot.stops[to].model.coordinate
@@ -76,7 +78,6 @@ extension Raptor {
                     requests.append((from, to, source, routeIndex))
                 }
             }
-            if distinctPairs == maximumWalkingTransferRequestsPerRound { break }
         }
         try Task.checkCancellation()
         let routes = await walking.routes(uniqueRequests, maximumConcurrency: 4)

@@ -248,7 +248,7 @@ extension Raptor {
             }
             cpuSeconds += RoutingDiagnostics.elapsed(since: cpuStarted) / 1_000
             let walkingStarted = ContinuousClock.now
-            if query.preferences.wheelchair != .required { walkingTransferPairs += try await relaxWalkingTransfers(snapshot: snapshot, labels: &next, nextLabelID: &nextLabelID, walking: walking) }
+            if query.preferences.wheelchair != .required { walkingTransferPairs += try await relaxWalkingTransfers(snapshot: snapshot, labels: &next, nextLabelID: &nextLabelID, walking: walking, reachableStops: reachableStops) }
             walkingTransferSeconds += RoutingDiagnostics.elapsed(since: walkingStarted) / 1_000
             for e in egress { for label in next[e.stop]?.ordered ?? [] where label.firstDeparture != nil { destination.append(.init(legs: label.legs, firstStop: label.firstStop, lastStop: e.stop, firstDeparture: label.firstDeparture!, lastArrival: label.time, minimumTransferSlack: label.minimumSlack, totalTransferSlack: label.totalSlack, pathwaySeconds: label.pathwaySeconds, pathwayDistance: label.pathwayDistance)) } }
             labels = next; if labels.isEmpty { break }
