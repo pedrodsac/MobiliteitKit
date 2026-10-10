@@ -54,7 +54,7 @@ lower-level integrations. The package has no MapKit, SwiftUI or Valhalla depende
 
 The facade returns up to six useful transit alternatives initially and adds up
 to six per earlier/later page. Initial and adjacent searches start with a
-90-minute window and expand up to 24 hours until six useful routes are found.
+two-hour window and expand up to 24 hours until six useful routes are found.
 Arrive-by searches retain an adaptive lookback with a safe stopping proof.
 Later arrival pages retain the full 24-hour lookback from their original boundary so they include journeys departing before the previous arrival
 boundary. Direct walking does not consume a transit slot. Explicit cursor counts
