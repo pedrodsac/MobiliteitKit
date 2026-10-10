@@ -27,16 +27,27 @@ struct ContinuationReachabilityTests {
         #expect(journey.transferCount == 0)
     }
 
-    @Test func unrelatedStopsStillPruneWhenAnotherPartOfTheFeedHasContinuations() async throws {
-        let files = preventionFiles(trips: "bus,service,first,,,,vehicle\nother,service,second,,,,vehicle\nbus,service,dead,,,,\n",
+    @Test(arguments: [false, true])
+    func unrelatedStopsStillPruneWhenAnotherPartOfTheFeedHasContinuations(nearContinuation: Bool) async throws {
+        var files = preventionFiles(trips: "bus,service,first,,,,vehicle\nother,service,second,,,,vehicle\nbus,service,dead,,,,\n",
             times: "first,08:00:00,08:00:00,a,1\nfirst,08:10:00,08:10:00,b,2\n"
                 + "second,08:10:30,08:10:30,b,1\nsecond,08:20:00,08:20:00,d,2\n"
                 + "dead,08:00:00,08:00:00,a,1\ndead,08:05:00,08:05:00,c,2\n")
+        if nearContinuation {
+            files["stops.txt"] = files["stops.txt"]!.replacingOccurrences(of: "C,49.62", with: "C,49.612")
+        }
         let fixture = try await RoutingPreventionFixture(files: files); defer { fixture.remove() }
         let snapshot = await fixture.router.snapshot
         let bound = Raptor.DestinationReachability(snapshot: snapshot, egressStops: [snapshot.stopByID["d"]!], maxRides: 2)
         #expect(snapshot.hasContinuations)
-        #expect(bound.stopsByRemainingRides.allSatisfy { !$0[snapshot.stopByID["c"]!] })
+        if nearContinuation {
+            // The loose topology bound admits walking C → B before the onward
+            // run. That would require another boarding, so the final-round
+            // bound must still reject C for a zero-transfer query.
+            #expect(bound.stopsByRemainingRides[0][snapshot.stopByID["c"]!])
+        } else {
+            #expect(bound.stopsByRemainingRides.allSatisfy { !$0[snapshot.stopByID["c"]!] })
+        }
         #expect(snapshot.continuations.blockTripsByID["vehicle"]?.count == 2)
         let search = try await Raptor.search(snapshot: snapshot, query: fixture.query(preferences: .init(maxTransfers: 0)),
             access: [.init(stop: snapshot.stopByID["a"]!, seconds: 0, distance: 0, walk: nil)],

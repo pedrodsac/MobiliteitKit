@@ -111,7 +111,7 @@ extension Raptor {
                               instance.scheduledArrivals[position] != nil,
                               let arrival = instance.effectiveArrivals[position],
                               reachableStops?[time.stop] != false,
-                              snapshot.hasContinuations || round + 1 < maxRounds || finalRoundAlightStops.contains(time.stop)
+                              round + 1 < maxRounds || finalRoundAlightStops.contains(time.stop)
                         else { return nil }
                         return (position, time.stop, arrival.timeIntervalSinceReferenceDate)
                     }

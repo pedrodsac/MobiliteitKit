@@ -70,11 +70,15 @@ extension Raptor {
         while predecessorIndex < predecessorQueue.count {
             let stop = predecessorQueue[predecessorIndex]
             predecessorIndex += 1
-            for path in snapshot.pathsByTo[stop] {
-                if finalRoundAlightStops.insert(path.from).inserted {
-                    predecessorQueue.append(path.from)
+            for from in snapshot.pathsByTo[stop].map(\.from) + snapshot.continuations.sourcesByStop[stop] {
+                if finalRoundAlightStops.insert(from).inserted {
+                    predecessorQueue.append(from)
                 }
             }
+        }
+        let finalRoundReachable = snapshot.stops.indices.map { finalRoundAlightStops.contains($0) }
+        let finalRoundLastAlight = snapshot.patterns.map { pattern in
+            pattern.stops.indices.reversed().first { finalRoundReachable[pattern.stops[$0]] } ?? -1
         }
         for round in 0..<maxRounds { var next: [Int: LabelProfile] = [:]
             try Task.checkCancellation()
@@ -99,7 +103,8 @@ extension Raptor {
                 }
             }
             if let destinationReachability {
-                let lastAlight = destinationReachability.lastAlightPositionByRemainingRides[remainingRides]
+                let lastAlight = remainingRides == 0 ? finalRoundLastAlight
+                    : destinationReachability.lastAlightPositionByRemainingRides[remainingRides]
                 markedPatternIDs.removeAll {
                     lastAlight[$0] <= patternStartPositions[$0]
                 }
@@ -134,7 +139,8 @@ extension Raptor {
             let finalRoundAlightStopSnapshot = finalRoundAlightStops
             let activeInstanceSnapshot = activeInstancesByPattern
             let patternStartPositionSnapshot = patternStartPositions
-            let reachableStops = destinationReachability?.stopsByRemainingRides[remainingRides]
+            let reachableStops = remainingRides == 0 ? finalRoundReachable
+                : destinationReachability?.stopsByRemainingRides[remainingRides]
             let scanStarted = ContinuousClock.now
             var merge = PatternScanMerge(nextID: nextLabelID)
             try await withThrowingTaskGroup(of: PatternScanResult.self) { group in

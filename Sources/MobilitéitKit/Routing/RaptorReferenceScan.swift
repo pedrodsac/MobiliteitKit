@@ -95,7 +95,7 @@ extension Raptor {
                         && scheduledArrivals[position] != nil
                         && effectiveArrivals[position] != nil
                         && reachableStops?[stopTime.stop] != false
-                        && (snapshot.hasContinuations || round + 1 < maxRounds || finalRoundAlightStops.contains(stopTime.stop))
+                        && (round + 1 < maxRounds || finalRoundAlightStops.contains(stopTime.stop))
                 }
 
                 for boardPos in startPosition..<trip.times.count {
