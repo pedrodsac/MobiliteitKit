@@ -617,26 +617,36 @@ public actor JourneyPlanningSession {
     /// Latest arrivals can stop at a proven recent profile; sparse services or
     /// overlapping vehicle choices expand through the full 24-hour lookback.
     func initialArrivals(count: Int = 10) async throws -> JourneyPage {
+        try await initialSuggestions(count: count, searchHorizon: 3 * 3_600)
+    }
+
+    /// Short initial profiles expand across empty departure windows. Arrivals
+    /// retain their proof before stopping, including older vehicle occurrences.
+    func initialSuggestions(count: Int, searchHorizon: TimeInterval) async throws -> JourneyPage {
         let started = ContinuousClock.now
         let realtimeBefore = metrics.realtimePreparationMilliseconds
         var cumulative = RoutingDiagnostics()
         var cpu = 0, walkingPairs = 0
-        var horizon: TimeInterval = 3 * 3_600
+        let initialHorizon = min(Raptor.fullProfileHorizon, max(1, searchHorizon))
+        var horizon = initialHorizon
         let budget: Int
         if case let .bestEffort(configuration, _) = query.realtimePolicy { budget = configuration.acquisitionBudgetMilliseconds }
         else { budget = 0 }
         while true {
             let spent = metrics.realtimePreparationMilliseconds - realtimeBefore
             all = try await generate(anchor: query.departureTime, searchHorizon: horizon,
-                reusingRealtime: horizon > 3 * 3_600, realtimeBudgetLimit: max(0, budget - spent))
+                reusingRealtime: horizon > initialHorizon, realtimeBudgetLimit: max(0, budget - spent),
+                suggestionCount: count)
             cumulative.include(diagnostics)
             cpu += metrics.raptorCPUMilliseconds
             walkingPairs += metrics.walkingTransferPairs
             let chosen = JourneyQualityPolicy.primarySuggestions(all, count: count, query: query)
-            if horizon == Raptor.fullProfileHorizon || ArrivalSearchStoppingPolicy.canStop(
-                chosen, count: count, lower: query.departureTime.addingTimeInterval(-horizon),
-                snapshot: snapshot, patches: latestPatchesByInstance,
-                access: cachedEndpointEdges?.access ?? []) { break }
+            let complete = query.direction == .arriveBy
+                ? ArrivalSearchStoppingPolicy.canStop(chosen, count: count,
+                    lower: query.departureTime.addingTimeInterval(-horizon), snapshot: snapshot,
+                    patches: latestPatchesByInstance, access: cachedEndpointEdges?.access ?? [])
+                : !chosen.isEmpty
+            if horizon == Raptor.fullProfileHorizon || complete { break }
             horizon = min(Raptor.fullProfileHorizon, horizon * 2)
         }
         cumulative.totalMilliseconds = RoutingDiagnostics.elapsed(since: started)
@@ -719,7 +729,9 @@ public actor JourneyPlanningSession {
         return result
     }
     private func generate(anchor: Date, searchHorizon: TimeInterval, forceRealtime: Bool = false, reusingRealtime: Bool = false,
-                          realtimeBudgetLimit: Int? = nil, accepting: (@Sendable (Journey) -> Bool)? = nil) async throws -> [Journey] {
+                          realtimeBudgetLimit: Int? = nil, suggestionCount: Int = 10,
+                          selecting: (@Sendable ([Journey]) -> [Journey])? = nil,
+                          accepting: (@Sendable (Journey) -> Bool)? = nil) async throws -> [Journey] {
         let started = ContinuousClock.now
         diagnostics = RoutingDiagnostics()
         let countersBefore = metrics
@@ -823,7 +835,8 @@ public actor JourneyPlanningSession {
             let completionStarted = ContinuousClock.now
             let overlayBefore = metrics.realtimeOverlayRevisions
             let changed = try await completeItineraryRealtime(
-                JourneyQualityPolicy.primarySuggestions(built.journeys, count: 10, query: query),
+                selecting?(built.journeys) ?? JourneyQualityPolicy.primarySuggestions(
+                    built.journeys, count: suggestionCount, query: query),
                 access: access, egress: egress, anchor: anchor,
                 searchHorizon: searchHorizon, force: forceRealtime,
                 budgetMilliseconds: remainingRealtimeMilliseconds, includeDiscovery: !discovered, reusingRealtime: reusingRealtime, attempted: &attempted)
@@ -939,7 +952,10 @@ public actor JourneyPlanningSession {
     func adjacentTimePage(axis: JourneyTimeAxis, boundary: JourneyPageBoundary,
                           earlier: Bool, count: Int, excludingIDs: Set<JourneySignature>,
                           searchHorizon: TimeInterval) async throws -> JourneyPage {
-        let profile = try await generate(anchor: query.departureTime, searchHorizon: searchHorizon) { journey in
+        let selectionQuery = query
+        let profile = try await generate(anchor: query.departureTime, searchHorizon: searchHorizon,
+            selecting: { JourneyBatchPolicy.adjacentSuggestions($0, axis: axis, earlier: earlier,
+                count: count, query: selectionQuery) }) { journey in
             guard !excludingIDs.contains(journey.id) else { return false }
             let time = axis == .arrival ? journey.effectiveArrival : journey.effectiveDeparture
             let edge = boundary.departure
@@ -947,18 +963,8 @@ public actor JourneyPlanningSession {
             guard let id = boundary.id else { return false }
             return earlier ? journey.id < id : journey.id > id
         }
-        let selected: [Journey]
-        if axis == .departure && !earlier {
-            selected = JourneyQualityPolicy.primarySuggestions(profile, count: count, query: query)
-        } else {
-            let useful = JourneyQualityPolicy.primarySuggestions(profile, count: profile.count, query: query)
-            let ordered = useful.sorted {
-                let a = axis == .arrival ? $0.effectiveArrival : $0.effectiveDeparture
-                let b = axis == .arrival ? $1.effectiveArrival : $1.effectiveDeparture
-                return (a, $0.id) < (b, $1.id)
-            }
-            selected = earlier ? Array(ordered.suffix(count)) : Array(ordered.prefix(count))
-        }
+        let selected = JourneyBatchPolicy.adjacentSuggestions(profile, axis: axis, earlier: earlier,
+            count: count, query: query)
         return makePage(journeys: selected, includeWalking: false,
                         hasEarlier: true, hasLater: true)
     }

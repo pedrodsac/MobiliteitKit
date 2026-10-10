@@ -52,10 +52,14 @@ validates the itinerary and permits one replacement search per generation.
 The existing `TransitRouter` and `JourneyPlanningSession` remain available for
 lower-level integrations. The package has no MapKit, SwiftUI or Valhalla dependency.
 
-The facade preserves five initial transit alternatives, three per adjacent page,
-three transfers by default, a three-hour initial forward horizon and a bounded
-24-hour adjacent/arrival profile. Initial and later realtime lookbacks are 1,200
-and 600 seconds. Its HAFAS provider retains the existing 32-request concurrency,
-60-second cache and four-second acquisition deadline. The “avoid tight transfers”
-choice uses a 180-second buffer and no same-stop shortfall; otherwise the buffer
-is 120 seconds with up to 180 seconds of same-stop shortfall tolerance.
+The facade returns up to six useful transit alternatives initially and adds up
+to six per earlier/later page. Initial and adjacent searches start with a
+90-minute window; empty windows expand up to 24 hours. Arrive-by searches retain
+an adaptive lookback with a safe stopping proof. Later arrival pages retain the
+full lookback so they include journeys departing before the previous arrival
+boundary. Direct walking does not consume a transit slot. Explicit cursor counts
+and the lower-level session defaults remain configurable.
+
+Feasibility, dominance, transfer rules, live-data freshness, acquisition deadlines,
+and concurrency settings are unchanged by this batch policy. Live completion uses
+the same six selected journeys as publication, including nearest earlier pages.

@@ -21,7 +21,7 @@ struct AdjacentJourneySearch {
         let arrival = if case .arriveBy = request.time { true } else { false }
         let started = ContinuousClock.now
         var cumulative = RoutingDiagnostics(startedAt: started)
-        var horizon: TimeInterval = 3 * 60 * 60
+        var horizon = JourneyBatchPolicy.initialHorizon
         while true {
             try Task.checkCancellation()
             let start = earlier ? boundary.departure.addingTimeInterval(-horizon) : boundary.departure
@@ -45,7 +45,7 @@ struct AdjacentJourneySearch {
             // A later arrival can belong to a journey which started before the
             // previous arrival boundary. Keep the normal arrive-by lookback.
             var page = try await session.adjacentTimePage(axis: arrival ? .arrival : .departure,
-                boundary: boundary, earlier: earlier, count: 10, excludingIDs: excludingIDs,
+                boundary: boundary, earlier: earlier, count: JourneyBatchPolicy.count, excludingIDs: excludingIDs,
                 searchHorizon: arrival && !earlier ? Raptor.fullProfileHorizon : horizon)
             cumulative.include(page.diagnostics)
             if !page.journeys.isEmpty || horizon == Raptor.fullProfileHorizon {

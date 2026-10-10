@@ -74,6 +74,26 @@ import Testing
         #expect(recent.metrics.pointRaptorScans > 1)
     }
 
+    @Test func sixRecentArrivalsMatchTheFullProfileWithinNinetyMinutes() async throws {
+        var trips = ""
+        var times = ""
+        for run in 0..<18 {
+            let departure = String(format: "09:%02d:00", run * 2)
+            let arrival = String(format: "09:%02d:00", run * 2 + 10)
+            trips += "route,service,recent-\(run),Destination\n"
+            times += "recent-\(run),\(departure),\(departure),a,1\nrecent-\(run),\(arrival),\(arrival),c,2\n"
+        }
+        let fixture = try await RealtimeTestFixture(stopTimes: times, trips: trips)
+        defer { fixture.remove() }
+        let router = try await TransitRouter(databaseURL: fixture.database)
+        let recent = try await router.makeSession(for: Self.query("10:00:00"))
+            .initialSuggestions(count: 6, searchHorizon: 5400)
+        let full = try await router.makeSession(for: Self.query("10:00:00")).expanded(count: 6)
+        #expect(recent.journeys.map(\.id) == full.journeys.map(\.id))
+        #expect(recent.journeys.count == 6)
+        #expect(recent.diagnostics.searchPasses.map(\.horizonSeconds) == [5400])
+    }
+
     private static func query(_ deadline: String) -> RouteQuery {
         .init(origin: .stop(id: "a"), destination: .stop(id: "c"),
               departureTime: RealtimeTestFixture.date(deadline), direction: .arriveBy)

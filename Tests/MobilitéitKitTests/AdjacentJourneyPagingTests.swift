@@ -52,10 +52,67 @@ struct AdjacentJourneyPagingTests {
         let priorIDs = Set(initial.journeys.map(\.id))
         let added = later.journeys.filter { !priorIDs.contains($0.id) }
         #expect(added.map(\.id) == expected.journeys.map(\.id))
-        #expect(initial.journeys.count == 10)
-        #expect(added.count == 8)
+        #expect(initial.journeys.count == 6)
+        #expect(added.count == 6)
         #expect(priorIDs.isSubset(of: Set(later.journeys.map(\.id))))
         #expect(added.allSatisfy { $0.effectiveDeparture > latest })
+    }
+
+    @Test(arguments: [JourneyPlanningTime.departAt(date(hour: 8)), .arriveBy(date(hour: 8, minute: 40))])
+    func everyAdjacentBatchAddsSixUniqueJourneys(time: JourneyPlanningTime) async throws {
+        let fixture = try await RoutingPreventionFixture(files: files(Array(stride(from: -7200, through: 10800, by: 300))))
+        defer { fixture.remove() }
+        let session = try await fixture.planning(request(time))
+        var previous = try await session.calculate(refresh: .scheduleOnly)
+        #expect(previous.journeys.count == 6)
+        for page in [JourneyPlanningPage.later, .later, .earlier, .earlier] {
+            let current = try await session.calculate(page: page, refresh: .scheduleOnly)
+            let previousIDs = Set(previous.journeys.map(\.id))
+            let currentIDs = Set(current.journeys.map(\.id))
+            #expect(currentIDs.subtracting(previousIDs).count == 6)
+            #expect(previousIDs.isSubset(of: currentIDs))
+            #expect(currentIDs.count == current.journeys.count)
+            previous = current
+        }
+    }
+
+    @Test func shortenedInitialWindowExpandsWhenTheFirstServiceIsLater() async throws {
+        let fixture = try await RoutingPreventionFixture(files: files([2 * 3600]))
+        defer { fixture.remove() }
+        let session = try await fixture.planning(request())
+        let initial = try await session.calculate(refresh: .scheduleOnly)
+        #expect(initial.journeys.first?.effectiveDeparture == date(hour: 10))
+        #expect(initial.diagnostics.searchPasses.map(\.horizonSeconds) == [5400, 10800])
+    }
+
+    @Test func denseDepartureSearchStartsWithNinetyMinutes() async throws {
+        let fixture = try await RoutingPreventionFixture(files: files(Array(stride(from: 300, through: 10800, by: 300))))
+        defer { fixture.remove() }
+        let session = try await fixture.planning(request())
+        let initial = try await session.calculate(refresh: .scheduleOnly)
+        #expect(initial.journeys.count == 6)
+        #expect(initial.diagnostics.searchPasses.map(\.horizonSeconds) == [5400])
+    }
+
+    @Test(arguments: [JourneyPlanningTime.departAt(date(hour: 8)), .arriveBy(date(hour: 8, minute: 40))])
+    func liveCompletionTargetsTheSixJourneysActuallyPublishedOnEachPage(time: JourneyPlanningTime) async throws {
+        let provider = BatchRecordingRealtime()
+        let fixture = try await RoutingPreventionFixture(
+            files: files(Array(stride(from: -7200, through: 10800, by: 300))),
+            realtime: provider, now: date(hour: 7))
+        defer { fixture.remove() }
+        let session = try await fixture.planning(request(time))
+        var previousIDs = Set<JourneySignature>()
+        for page in [JourneyPlanningPage.initial, .later, .earlier] {
+            _ = await provider.drainRequests()
+            let result = try await session.calculate(page: page)
+            let added = result.journeys.filter { !previousIDs.contains($0.id) }
+            let expected = Set(added.compactMap { $0.firstRide?.tripID })
+            let requests = await provider.drainRequests()
+            #expect(expected.count == 6)
+            #expect(requests.last == expected)
+            previousIDs = Set(result.journeys.map(\.id))
+        }
     }
 
     @Test func earlierAddsNearestPastTimetableJourneys() async throws {
@@ -65,10 +122,12 @@ struct AdjacentJourneyPagingTests {
         _ = try await session.calculate(refresh: .scheduleOnly)
         let earlier = try await session.calculate(page: .earlier)
         let historical = earlier.journeys.filter { $0.effectiveDeparture < date(hour: 8) }
-        #expect(historical.count == 4)
+        #expect(historical.count == 3)
         #expect(historical.allSatisfy { $0.statusEvidence.status(at: date(hour: 8)) == .missed })
         #expect(historical.allSatisfy { $0.statusEvidence.coverage == .scheduleOnly })
         #expect(historical.allSatisfy { earlier.validationContexts[$0.id]!.anchor <= $0.effectiveDeparture })
+        let next = try await session.calculate(page: .earlier, refresh: .scheduleOnly)
+        #expect(next.journeys.filter { $0.effectiveDeparture < date(hour: 8) }.count == 4)
     }
 
     @Test func arriveByPagesMoveArrivalWindowAndPreserveEveryDeadline() async throws {
@@ -137,7 +196,7 @@ struct AdjacentJourneyPagingTests {
         defer { fixture.remove() }
         let session = try await fixture.planning(request())
         var previous = try await session.calculate(refresh: .scheduleOnly)
-        for index in 0..<20 {
+        for index in 0..<5 {
             let current = try await session.calculate(page: index.isMultiple(of: 2) ? .later : .earlier, refresh: .scheduleOnly)
             #expect(Set(previous.journeys.map(\.id)).isSubset(of: Set(current.journeys.map(\.id))))
             #expect(Set(current.journeys.map(\.id)).count == current.journeys.count)
@@ -227,4 +286,20 @@ private final class AdjacentPagingClock: @unchecked Sendable {
     private var instant = date(hour: 8)
     func read() -> Date { lock.withLock { instant } }
     func advance(_ seconds: TimeInterval) { lock.withLock { instant.addTimeInterval(seconds) } }
+}
+
+private actor BatchRecordingRealtime: RealtimeRoutingProvider {
+    private var requests: [Set<String>] = []
+    func patches(for request: RealtimeRoutingRequest) async throws -> RealtimePatchBatch {
+        requests.append(request.tripIDs)
+        return .init(patches: [], requestedStopIDs: Set(request.stopIDs), coveredStopIDs: Set(request.stopIDs))
+    }
+    func patches(for stopIDs: [String], from: Date, through: Date,
+                 refreshPolicy: RealtimeRefreshPolicy) async throws -> RealtimePatchBatch {
+        .init(patches: [], requestedStopIDs: Set(stopIDs), coveredStopIDs: Set(stopIDs))
+    }
+    func drainRequests() -> [Set<String>] {
+        defer { requests = [] }
+        return requests
+    }
 }

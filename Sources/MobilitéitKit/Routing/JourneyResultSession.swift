@@ -89,9 +89,8 @@ public actor JourneyResultSession {
             case let .after(date, id, count):
                 raw = try await session.boundedPage(after: date, afterID: id, count: count, excludingIDs: Set(journeys.map(\.id)))
             default:
-                raw = direction == .arriveBy
-                    ? try await session.initialArrivals(count: 10)
-                    : try await session.initial(count: 10, searchHorizon: 3 * 60 * 60)
+                raw = try await session.initialSuggestions(count: JourneyBatchPolicy.count,
+                    searchHorizon: JourneyBatchPolicy.initialHorizon)
             }
             acquiredPatches = await session.currentPatches()
         }
@@ -143,7 +142,7 @@ public actor JourneyResultSession {
         case .after: hasLater = !incoming.isEmpty && raw.hasLater
         default:
             hasEarlier = journeys.contains { $0.legs.contains { if case .transit = $0 { true } else { false } } }
-            // Initial search is deliberately shorter than adjacent-page searches.
+            // A short initial profile cannot establish that later pages are exhausted.
             hasLater = hasEarlier
         }
         if let searchedWindow, !incoming.isEmpty {
@@ -168,12 +167,12 @@ public actor JourneyResultSession {
         return result
     }
 
-    public func calculate(before cursor: JourneyPlanningCursor, count: Int = 3,
+    public func calculate(before cursor: JourneyPlanningCursor, count: Int = 6,
                           refresh: JourneyRefreshPolicy = .useCache) async throws -> JourneyPlanningResult {
         try validate(cursor)
         return try await calculate(page: .before(cursor.departure, cursor.journeyID, count), refresh: refresh)
     }
-    public func calculate(after cursor: JourneyPlanningCursor, count: Int = 3,
+    public func calculate(after cursor: JourneyPlanningCursor, count: Int = 6,
                           refresh: JourneyRefreshPolicy = .useCache) async throws -> JourneyPlanningResult {
         try validate(cursor)
         return try await calculate(page: .after(cursor.departure, cursor.journeyID, count), refresh: refresh)
@@ -307,9 +306,8 @@ public actor JourneyResultSession {
                             maximumConcurrentBoardRequests: request.realtimeMaximumConcurrentBoardRequests,
                             searchWorkBudgetMilliseconds: request.realtimeSearchWorkBudgetMilliseconds))
                     let session = try await router.makeSession(for: replacementQuery)
-                    let raw = direction == .arriveBy
-                        ? try await session.initialArrivals(count: 10)
-                        : try await session.initial(count: 10, searchHorizon: 3 * 60 * 60)
+                    let raw = try await session.initialSuggestions(count: JourneyBatchPolicy.count,
+                        searchHorizon: JourneyBatchPolicy.initialHorizon)
                     let replacements = await JourneyGeometry.enrich(raw.journeys, store: store)
                     guard expectedGeneration == generation, expectedOperation == operation else {
                         throw JourneyPlanningError.staleRefinement
@@ -330,11 +328,11 @@ public actor JourneyResultSession {
     private func resolved(_ page: JourneyPlanningPage) -> JourneyPlanningPage {
         switch page {
         case .earlier:
-            if let first = exploredBefore { return .before(first.departure, first.id, 3) }
-            return .before(anchor, nil, 3)
+            if let first = exploredBefore { return .before(first.departure, first.id, JourneyBatchPolicy.count) }
+            return .before(anchor, nil, JourneyBatchPolicy.count)
         case .later:
-            if let last = exploredAfter { return .after(last.departure, last.id, 3) }
-            return .after(anchor, nil, 3)
+            if let last = exploredAfter { return .after(last.departure, last.id, JourneyBatchPolicy.count) }
+            return .after(anchor, nil, JourneyBatchPolicy.count)
         default: return page
         }
     }
