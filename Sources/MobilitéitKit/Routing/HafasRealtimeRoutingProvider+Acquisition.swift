@@ -95,6 +95,7 @@ extension HafasRealtimeRoutingProvider {
         var observations: [String: Date] = [:]
         var requests = 0; var hits = 0; var bytes = 0
         var httpMilliseconds = 0; var decodeMilliseconds = 0
+        var transport: [HTTPTransportMeasurement] = []
         var successful = false
         var fetchedAt = now()
         for interval in bounded.prefix(8) {
@@ -120,6 +121,7 @@ extension HafasRealtimeRoutingProvider {
                 successful = true
                 incomplete = incomplete || !response.isComplete
                 httpMilliseconds += response.httpMilliseconds; decodeMilliseconds += response.decodeMilliseconds
+                transport += response.transport
                 requests += response.networkRequests; hits += response.cacheHits
                 if response.networkRequests > 0 { bytes += response.board.responseBytes }
                 fetchedAt = min(fetchedAt, response.fetchedAt)
@@ -139,7 +141,7 @@ extension HafasRealtimeRoutingProvider {
                      board: successful ? .init(departures: Array(departures.values)) : nil,
                      fetchedAt: fetchedAt, incomplete: incomplete || Task.isCancelled,
                      requests: requests, hits: hits, bytes: bytes,
-                     httpMilliseconds: httpMilliseconds, decodeMilliseconds: decodeMilliseconds,
+                     httpMilliseconds: httpMilliseconds, decodeMilliseconds: decodeMilliseconds, transport: transport,
                      observations: observations)
     }
 

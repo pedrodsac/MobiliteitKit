@@ -29,6 +29,7 @@ public struct RoutingDiagnostics: Hashable, Sendable {
         public let candidates: Int
         public let walkingMilliseconds: Int
     }
+    public var transport: [HTTPTransportMeasurement] = []
     public private(set) var spans: [Span] = []
     public private(set) var searchPasses: [SearchPass] = []
     private var origin: ContinuousClock.Instant
@@ -60,6 +61,7 @@ public struct RoutingDiagnostics: Hashable, Sendable {
         let offset = Self.milliseconds(origin.duration(to: other.origin))
         spans += other.spans.map { var span = $0; span.startMilliseconds += offset; return span }
         searchPasses += other.searchPasses.map { var pass = $0; pass.startMilliseconds += offset; return pass }
+        transport += other.transport
         rounds += other.rounds
         for (stage, value) in other.milliseconds { milliseconds[stage, default: 0] += value }
         for (reason, value) in other.rejections { rejections[reason, default: 0] += value }

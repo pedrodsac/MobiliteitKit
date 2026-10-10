@@ -19,6 +19,12 @@ public struct HTTPResponseDiagnostics: Sendable {
     /// Error payloads are deliberately omitted: HAFAS can echo access credentials.
     public let successfulBody: Data?
 }
+public struct HTTPTransportMeasurement: Codable, Hashable, Sendable {
+    public let request: URL
+    public let statusCode: Int
+    public let startedAt: Date
+    public let metrics: HTTPTransportMetrics
+}
 public struct HTTPTransportMetrics: Codable, Hashable, Sendable {
     public struct Transaction: Codable, Hashable, Sendable {
         public let protocolName: String?

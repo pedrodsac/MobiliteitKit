@@ -343,13 +343,13 @@ public struct MobiliteitAPIClient: Sendable {
         return try await Self.departureBoardCache.measuredResponse(
             for: requestURL.absoluteString, refreshPolicy: refreshPolicy, scope: try boardScope(request), maximumCacheAge: maximumCacheAge
         ) {
-            let measured: (value: HafasDepartureBoardEnvelope, http: Int, decode: Int) = try await fetchMeasured(requestURL: requestURL)
+            let measured: (value: HafasDepartureBoardEnvelope, http: Int, decode: Int, transport: [HTTPTransportMeasurement]) = try await fetchMeasured(requestURL: requestURL)
             let response = measured.value
             guard response.departureBoard.errorCode == nil else {
                 throw MobiliteitAPIError.invalidRequest(response.departureBoard.errorText ?? "HAFAS rejected the board")
             }
             return .init(board: response.departureBoard, networkRequests: 1, cacheHits: 0,
-                         httpMilliseconds: measured.http, decodeMilliseconds: measured.decode)
+                         httpMilliseconds: measured.http, decodeMilliseconds: measured.decode, transport: measured.transport)
         }
     }
 
@@ -375,8 +375,9 @@ public struct MobiliteitAPIClient: Sendable {
         try await fetchMeasured(requestURL: requestURL).value as Response
     }
 
-    private func fetchMeasured<Response: Decodable>(requestURL: URL) async throws -> (value: Response, http: Int, decode: Int) {
+    private func fetchMeasured<Response: Decodable>(requestURL: URL) async throws -> (value: Response, http: Int, decode: Int, transport: [HTTPTransportMeasurement]) {
         let started = ContinuousClock.now
+        let startedAt = Date.now
         var request = URLRequest(url: requestURL)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         let publicURL = diagnostics.map { _ in HTTPTaskMetricsDelegate.sanitized(requestURL) }
@@ -401,7 +402,9 @@ public struct MobiliteitAPIClient: Sendable {
             decoder.userInfo[.hafasResponseBytes] = data.count
             let value = try decoder.decode(Response.self, from: data)
             try Task.checkCancellation()
-            return (value, httpMilliseconds, Int(RoutingDiagnostics.elapsed(since: decodeStarted)))
+            let transport = delegate?.result().map { [HTTPTransportMeasurement(request: publicURL ?? requestURL,
+                statusCode: http.statusCode, startedAt: startedAt, metrics: $0)] } ?? []
+            return (value, httpMilliseconds, Int(RoutingDiagnostics.elapsed(since: decodeStarted)), transport)
         } catch is CancellationError { throw CancellationError() }
         catch {
             throw MobiliteitAPIError.decoding(error.localizedDescription)

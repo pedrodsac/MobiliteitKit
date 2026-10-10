@@ -7,7 +7,8 @@ extension Raptor {
     static func scanPatterns(chunkIndex: Int, patternIDs: [Int], snapshot: RoutingSnapshot,
         query: RouteQuery, previousLabels: [Int: LabelProfile], boardings: BoardingIndex,
         patternStartPositions: [Int], activeInstancesByPattern: [Int: [ActiveTripInstance]],
-        reachableStops: [Bool]?, round: Int, maxRounds: Int, finalRoundAlightStops: Set<Int>) throws -> PatternScanResult {
+        reachableStops: [Bool]?, round: Int, maxRounds: Int, finalRoundAlightStops: Set<Int>,
+        scratch: CompactScratch = .init()) throws -> PatternScanResult {
         if referenceKernel || !boardings.uniformDepth {
             return try scanPatternsReference(chunkIndex: chunkIndex, patternIDs: patternIDs, snapshot: snapshot,
                 query: query, previousLabels: previousLabels, patternStartPositions: patternStartPositions,
@@ -17,13 +18,13 @@ extension Raptor {
         var result = try scanPatternsCompact(chunkIndex: chunkIndex, patternIDs: patternIDs, snapshot: snapshot,
             query: query, boardings: boardings, patternStartPositions: patternStartPositions,
             activeInstancesByPattern: activeInstancesByPattern, reachableStops: reachableStops,
-            round: round, maxRounds: maxRounds, finalRoundAlightStops: finalRoundAlightStops)
+            round: round, maxRounds: maxRounds, finalRoundAlightStops: finalRoundAlightStops, scratch: scratch)
         if verifyKernel {
             result = .init(chunkIndex: result.chunkIndex, labels: materialize(result.compactLabels!, boardings: boardings),
                 scannedPatterns: result.scannedPatterns, scannedTripInstances: result.scannedTripInstances,
                 boardingChecks: result.boardingChecks, feasibleBoardings: result.feasibleBoardings, alightingChecks: result.alightingChecks,
                 labelAttempts: result.labelAttempts, retainedLabels: result.retainedLabels, rejectedBeforeAllocation: result.rejectedBeforeAllocation,
-                elapsedMilliseconds: result.elapsedMilliseconds, compactLabels: result.compactLabels)
+                elapsedMilliseconds: result.elapsedMilliseconds, compactLabels: result.compactLabels, scratch: result.scratch)
             let expected = try scanPatternsReference(chunkIndex: chunkIndex, patternIDs: patternIDs, snapshot: snapshot,
                 query: query, previousLabels: previousLabels, patternStartPositions: patternStartPositions,
                 activeInstancesByPattern: activeInstancesByPattern, reachableStops: reachableStops,

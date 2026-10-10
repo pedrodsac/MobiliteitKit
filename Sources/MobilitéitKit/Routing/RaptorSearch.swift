@@ -138,6 +138,7 @@ extension Raptor {
             let scanStarted = ContinuousClock.now
             var merge = PatternScanMerge(nextID: nextLabelID)
             try await withThrowingTaskGroup(of: PatternScanResult.self) { group in
+                var availableScratch: [CompactScratch] = []
                 // Schedule costly chunks first, but merge in the original index order.
                 let schedulingWindow = max(1, workerCount * 2)
                 let scheduled = stride(from: 0, to: chunks.count, by: schedulingWindow).flatMap { start in
@@ -158,6 +159,7 @@ extension Raptor {
                     let chunk = scheduled[cursor]
                     cursor += 1
                     active += 1
+                    let scratch = availableScratch.popLast() ?? CompactScratch()
                     group.addTask(priority: .userInitiated) {
                         try scanPatterns(
                             chunkIndex: chunk.index,
@@ -171,14 +173,15 @@ extension Raptor {
                             reachableStops: reachableStops,
                             round: currentRound,
                             maxRounds: maxRounds,
-                            finalRoundAlightStops: finalRoundAlightStopSnapshot
+                            finalRoundAlightStops: finalRoundAlightStopSnapshot, scratch: scratch
                         )
                     }
                 }
                 for _ in 0..<min(workerCount, scheduled.count) { enqueue() }
                 var pending: [Int: PatternScanResult] = [:]
                 var nextChunk = 0
-                while let value = try await group.next() {
+                while var value = try await group.next() {
+                    if let scratch = value.scratch { availableScratch.append(scratch); value.scratch = nil }
                     active -= 1
                     pending[value.chunkIndex] = value
                     while let ready = pending.removeValue(forKey: nextChunk) {

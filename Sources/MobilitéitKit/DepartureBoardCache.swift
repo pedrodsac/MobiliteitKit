@@ -7,6 +7,7 @@ struct CachedBoardResponse: Sendable {
     var fetchedAt: Date = .now
     var httpMilliseconds: Int = 0
     var decodeMilliseconds: Int = 0
+    var transport: [HTTPTransportMeasurement] = []
     var scope: BoardCacheScope? = nil
     var isComplete: Bool = false
     var observations: [String: Date] = [:]
@@ -219,6 +220,7 @@ actor DepartureBoardCache {
                      fetchedAt: pieces.map(\.fetchedAt).min() ?? now(),
                      httpMilliseconds: pieces.reduce(0) { $0 + $1.httpMilliseconds },
                      decodeMilliseconds: pieces.reduce(0) { $0 + $1.decodeMilliseconds },
+                     transport: pieces.flatMap(\.transport),
                      scope: scope, isComplete: failedRequests == 0 && pieces.allSatisfy(\.isComplete), observations: observations)
     }
 
@@ -289,6 +291,7 @@ actor DepartureBoardCache {
                       cacheHits: waiter == networkOwner ? 0 : 1, fetchedAt: flight.startedAt,
                       httpMilliseconds: waiter == networkOwner ? $0.httpMilliseconds : 0,
                       decodeMilliseconds: waiter == networkOwner ? $0.decodeMilliseconds : 0,
+                      transport: waiter == networkOwner ? $0.transport : [],
                       scope: $0.scope, isComplete: $0.isComplete, observations: $0.observations)
             })
         }

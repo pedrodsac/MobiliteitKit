@@ -13,6 +13,7 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
         let bytes: Int
         var httpMilliseconds: Int = 0
         var decodeMilliseconds: Int = 0
+        var transport: [HTTPTransportMeasurement] = []
         var observations: [String: Date] = [:]
     }
     struct RealtimeMatchingFailure: Error { let reason: RealtimeMatchingRejection }
@@ -201,7 +202,7 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
                      fetchedAt: fetched.values.map(\.fetchedAt).min(),
                      httpMilliseconds: fetched.values.reduce(0) { $0 + $1.httpMilliseconds },
                      decodeMilliseconds: fetched.values.reduce(0) { $0 + $1.decodeMilliseconds },
-                     matchingRejections: rejections)
+                     matchingRejections: rejections, transport: fetched.values.flatMap(\.transport))
     }
 
     func prepareSchedules(for stopIDs: [String], from: Date, through: Date, deadline: ContinuousClock.Instant, targets: [RealtimeBoardTarget] = [], lookback: Int = 7_200) async -> PreparedSchedules {

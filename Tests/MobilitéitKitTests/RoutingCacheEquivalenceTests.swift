@@ -3,6 +3,12 @@ import Testing
 @testable import MobiliteitKit
 
 @Suite struct RoutingCacheEquivalenceTests {
+    @Test func transportRedactsCredentialsFromDiagnosticURLs() throws {
+        let input = try #require(URL(string: "https://name:secret@example.com/board?accessId=secret&APIKey=secret&token=secret&requestId=private&id=123"))
+        let result = HTTPTaskMetricsDelegate.sanitized(input)
+        #expect(result.absoluteString == "https://example.com/board?id=123")
+    }
+
     @Test func indexedEventsPreserveFirstExactThenLegacyOccurrence() throws {
         let day = try GTFSDate(parsing: "20260904")
         let first = RealtimeStopEventPatch(stopID: "loop", effectiveDeparture: date(hour: 8), stopSequence: 3)

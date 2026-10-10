@@ -113,6 +113,7 @@ extension JourneyPlanningSession {
         for (reason, count) in batch.matchingRejections {
             diagnostics.realtimeMatchingRejections[reason, default: 0] += count
         }
+        diagnostics.transport += batch.transport
         metrics.realtimeHTTPMilliseconds += batch.httpMilliseconds
         metrics.realtimeDecodeMilliseconds += batch.decodeMilliseconds
         metrics.hafasRequests += batch.networkRequests

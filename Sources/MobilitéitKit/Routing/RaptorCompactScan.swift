@@ -52,13 +52,23 @@ extension Raptor {
         }
     }
 
+    struct CompactScratch: Sendable {
+        var profiles: [CompactProfile?] = []
+        var peers: [UInt64] = []
+    }
+
     static func scanPatternsCompact(chunkIndex: Int, patternIDs: [Int], snapshot: RoutingSnapshot,
         query: RouteQuery, boardings: BoardingIndex, patternStartPositions: [Int],
         activeInstancesByPattern: [Int: [ActiveTripInstance]], reachableStops: [Bool]?,
-        round: Int, maxRounds: Int, finalRoundAlightStops: Set<Int>) throws -> PatternScanResult {
+        round: Int, maxRounds: Int, finalRoundAlightStops: Set<Int>,
+        scratch: CompactScratch = .init()) throws -> PatternScanResult {
         let started = ContinuousClock.now
-        var next = [CompactProfile?](repeating: nil, count: snapshot.stops.count)
-        var incomingPeers = [UInt64](repeating: 0, count: snapshot.stops.count)
+        var next = scratch.profiles
+        var incomingPeers = scratch.peers
+        next.removeAll(keepingCapacity: true)
+        next.append(contentsOf: repeatElement(nil, count: snapshot.stops.count))
+        incomingPeers.removeAll(keepingCapacity: true)
+        incomingPeers.append(contentsOf: repeatElement(0, count: snapshot.stops.count))
         var nextID = (chunkIndex + 1) * 1_000_000_000
         var scannedInstances = 0, boardingChecks = 0, feasibleBoardings = 0
         var alightingChecks = 0, attempts = 0, retained = 0, rejected = 0
@@ -159,7 +169,7 @@ extension Raptor {
         return .init(chunkIndex: chunkIndex, labels: [:], scannedPatterns: patternIDs.count,
             scannedTripInstances: scannedInstances, boardingChecks: boardingChecks, feasibleBoardings: feasibleBoardings,
             alightingChecks: alightingChecks, labelAttempts: attempts, retainedLabels: retained,
-            rejectedBeforeAllocation: rejected, elapsedMilliseconds: Int(RoutingDiagnostics.elapsed(since: started)), compactLabels: compactLabels)
+            rejectedBeforeAllocation: rejected, elapsedMilliseconds: Int(RoutingDiagnostics.elapsed(since: started)), compactLabels: compactLabels, scratch: .init(profiles: next, peers: incomingPeers))
     }
 
     static func materialize(_ compactLabels: [Int: CompactProfile], boardings: BoardingIndex) -> [Int: LabelProfile] {
