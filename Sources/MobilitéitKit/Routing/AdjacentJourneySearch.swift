@@ -43,10 +43,12 @@ struct AdjacentJourneySearch {
             let session = try await router.makeSession(for: query)
             if let patches, !historical { await session.setFrozenPatches(patches) }
             // A later arrival can belong to a journey which started before the
-            // previous arrival boundary. Keep the normal arrive-by lookback.
+            // previous arrival boundary. Anchor the full lookback to that
+            // boundary while the future window grows, so partial-page journeys
+            // cannot fall out of the search during expansion.
             var page = try await session.adjacentTimePage(axis: arrival ? .arrival : .departure,
                 boundary: boundary, earlier: earlier, count: JourneyBatchPolicy.count, excludingIDs: excludingIDs,
-                searchHorizon: arrival && !earlier ? Raptor.fullProfileHorizon : horizon)
+                searchHorizon: arrival && !earlier ? Raptor.fullProfileHorizon + horizon : horizon)
             cumulative.include(page.diagnostics)
             if page.journeys.count >= JourneyBatchPolicy.count || horizon == Raptor.fullProfileHorizon {
                 cumulative.totalMilliseconds = RoutingDiagnostics.elapsed(since: started)
