@@ -8,10 +8,11 @@ public enum JourneyGeometry {
         let end = (start..<shape.count).min {
             distanceSquared(shape[$0], destination) < distanceSquared(shape[$1], destination)
         } ?? (shape.count - 1)
-        guard end > start else { return [origin, destination] }
-        var result = Array(shape[start...end])
-        result[0] = origin; result[result.count - 1] = destination
-        return result
+        guard end > start else { return [] }
+        // Aggregate station coordinates can lie between several platforms.
+        // Use them to select the ride's range, never to extend the source
+        // shape across the station forecourt or between separate bus bays.
+        return Array(shape[start...end])
     }
     private static func distanceSquared(_ a: Coordinate, _ b: Coordinate) -> Double {
         let latitude = a.latitude - b.latitude
