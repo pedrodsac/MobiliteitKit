@@ -28,9 +28,7 @@ extension TransitRouter {
                 scheduledBoard: time, scheduledAlight: time, boardTime: time, alightTime: time,
                 requiredTransferSecondsAfterWalking: 0)
             let block = Raptor.blockSuccessor(snapshot: snapshot, incoming: incoming)
-            let explicit = snapshot.rulesByGroup.values.joined().filter {
-                $0.type == 4 && $0.fromTrip == index
-            }.compactMap(\.toTrip)
+            let explicit = snapshot.continuations.explicitTargetsByTrip[index]
             let targets = Set(explicit + [block].compactMap { $0 }).filter { target in
                 let next = snapshot.trips[target]
                 return !seen.contains(target) && day.activeServices.contains(next.service)

@@ -341,7 +341,8 @@ struct RoutingSnapshot: Sendable {
         serviceDayByDate[serviceDate]?.start.addingTimeInterval(Double(serviceSeconds))
             ?? converter.date(serviceDate: serviceDate, serviceSeconds: serviceSeconds)
     }
-    let hasContinuations: Bool
+    let continuations: SnapshotContinuationIndex
+    var hasContinuations: Bool { continuations.hasLinks }
     let patterns: [SnapshotPattern]; let patternOccurrencesByStop: [[PatternOccurrence]]; let loadMilliseconds: Int
 }
 
@@ -493,7 +494,7 @@ private enum SnapshotBuilder {
         for from in nearbyTransferStopsByStop.indices {
             for to in nearbyTransferStopsByStop[from] { nearbyTransferSourcesByStop[to].append(from) }
         }
-        return .init(info: info, converter: converter, stops: stops, stopByID: stopByID, routes: routes, trips: trips, tripByID: tripByID, tripIndicesByDepartureStop: tripIndicesByDepartureStop, serviceRoutesByStop: serviceRoutesByStop.map(Array.init), boardableStops: boardableStops, alightableStops: alightableStops, serviceDays: serviceDays, lastActiveDayStartByService: lastActiveDayStartByService, rulesByGroup: rulesByGroup, stationGroupByStop: stationGroupByStop, pathsByFrom: pathsByFrom, pathsByTo: pathsByTo, nearbyTransferStopsByStop: nearbyTransferStopsByStop, serviceDayByDate: Dictionary(uniqueKeysWithValues: serviceDays.map { ($0.date, $0) }), nearbyTransferSourcesByStop: nearbyTransferSourcesByStop, hasContinuations: trips.contains { $0.blockID?.isEmpty == false } || rulesByGroup.values.joined().contains { $0.type == 4 && $0.fromTrip != nil && $0.toTrip != nil }, patterns: patterns, patternOccurrencesByStop: patternOccurrencesByStop, loadMilliseconds: Int(RoutingDiagnostics.elapsed(since: loadStarted)))
+        return .init(info: info, converter: converter, stops: stops, stopByID: stopByID, routes: routes, trips: trips, tripByID: tripByID, tripIndicesByDepartureStop: tripIndicesByDepartureStop, serviceRoutesByStop: serviceRoutesByStop.map(Array.init), boardableStops: boardableStops, alightableStops: alightableStops, serviceDays: serviceDays, lastActiveDayStartByService: lastActiveDayStartByService, rulesByGroup: rulesByGroup, stationGroupByStop: stationGroupByStop, pathsByFrom: pathsByFrom, pathsByTo: pathsByTo, nearbyTransferStopsByStop: nearbyTransferStopsByStop, serviceDayByDate: Dictionary(uniqueKeysWithValues: serviceDays.map { ($0.date, $0) }), nearbyTransferSourcesByStop: nearbyTransferSourcesByStop, continuations: SnapshotContinuationIndex(trips: trips, routes: routes, rules: rules, stopCount: stops.count), patterns: patterns, patternOccurrencesByStop: patternOccurrencesByStop, loadMilliseconds: Int(RoutingDiagnostics.elapsed(since: loadStarted)))
     }
 
     /// Precomputes a small geographic interchange frontier for every stop.

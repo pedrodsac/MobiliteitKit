@@ -6,8 +6,8 @@ extension Raptor {
     static func blockSuccessor(snapshot: RoutingSnapshot, incoming: TransitLeg, members: [Int]? = nil) -> Int? {
         let trip = snapshot.trips[incoming.trip]
         guard let block = trip.blockID, !block.isEmpty, !trip.isFrequencyTemplate,
-              let day = snapshot.serviceDays.first(where: { $0.date == incoming.day }) else { return nil }
-        let candidates = (members ?? snapshot.trips.indices.filter { snapshot.trips[$0].blockID == block }).filter {
+              let day = snapshot.serviceDayByDate[incoming.day] else { return nil }
+        let candidates = (members ?? snapshot.continuations.blockTripsByID[block] ?? []).filter {
             $0 != incoming.trip && !snapshot.trips[$0].isFrequencyTemplate && day.activeServices.contains(snapshot.trips[$0].service)
         }
         // Scheduled order remains authoritative under delays and cancellations.

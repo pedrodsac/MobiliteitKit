@@ -219,7 +219,8 @@ enum Raptor {
 
     /// A conservative topology bound. A true bit means that a stop may still
     /// reach an egress stop with the given number of further vehicle rides.
-    /// Pedestrian links are included even when the walking provider may later
+    /// Stay-aboard links consume no additional boarding round. Pedestrian links
+    /// are included even when the walking provider may later
     /// reject them, so this bound can only remove impossible journeys.
     struct DestinationReachability: Sendable {
         let stopsByRemainingRides: [[Bool]]
@@ -228,14 +229,14 @@ enum Raptor {
         init(snapshot: RoutingSnapshot, egressStops: Set<Int>, maxRides: Int) {
             let stopCount = snapshot.stops.count
             let walkingSources = snapshot.nearbyTransferSourcesByStop
-            func walkingClosure(_ seeds: [Bool]) -> [Bool] {
+            func zeroBoardingClosure(_ seeds: [Bool]) -> [Bool] {
                 var result = seeds
                 var queue = result.indices.filter { result[$0] }
                 var cursor = 0
                 while cursor < queue.count {
                     let to = queue[cursor]
                     cursor += 1
-                    for from in snapshot.pathsByTo[to].map(\.from) + walkingSources[to] where !result[from] {
+                    for from in snapshot.pathsByTo[to].map(\.from) + walkingSources[to] + snapshot.continuations.sourcesByStop[to] where !result[from] {
                         result[from] = true
                         queue.append(from)
                     }
@@ -245,7 +246,7 @@ enum Raptor {
 
             var base = Array(repeating: false, count: stopCount)
             for stop in egressStops { base[stop] = true }
-            var reachability = [walkingClosure(base)]
+            var reachability = [zeroBoardingClosure(base)]
             if maxRides > 1 {
                 for rides in 1..<maxRides {
                     var seeds = reachability[rides - 1]
@@ -258,7 +259,7 @@ enum Raptor {
                             if reachability[rides - 1][stop] { laterIsReachable = true }
                         }
                     }
-                    reachability.append(walkingClosure(seeds))
+                    reachability.append(zeroBoardingClosure(seeds))
                 }
             }
             stopsByRemainingRides = reachability

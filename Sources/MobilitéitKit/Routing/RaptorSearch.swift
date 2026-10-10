@@ -57,7 +57,7 @@ extension Raptor {
         var maximumWorkerCount = 1
         var roundMetrics: [RoutingRoundMetrics] = []
         let egressStops = Set(egress.map(\.stop))
-        let destinationReachability = maxRounds <= 8 && !snapshot.hasContinuations
+        let destinationReachability = maxRounds <= 8
             ? preparation.destination(snapshot: snapshot, stops: egressStops, rides: maxRounds)
             : nil
         var finalRoundAlightStops = egressStops
@@ -208,7 +208,8 @@ extension Raptor {
             if snapshot.hasContinuations {
                 try relaxContinuations(snapshot: snapshot, query: query, serviceDays: relevantServiceDays,
                     patches: patchesByInstance, searchStart: searchStart, scheduledLowerBound: scheduledLowerBound,
-                    upperBound: profileUpperBound, labels: &next, nextLabelID: &nextLabelID)
+                    upperBound: profileUpperBound, reachableStops: reachableStops, preparation: &preparation,
+                    labels: &next, nextLabelID: &nextLabelID)
             }
 
             let mergeMilliseconds = Int(merge.elapsedMilliseconds + RoutingDiagnostics.elapsed(since: mergeStarted))
