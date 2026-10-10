@@ -117,7 +117,10 @@ import Testing
         let payload = String(decoding: data, as: UTF8.self)
         let (client, host) = RealtimeBoardProtocol.client { _ in payload }
         defer { RealtimeBoardProtocol.remove(host) }
-        let provider = try HafasRealtimeRoutingProvider(databaseURL: fixture.database, client: client)
+        let started = ContinuousClock.now
+        let checkpoint = MatchingDeadlineCheckpoint(start: started)
+        let provider = HafasRealtimeRoutingProvider(store: try GTFSStore(databaseAt: fixture.database), client: client,
+            now: { .now }, matchingNow: { checkpoint.now() })
         let from = RealtimeTestFixture.date("08:00:00"), through = RealtimeTestFixture.date("08:30:00")
         _ = await provider.prepareSchedules(for: ["a"], from: from.addingTimeInterval(-7_200),
                                            through: through, deadline: ContinuousClock.now.advanced(by: .seconds(4)))
@@ -125,12 +128,11 @@ import Testing
         _ = try await client.departureBoardSnapshot(.init(stationID: "a", language: "en",
             date: try GTFSDate(parsing: "20260930"), time: ServiceTime(rawValue: 8 * 3_600),
             durationMinutes: 30, maximumJourneys: -1, realtimeMode: .serverDefault, includePasslist: true))
-        let started = ContinuousClock.now
         let batch = try await provider.patches(for: .init(stopIDs: ["a"], from: from, through: through,
-            timeout: .milliseconds(100), deadline: started.advanced(by: .milliseconds(100))))
+            timeout: .seconds(4), deadline: started.advanced(by: .seconds(4))))
         #expect(!batch.patches.isEmpty)
         #expect(batch.incompleteStopIDs == ["a"])
-        #expect(batch.boardMatchingMilliseconds > 0)
+        #expect(batch.boardMatchingMilliseconds >= 0)
         #expect(started.duration(to: .now) < .seconds(1))
         #expect(RealtimeBoardProtocol.requests(host).count == 1)
     }
@@ -236,4 +238,17 @@ import Testing
         #expect(RealtimeBoardProtocol.requests(host).isEmpty)
     }
 
+}
+
+/// Advances only matching checkpoints; elapsed CPU speed cannot decide coverage.
+private final class MatchingDeadlineCheckpoint: @unchecked Sendable {
+    private let lock = NSLock()
+    private var checks = 0
+    private let start: ContinuousClock.Instant
+    init(start: ContinuousClock.Instant) { self.start = start }
+    func now() -> ContinuousClock.Instant {
+        lock.lock(); defer { lock.unlock() }
+        checks += 1
+        return checks < 9 ? start : start.advanced(by: .seconds(5))
+    }
 }

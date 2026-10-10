@@ -157,12 +157,13 @@ public actor JourneyResultSession {
             }
         }
         revision &+= 1
+        if isInitial { invalidated.formUnion(priorIDs.subtracting(Set(journeys.map(\.id)))) }
+        diagnostics.counters[.pageNewJourneys] = Set(journeys.map(\.id)).subtracting(priorIDs).count
+        var result = snapshot()
         diagnostics.record(.resultAssembly, since: assemblyStarted)
         diagnostics.totalMilliseconds = RoutingDiagnostics.elapsed(since: operationStarted)
             + (diagnostics.milliseconds[.snapshotPreparation] ?? 0)
-        if isInitial { invalidated.formUnion(priorIDs.subtracting(Set(journeys.map(\.id)))) }
-        diagnostics.counters[.pageNewJourneys] = Set(journeys.map(\.id)).subtracting(priorIDs).count
-        let result = snapshot()
+        result.diagnostics = diagnostics
         if page == .initial && result.journeys.isEmpty { throw JourneyPlanningError.noRouteFound }
         return result
     }
@@ -406,6 +407,7 @@ public actor JourneyResultSession {
             direction: direction, preferences: request.preferences))
     }
     private func snapshot() -> JourneyPlanningResult {
+        let validationStarted = ContinuousClock.now
         var assessments: [JourneySignature: JourneyFeasibility] = [:]
         let priorInvalidations = invalidated.count
         let valid = journeys.filter { journey in
@@ -425,6 +427,8 @@ public actor JourneyResultSession {
             !RaptorWalkingShortcut.hasRedundantWalk($0, snapshot: feedSnapshot,
                 preferences: request.preferences, patches: patches)
         }
+        diagnostics.record(.validation, since: validationStarted)
+        let rankingStarted = ContinuousClock.now
         let transitProfile = useful.filter { $0.legs.contains { if case .transit = $0 { true } else { false } } }
         let retained = useful.filter { candidate in
             // The engine keeps an all-the-way walk as a comparison outside transit slots.
@@ -451,6 +455,7 @@ public actor JourneyResultSession {
             ($0.id, JourneyRefinementToken(generation: generation, journeyID: $0.id,
                                           transitFingerprint: $0.transitFingerprint))
         })
+        diagnostics.record(.ranking, since: rankingStarted)
         var result = JourneyPlanningResult(journeys: retained, recommendedJourneyID: recommended?.id,
             invalidatedIDs: invalidated, feasibility: assessments,
             transferRisks: Dictionary(uniqueKeysWithValues: retained.map {

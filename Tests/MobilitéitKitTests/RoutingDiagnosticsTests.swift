@@ -34,4 +34,20 @@ import Testing
         #expect(initial.journeys.map(\.id) == cached.journeys.map(\.id))
     }
 
+    @Test func spansAndSearchPassesSurviveAggregation() {
+        let start = ContinuousClock.now
+        var combined = RoutingDiagnostics(startedAt: start)
+        var first = RoutingDiagnostics(startedAt: start)
+        first.record(.raptor, since: start)
+        first.recordSearch(since: start, horizon: 10_800, wave: 0, rounds: [], candidates: 4, walkingMilliseconds: 2)
+        var second = RoutingDiagnostics()
+        second.recordSearch(since: .now, horizon: 21_600, wave: 1, rounds: [], candidates: 8, walkingMilliseconds: 1)
+        combined.include(first); combined.include(second)
+        #expect(combined.searchPasses.map(\.horizonSeconds) == [10_800, 21_600])
+        #expect(combined.searchPasses.map(\.realtimeWave) == [0, 1])
+        #expect(combined.spans.count == 1)
+        #expect(combined.searchPasses.allSatisfy { $0.startMilliseconds >= 0 })
+        #expect(RoutingDiagnostics.cumulativeWorkStages == [.http, .decode])
+    }
+
 }

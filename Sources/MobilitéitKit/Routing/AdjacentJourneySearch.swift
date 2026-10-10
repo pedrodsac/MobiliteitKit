@@ -20,6 +20,7 @@ struct AdjacentJourneySearch {
     func calculate(refresh: JourneyRefreshPolicy) async throws -> Result {
         let arrival = if case .arriveBy = request.time { true } else { false }
         let started = ContinuousClock.now
+        var cumulative = RoutingDiagnostics(startedAt: started)
         var horizon: TimeInterval = 3 * 60 * 60
         while true {
             try Task.checkCancellation()
@@ -43,10 +44,13 @@ struct AdjacentJourneySearch {
             if let patches, !historical { await session.setFrozenPatches(patches) }
             // A later arrival can belong to a journey which started before the
             // previous arrival boundary. Keep the normal arrive-by lookback.
-            let page = try await session.adjacentTimePage(axis: arrival ? .arrival : .departure,
+            var page = try await session.adjacentTimePage(axis: arrival ? .arrival : .departure,
                 boundary: boundary, earlier: earlier, count: 10, excludingIDs: excludingIDs,
                 searchHorizon: arrival && !earlier ? Raptor.fullProfileHorizon : horizon)
+            cumulative.include(page.diagnostics)
             if !page.journeys.isEmpty || horizon == Raptor.fullProfileHorizon {
+                cumulative.totalMilliseconds = RoutingDiagnostics.elapsed(since: started)
+                page.diagnostics = cumulative
                 return Result(page: page, query: query, patches: await session.currentPatches(),
                     window: .init(axis: arrival ? .arrival : .departure,
                                   range: .init(start: start, end: end)))

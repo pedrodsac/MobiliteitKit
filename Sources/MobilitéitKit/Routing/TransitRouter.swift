@@ -603,16 +603,7 @@ public actor JourneyPlanningSession {
             let spent = metrics.realtimePreparationMilliseconds - realtimeBefore
             all = try await generate(anchor: query.departureTime, searchHorizon: horizon,
                 reusingRealtime: horizon > 3 * 3_600, realtimeBudgetLimit: max(0, budget - spent))
-            for (stage, value) in diagnostics.milliseconds { cumulative.milliseconds[stage, default: 0] += value }
-            for (reason, value) in diagnostics.realtimeMatchingRejections { cumulative.realtimeMatchingRejections[reason, default: 0] += value }
-            for (reason, value) in diagnostics.rejections { cumulative.rejections[reason, default: 0] += value }
-            let gauges: Set<RoutingDiagnostics.Counter> = [.predictedEvents, .boardsCovered, .incompleteBoards,
-                .workers, .candidates, .retainedAlternatives]
-            for (counter, value) in diagnostics.counters {
-                if gauges.contains(counter) { cumulative.counters[counter] = value }
-                else { cumulative.counters[counter, default: 0] += value }
-            }
-            cumulative.rounds = diagnostics.rounds
+            cumulative.include(diagnostics)
             cpu += metrics.raptorCPUMilliseconds
             walkingPairs += metrics.walkingTransferPairs
             let chosen = JourneyQualityPolicy.primarySuggestions(all, count: count, query: query)
@@ -783,6 +774,9 @@ public actor JourneyPlanningSession {
             searchResult = try await Raptor.search(snapshot: snapshot, query: query, access: access, egress: egress,
                 patches: Array(latestPatchesByInstance.values), walking: walking, profileHorizon: searchHorizon)
             diagnostics.record(.raptor, since: raptorStarted)
+            diagnostics.recordSearch(since: raptorStarted, horizon: searchHorizon, wave: refinementWaves,
+                rounds: searchResult.roundMetrics, candidates: searchResult.candidates.count,
+                walkingMilliseconds: searchResult.walkingTransferMilliseconds)
             cpuMilliseconds += searchResult.cpuMilliseconds
             walkingPairs += searchResult.walkingTransferPairs
             diagnostics.milliseconds[.walkingTransfers, default: 0] += Double(searchResult.walkingTransferMilliseconds)
@@ -866,7 +860,6 @@ public actor JourneyPlanningSession {
             .retainedAlternatives: metrics.alternativesRetained,
             .invalidJourneys: diagnostics.rejections.values.reduce(0, +),
             .duplicatesSuppressed: built.validCandidates - built.representativeCount]
-        diagnostics.rounds = searchResult.roundMetrics
         directWalking = direct
         metrics.profileGenerationMilliseconds = Int(RoutingDiagnostics.elapsed(since: started))
         diagnostics.totalMilliseconds = RoutingDiagnostics.elapsed(since: started)

@@ -5,7 +5,7 @@ import Testing
 @Suite("Routing prevention: independent tiny-network oracle")
 struct RoutingPreventionOracleTests {
     struct Ride { let id: String; let from: String; let to: String; let departure: Int; let arrival: Int }
-    struct Outcome: Hashable { let departure: Int; let arrival: Int; let transfers: Int }
+    struct Outcome: Hashable { let departure: Int; let arrival: Int; let transfers: Int; let tightTransfer: Bool }
 
     @Test func generatedTimetablesMatchExhaustiveFeasibleParetoOutcomes() async throws {
         var state: UInt64 = 0x49cafe
@@ -21,24 +21,24 @@ struct RoutingPreventionOracleTests {
                 times: rides.map { "\($0.id),\(clock($0.departure)),\(clock($0.departure)),\($0.from),1\n\($0.id),\(clock($0.arrival)),\(clock($0.arrival)),\($0.to),2\n" }.joined())
             let fixture = try await RoutingPreventionFixture(files: files); defer { fixture.remove() }
             var exhaustive: Set<Outcome> = []
-            func visit(stop: String, time: Int, first: Int?, used: Set<String>) {
-                if stop == "d", let first { exhaustive.insert(.init(departure: first, arrival: time, transfers: used.count - 1)); return }
+            func visit(stop: String, time: Int, first: Int?, used: Set<String>, tight: Bool) {
+                if stop == "d", let first { exhaustive.insert(.init(departure: first, arrival: time, transfers: used.count - 1, tightTransfer: tight)); return }
                 if used.count == 3 { return }
                 for ride in rides where ride.from == stop && !used.contains(ride.id) && ride.departure >= time + (used.isEmpty ? 0 : 120) {
-                    visit(stop: ride.to, time: ride.arrival, first: first ?? ride.departure, used: used.union([ride.id]))
+                    visit(stop: ride.to, time: ride.arrival, first: first ?? ride.departure, used: used.union([ride.id]), tight: tight || (!used.isEmpty && ride.departure - time < 180))
                 }
             }
-            visit(stop: "a", time: 0, first: nil, used: [])
+            visit(stop: "a", time: 0, first: nil, used: [], tight: false)
             let pareto = exhaustive.filter { candidate in
                 !exhaustive.contains { other in
-                    other != candidate && other.departure >= candidate.departure && other.arrival <= candidate.arrival && other.transfers <= candidate.transfers
+                    other != candidate && other.departure >= candidate.departure && other.arrival <= candidate.arrival && other.transfers <= candidate.transfers && (!other.tightTransfer || candidate.tightTransfer)
                 }
             }
             let query = fixture.query(preferences: .init(maxTransfers: 2))
             let actual = try await fixture.profile(query)
             let outcomes = Set(actual.journeys.map { journey in
                 Outcome(departure: Int(journey.effectiveDeparture.timeIntervalSince(date(hour: 8))),
-                    arrival: Int(journey.effectiveArrival.timeIntervalSince(date(hour: 8))), transfers: journey.transferCount)
+                    arrival: Int(journey.effectiveArrival.timeIntervalSince(date(hour: 8))), transfers: journey.transferCount, tightTransfer: journey.statusEvidence.tightTransfer)
             })
             #expect(outcomes == Set(pareto), "oracle seed \(seed)")
             #expect(actual.journeys.allSatisfy { !JourneyPublicationValidator.assess($0, query: query).isInvalid })

@@ -47,6 +47,7 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
     let maximumConcurrentBoardRequests: Int
     let cacheLifetime: TimeInterval
     let requestTimeout: Duration
+    let matchingNow: @Sendable () -> ContinuousClock.Instant
     let now: @Sendable () -> Date
     let fullTimestampFormatter: DateFormatter
     let minuteTimestampFormatter: DateFormatter
@@ -68,18 +69,19 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
         self.maximumConcurrentBoardRequests = max(1, maximumConcurrentBoardRequests)
         self.cacheLifetime = max(0, cacheLifetime)
         self.requestTimeout = requestTimeout
-        self.now = { .now }
+        self.now = { .now }; matchingNow = { .now }
         fullTimestampFormatter = Self.makeFormatter("yyyy-MM-dd HH:mm:ss")
         minuteTimestampFormatter = Self.makeFormatter("yyyy-MM-dd HH:mm")
     }
 
     init(store: GTFSStore, client: MobiliteitAPIClient, maximumConcurrentBoardRequests: Int = 4,
          cacheLifetime: TimeInterval = 60, requestTimeout: Duration = .seconds(4),
-         now: @escaping @Sendable () -> Date) {
+         now: @escaping @Sendable () -> Date,
+         matchingNow: @escaping @Sendable () -> ContinuousClock.Instant = { .now }) {
         self.store = store; self.client = client
         self.maximumConcurrentBoardRequests = max(1, maximumConcurrentBoardRequests)
         self.cacheLifetime = max(0, cacheLifetime); self.requestTimeout = requestTimeout
-        self.now = now
+        self.now = now; self.matchingNow = matchingNow
         fullTimestampFormatter = Self.makeFormatter("yyyy-MM-dd HH:mm:ss")
         minuteTimestampFormatter = Self.makeFormatter("yyyy-MM-dd HH:mm")
     }
@@ -125,13 +127,13 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
         var unfinished = Set<String>()
         var rejections: [RealtimeMatchingRejection: Int] = [:]
         for stopID in stopIDs {
-            guard ContinuousClock.now < deadline else { unfinished.insert(stopID); continue }
+            guard matchingNow() < deadline else { unfinished.insert(stopID); continue }
             guard let result = fetched[stopID], let board = result.board else { continue }
             let scheduled = prepared.byStopID[stopID] ?? []
             let desired = request.tripIDs.isEmpty ? [] : scheduled.filter { request.tripIDs.contains($0.departure.tripID) }
             for live in board.departures.values {
                 try Task.checkCancellation()
-                guard ContinuousClock.now < deadline else { unfinished.insert(stopID); break }
+                guard matchingNow() < deadline else { unfinished.insert(stopID); break }
                 guard request.includeTripMetadata || Self.hasRealtimeSignal(live) else { continue }
                 guard let planned = date(date: live.plannedDate, time: live.plannedTime) else {
                     rejections[.invalidTimestamp, default: 0] += 1; continue
@@ -162,14 +164,14 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
                         rejections[error.reason, default: 0] += 1; candidate = nil
                     }
                 }
-                guard ContinuousClock.now < deadline else { unfinished.insert(stopID); break }
+                guard matchingNow() < deadline else { unfinished.insert(stopID); break }
                 guard let candidate else { continue }
                 // Resolve ambiguity against the complete timetable first.
                 guard request.tripIDs.isEmpty || request.tripIDs.contains(candidate.departure.tripID) else { continue }
                 guard let update = await patch(for: live, candidate: candidate,
                                                boardingStopID: stopID, observedAt: result.observations[live.cacheIdentity] ?? result.fetchedAt, deadline: deadline)
                 else { rejections[.invalidTripTimeline, default: 0] += 1; continue }
-                guard ContinuousClock.now < deadline else { unfinished.insert(stopID); break }
+                guard matchingNow() < deadline else { unfinished.insert(stopID); break }
                 if let reference {
                     matchedJourneys[reference] = .init(tripID: candidate.departure.tripID,
                                                        serviceDate: candidate.serviceDate,
@@ -178,7 +180,7 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
                 let key = "\(update.tripID)@\(update.serviceDate.compactString)"
                 patches[key] = patches[key].map { $0.merging(update) } ?? update
             }
-            if ContinuousClock.now >= deadline { unfinished.insert(stopID) }
+            if matchingNow() >= deadline { unfinished.insert(stopID) }
         }
         if matchedJourneys.count > 512 {
             matchedJourneys = Dictionary(uniqueKeysWithValues: matchedJourneys.sorted {
