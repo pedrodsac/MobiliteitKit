@@ -45,7 +45,12 @@ extension HafasRealtimeRoutingProvider {
         return await Self.fetchResults(
             stopIDs: ordered,
             maximumConcurrentRequests: min(maximumConcurrentBoardRequests, request.maximumConcurrentRequests),
-            timeout: max(.zero, ContinuousClock.now.duration(to: deadline))
+            timeout: max(.zero, ContinuousClock.now.duration(to: deadline)),
+            prepared: { [weak self] value in
+                await self?.prepareBoard(value.board,
+                    from: request.from.addingTimeInterval(-Double(request.scheduledLookbackSeconds)),
+                    through: request.through, deadline: deadline)
+            }
         ) { [client, now, cacheLifetime] stopID in
             await Self.acquireStop(client: client, stopID: stopID, request: request, now: now, cacheLifetime: cacheLifetime)
         }
@@ -140,6 +145,7 @@ extension HafasRealtimeRoutingProvider {
 
     private nonisolated static func fetchResults(
         stopIDs: [String], maximumConcurrentRequests: Int, timeout: Duration,
+        prepared: @escaping @Sendable (BoardResult) async -> Void = { _ in },
         fetch: @escaping @Sendable (String) async -> BoardResult
     ) async -> [String: BoardResult] {
         guard !stopIDs.isEmpty else { return [:] }
@@ -167,8 +173,9 @@ extension HafasRealtimeRoutingProvider {
                     return result
                 case let .result(value):
                     result[value.stopID] = value; completed += 1
-                    if completed == stopIDs.count { group.cancelAll(); return result }
                     if next < stopIDs.count, !Task.isCancelled { add() }
+                    await prepared(value)
+                    if completed == stopIDs.count { group.cancelAll(); return result }
                 }
             }
             return result

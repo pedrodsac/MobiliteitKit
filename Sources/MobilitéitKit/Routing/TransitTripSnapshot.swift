@@ -59,7 +59,7 @@ extension TransitRouter {
         let occurrences = [trip.times.first(where: { $0.departure != nil }), boarding].compactMap { $0 }
         let targets = occurrences.compactMap { time -> RealtimeBoardTarget? in
             guard let seconds = time.departure else { return nil }
-            let scheduled = snapshot.converter.date(serviceDate: instance.serviceDate, serviceSeconds: seconds)
+            let scheduled = snapshot.date(serviceDate: instance.serviceDate, serviceSeconds: seconds)
             return .init(stopID: snapshot.stops[time.stop].id, from: scheduled.addingTimeInterval(-90),
                 through: scheduled.addingTimeInterval(RealtimeTimeline.maximumDelay + 90), lines: lines)
         }
@@ -82,7 +82,7 @@ extension TransitRouter {
                         prognosis: String?, observed: Date?, cancelled: Bool?) -> TransitTripTiming? {
                 guard let seconds else { return nil }
                 return TransitTripTiming(
-                    scheduled: snapshot.converter.date(serviceDate: instance.serviceDate, serviceSeconds: seconds),
+                    scheduled: snapshot.date(serviceDate: instance.serviceDate, serviceSeconds: seconds),
                     realtime: source == .reported && prognosis?.uppercased() != "UNKNOWN" ? prediction : nil,
                     prognosisType: prognosis, observedAt: observed,
                     isCancelled: patch?.status == .cancelled || cancelled == true

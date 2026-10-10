@@ -22,7 +22,15 @@ enum Raptor {
     struct Candidate: Sendable {
         let legs: [Leg]; let firstStop: Int; let lastStop: Int; let firstDeparture: Date; let lastArrival: Date
         let minimumTransferSlack: Int; let totalTransferSlack: Int; let pathwaySeconds: Int; let pathwayDistance: Double
-        var transitLegs: [TransitLeg] { legs.compactMap { if case let .transit(leg) = $0 { return leg }; return nil } }
+        let transitLegs: [TransitLeg]
+        init(legs: [Leg], firstStop: Int, lastStop: Int, firstDeparture: Date, lastArrival: Date,
+             minimumTransferSlack: Int, totalTransferSlack: Int, pathwaySeconds: Int, pathwayDistance: Double) {
+            self.legs = legs; self.firstStop = firstStop; self.lastStop = lastStop
+            self.firstDeparture = firstDeparture; self.lastArrival = lastArrival
+            self.minimumTransferSlack = minimumTransferSlack; self.totalTransferSlack = totalTransferSlack
+            self.pathwaySeconds = pathwaySeconds; self.pathwayDistance = pathwayDistance
+            transitLegs = legs.compactMap { if case let .transit(leg) = $0 { leg } else { nil } }
+        }
         var firstTransit: TransitLeg? { transitLegs.first }
         var lastTransit: TransitLeg? { transitLegs.last }
         func tripInstanceKey(snapshot: RoutingSnapshot) -> String {
@@ -47,9 +55,10 @@ enum Raptor {
         let walkingTransferPairs: Int
         let maximumWorkerCount: Int
         let roundMetrics: [RoutingRoundMetrics]
+        var preparation = PreparationCache()
     }
     struct PatchKey: Hashable, Sendable { let trip: Int; let serviceDate: GTFSDate }
-    struct PatchOverlay: Sendable {
+    struct PatchOverlay: Equatable, Sendable {
         let status: RealtimeTripStatus
         let eventsByPosition: [Int: RealtimeStopEventPatch]
     }
@@ -211,18 +220,13 @@ enum Raptor {
     /// reach an egress stop with the given number of further vehicle rides.
     /// Pedestrian links are included even when the walking provider may later
     /// reject them, so this bound can only remove impossible journeys.
-    struct DestinationReachability {
+    struct DestinationReachability: Sendable {
         let stopsByRemainingRides: [[Bool]]
         let lastAlightPositionByRemainingRides: [[Int]]
 
         init(snapshot: RoutingSnapshot, egressStops: Set<Int>, maxRides: Int) {
             let stopCount = snapshot.stops.count
-            var walkingSources = Array(repeating: [Int](), count: stopCount)
-            for from in snapshot.nearbyTransferStopsByStop.indices {
-                for to in snapshot.nearbyTransferStopsByStop[from] {
-                    walkingSources[to].append(from)
-                }
-            }
+            let walkingSources = snapshot.nearbyTransferSourcesByStop
             func walkingClosure(_ seeds: [Bool]) -> [Bool] {
                 var result = seeds
                 var queue = result.indices.filter { result[$0] }

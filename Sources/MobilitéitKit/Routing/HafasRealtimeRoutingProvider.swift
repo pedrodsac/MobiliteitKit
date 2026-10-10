@@ -53,6 +53,8 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
     let minuteTimestampFormatter: DateFormatter
     var timestampCache: [String: Date] = [:]
     var invalidTimestamps: Set<String> = []
+    struct AlignmentKey: Hashable { let tripID: String; let date: GTFSDate; let stops: [HafasPasslistStop] }
+    var alignments: [AlignmentKey: [Int: HafasPasslistStop]] = [:]
     var normalizedNames: [String: String] = [:]
     var serviceDayStarts: [GTFSDate: Date] = [:]
     var schedulesByStopID: [String: ScheduleCache] = [:]

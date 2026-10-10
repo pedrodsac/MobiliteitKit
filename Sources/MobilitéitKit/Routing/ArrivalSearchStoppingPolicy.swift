@@ -23,7 +23,7 @@ enum ArrivalSearchStoppingPolicy {
             for time in trip.times where time.pickup == 0 {
                 guard let departure = time.departure, let walkingSeconds = accessSeconds[time.stop] else { continue }
                 checkedBoarding = true
-                let scheduled = snapshot.converter.date(serviceDate: instance.serviceDate, serviceSeconds: departure)
+                let scheduled = snapshot.date(serviceDate: instance.serviceDate, serviceSeconds: departure)
                 let event = patch?.event(stopID: snapshot.stops[time.stop].id, sequence: time.sequence)
                 let effective = event?.effectiveDeparture ?? scheduled
                 let deadline = event?.departureSource == .estimated ? min(scheduled, effective) : effective

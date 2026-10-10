@@ -38,12 +38,16 @@ public enum JourneyItineraryValidator {
 
     public static func transferRisks(_ journey: Journey,
                                      context: JourneyValidationContext) -> [Int: JourneyTransferRisk] {
-        let rides = journey.legs.enumerated().compactMap { index, leg -> (Int, TransitLeg)? in
+        transferRisks(in: journey.legs)
+    }
+
+    static func transferRisks(in legs: [JourneyLeg]) -> [Int: JourneyTransferRisk] {
+        let rides = legs.enumerated().compactMap { index, leg -> (Int, TransitLeg)? in
             if case let .transit(t) = leg { (index, t) } else { nil }
         }
         var risks: [Int: JourneyTransferRisk] = [:]
         for (incoming, outgoing) in zip(rides, rides.dropFirst()) {
-            let between = journey.legs[(incoming.0 + 1)..<outgoing.0]
+            let between = legs[(incoming.0 + 1)..<outgoing.0]
             if between.contains(where: { if case .inSeatContinuation = $0 { true } else { false } }) { continue }
             let movement = between.reduce(0.0) { sum, leg in
                 if case let .walk(w) = leg { sum + w.duration } else { sum }
@@ -129,13 +133,12 @@ public struct JourneyStatusEvidence: Codable, Hashable, Sendable {
 }
 
 extension Journey {
-    public var statusEvidence: JourneyStatusEvidence {
+    static func evidence(for legs: [JourneyLeg]) -> JourneyStatusEvidence {
         let rides = legs.compactMap { if case let .transit(t) = $0 { t } else { nil } }
         let live = rides.filter { $0.board.timingSource != .scheduled || $0.alight.timingSource != .scheduled }
         let coverage: JourneyRealtimeCoverage = live.isEmpty ? .scheduleOnly :
             (live.count == rides.count ? .live : .partial)
-        let tight = JourneyItineraryValidator.transferRisks(self, context: .init(
-            anchor: effectiveDeparture, arriveBy: false, minimumTransferSeconds: 120)).values.contains(.tight)
+        let tight = JourneyItineraryValidator.transferRisks(in: legs).values.contains(.tight)
         return .init(firstBoarding: rides.first?.boardingDeadline ?? rides.first?.effectiveDeparture,
                      cancelled: rides.contains { $0.status == .cancelled },
                      delayed: live.contains { $0.effectiveDeparture > $0.scheduledDeparture },

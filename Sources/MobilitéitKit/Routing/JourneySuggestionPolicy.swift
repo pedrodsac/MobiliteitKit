@@ -14,7 +14,7 @@ public struct JourneySuggestionPolicy: Hashable, Sendable, Codable {
 }
 
 extension Journey {
-    var firstRide: TransitLeg? { legs.compactMap { if case let .transit(t) = $0 { t } else { nil } }.first }
+    var firstRide: TransitLeg? { legs.lazy.compactMap { if case let .transit(t) = $0 { t } else { nil } }.first }
     var firstVehicleKey: String? { firstRide.map { $0.instance?.stableKey ?? "\($0.tripID)@\($0.scheduledDeparture.timeIntervalSince1970)" } }
 }
 

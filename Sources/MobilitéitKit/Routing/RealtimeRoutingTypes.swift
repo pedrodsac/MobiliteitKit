@@ -60,7 +60,25 @@ public struct RealtimeStopEventPatch: Hashable, Sendable {
 }
 /// A high-confidence, already matched GTFS trip-instance update. The mapping
 /// layer belongs outside RAPTOR; this compact value is its immutable hand-off.
-public struct RealtimeTripPatch: Hashable, Sendable { public let tripID: String; public let serviceDate: GTFSDate; public let status: RealtimeTripStatus; public let events: [RealtimeStopEventPatch]; public init(tripID: String, serviceDate: GTFSDate, status: RealtimeTripStatus = .active, events: [RealtimeStopEventPatch]) { self.tripID = tripID; self.serviceDate = serviceDate; self.status = status; self.events = events } }
+struct RealtimeEventKey: Hashable, Sendable { let stopID: String; let sequence: Int? }
+public struct RealtimeTripPatch: Hashable, Sendable {
+    public let tripID: String
+    public let serviceDate: GTFSDate
+    public let status: RealtimeTripStatus
+    public let events: [RealtimeStopEventPatch]
+    let firstEventByOccurrence: [RealtimeEventKey: Int]
+    public init(tripID: String, serviceDate: GTFSDate, status: RealtimeTripStatus = .active, events: [RealtimeStopEventPatch]) {
+        self.tripID = tripID; self.serviceDate = serviceDate; self.status = status; self.events = events
+        var index: [RealtimeEventKey: Int] = [:]
+        if events.count >= 8 {
+            for (position, event) in events.enumerated() {
+                let key = RealtimeEventKey(stopID: event.stopID, sequence: event.stopSequence)
+                if index[key] == nil { index[key] = position }
+            }
+        }
+        firstEventByOccurrence = index
+    }
+}
 public struct RealtimePatchBatch: Hashable, Sendable {
     public let patches: [RealtimeTripPatch]
     public let requestedStopIDs: Set<String>

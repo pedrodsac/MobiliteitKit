@@ -15,6 +15,7 @@ actor WalkingRouteCache: WalkingRoutingProvider {
         let source: Coordinate
         let destination: Coordinate
         let departureBucket: Int64?
+        let revision: String?
     }
 
     private struct Cached<Value: Sendable>: Sendable {
@@ -47,8 +48,9 @@ actor WalkingRouteCache: WalkingRoutingProvider {
         .init(requests: requestCount, hits: hitCount)
     }
 
-    func correct(_ request: WalkingRequest, with route: WalkingRoute) {
-        let key = key(for: request)
+    func correct(_ request: WalkingRequest, with route: WalkingRoute) async {
+        let revision = await provider.cacheRevision()
+        let key = key(for: request, revision: revision)
         routeTasks[key]?.cancel()
         estimateTasks[key]?.cancel()
         routeTasks[key] = nil
@@ -59,7 +61,8 @@ actor WalkingRouteCache: WalkingRoutingProvider {
     }
 
     func estimate(_ request: WalkingRequest) async throws -> WalkingEstimate {
-        let key = key(for: request)
+        let revision = await provider.cacheRevision()
+        let key = key(for: request, revision: revision)
         requestCount += 1
         if let cached = estimatesByKey[key] {
             hitCount += 1
@@ -86,7 +89,8 @@ actor WalkingRouteCache: WalkingRoutingProvider {
     }
 
     func route(_ request: WalkingRequest) async throws -> WalkingRoute {
-        let key = key(for: request)
+        let revision = await provider.cacheRevision()
+        let key = key(for: request, revision: revision)
         requestCount += 1
         if let cached = routesByKey[key] {
             hitCount += 1
@@ -118,6 +122,7 @@ actor WalkingRouteCache: WalkingRoutingProvider {
     ) async -> [WalkingRoute?] {
         guard !requests.isEmpty else { return [] }
         guard !Task.isCancelled else { return Array(repeating: nil, count: requests.count) }
+        let revision = await provider.cacheRevision()
         var results = Array<WalkingRoute?>(repeating: nil, count: requests.count)
         var tasks = Array<Task<WalkingRoute, Error>?>(repeating: nil, count: requests.count)
         var missingRequests: [WalkingRequest] = []
@@ -126,7 +131,7 @@ actor WalkingRouteCache: WalkingRoutingProvider {
 
         for (index, request) in requests.enumerated() {
             requestCount += 1
-            let key = key(for: request)
+            let key = key(for: request, revision: revision)
             if let cached = routesByKey[key] {
                 hitCount += 1
                 touchRoute(cached.value, for: key)
@@ -166,7 +171,7 @@ actor WalkingRouteCache: WalkingRoutingProvider {
             for index in requests.indices where results[index] == nil {
                 guard !Task.isCancelled else { break }
                 guard let task = tasks[index] else { continue }
-                let key = key(for: requests[index])
+                let key = key(for: requests[index], revision: revision)
                 do {
                     let value = try await task.value
                     guard !Task.isCancelled else { break }
@@ -186,7 +191,7 @@ actor WalkingRouteCache: WalkingRoutingProvider {
         return results
     }
 
-    private func key(for request: WalkingRequest) -> Key {
+    private func key(for request: WalkingRequest, revision: String?) -> Key {
         let bucket = departureBucketSeconds.flatMap { width -> Int64? in
             guard width > 0, let departure = request.departure else { return nil }
             return Int64((departure.timeIntervalSinceReferenceDate / width).rounded(.down))
@@ -194,7 +199,7 @@ actor WalkingRouteCache: WalkingRoutingProvider {
         return .init(
             source: request.source,
             destination: request.destination,
-            departureBucket: bucket
+            departureBucket: bucket, revision: revision
         )
     }
 

@@ -5,6 +5,9 @@ extension HafasRealtimeRoutingProvider {
     /// identity + scheduled instant, using the GTFS service date after midnight.
     func align(_ live: [HafasPasslistStop], to scheduled: [TripStopTime],
                serviceDate: GTFSDate, deadline: ContinuousClock.Instant? = nil) -> [Int: HafasPasslistStop] {
+        guard !Task.isCancelled, deadline.map({ ContinuousClock.now < $0 }) ?? true else { return [:] }
+        let key = AlignmentKey(tripID: scheduled.first?.tripID ?? "", date: serviceDate, stops: live)
+        if let cached = alignments[key] { return cached }
         var result: [Int: HafasPasslistStop] = [:]
         var start = 0
         var previousRouteIndex: Int?
@@ -19,6 +22,7 @@ extension HafasRealtimeRoutingProvider {
             start = position + 1
             previousRouteIndex = stop.routeIndex ?? previousRouteIndex
         }
+        if !scheduled.isEmpty, alignments.count < 512 { alignments[key] = result }
         return result
     }
 

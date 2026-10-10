@@ -147,6 +147,9 @@ public struct WalkingStep: Hashable, Sendable { public let instruction: String; 
 public enum WalkingEvidence: String, Hashable, Sendable, Codable { case routedPedestrian, estimate }
 public struct WalkingRoute: Hashable, Sendable { public let durationSeconds: Int; public let distanceMeters: Double; public let polyline: [Coordinate]; public let steps: [WalkingStep]; public let evidence: WalkingEvidence; public init(durationSeconds: Int, distanceMeters: Double, polyline: [Coordinate] = [], steps: [WalkingStep] = [], evidence: WalkingEvidence = .routedPedestrian) { self.durationSeconds = durationSeconds; self.distanceMeters = distanceMeters; self.polyline = polyline; self.steps = steps; self.evidence = evidence } }
 public protocol WalkingRoutingProvider: Sendable {
+    /// Immutable graph/provider identity; nil preserves the original fixture contract.
+    func cacheRevision() async -> String?
+
     func estimate(_ request: WalkingRequest) async throws -> WalkingEstimate
     func route(_ request: WalkingRequest) async throws -> WalkingRoute
 
@@ -159,6 +162,7 @@ public protocol WalkingRoutingProvider: Sendable {
 }
 
 public extension WalkingRoutingProvider {
+    func cacheRevision() async -> String? { nil }
     func routes(
         _ requests: [WalkingRequest],
         maximumConcurrency: Int = 4
@@ -227,7 +231,6 @@ public struct InSeatContinuationLeg: Hashable, Sendable { public let fromTripID:
 public enum JourneyLeg: Hashable, Sendable { case walk(WalkingLeg), transit(TransitLeg), inSeatContinuation(InSeatContinuationLeg) }
 public struct JourneySignature: Hashable, Sendable, Codable, Comparable, Identifiable { public let value: String; public var id: String { value }; public init(_ value: String) { self.value = value }; public static func < (l: Self, r: Self) -> Bool { l.value < r.value } }
 public enum PageRealtimeState: String, Hashable, Sendable, Codable { case disabled, unavailable, partial, live }
-public struct Journey: Hashable, Sendable, Identifiable { public let id: JourneySignature; public let origin: JourneyEndpoint; public let destination: JourneyEndpoint; public let scheduledDeparture: Date; public let scheduledArrival: Date; public let effectiveDeparture: Date; public let effectiveArrival: Date; public let transferCount: Int; public let walkingDuration: TimeInterval; public let walkingDistance: Double; public let waitingDuration: TimeInterval; public let inVehicleDuration: TimeInterval; public let legs: [JourneyLeg]; public let feedGeneration: Int; public let accessibility: AccessibilityAssessment; public let matchesPreferredMode: Bool; public var duration: TimeInterval { effectiveArrival.timeIntervalSince(effectiveDeparture) } }
 public struct RoutingMetrics: Hashable, Sendable {
     public var pointRaptorScans = 0; public var profileGenerationMilliseconds = 0
     public var snapshotLoadMilliseconds = 0; public var raptorSearchMilliseconds = 0
@@ -300,12 +303,21 @@ struct SnapshotTrip: Sendable {
     var bikesAllowed: Int = 0
     var isFrequencyTemplate = false
     let firstServiceTime: Int32; let lastServiceTime: Int32
+    let consecutiveSequences: Bool
 
     init(id: String, route: Int, service: Int, times: [SnapshotTime], headsign: String?, wheelchairAccessible: Int) {
         self.id = id; self.route = route; self.service = service; self.times = times; self.headsign = headsign
         self.wheelchairAccessible = wheelchairAccessible
+        consecutiveSequences = times.enumerated().allSatisfy { $0.element.sequence == (times.first?.sequence ?? 0) + $0.offset }
         firstServiceTime = times.lazy.compactMap { $0.departure ?? $0.arrival }.first ?? 0
         lastServiceTime = times.lazy.reversed().compactMap { $0.departure ?? $0.arrival }.first ?? 0
+    }
+    func position(of sequence: Int) -> Int? {
+        if consecutiveSequences, let first = times.first {
+            let index = sequence - first.sequence
+            return times.indices.contains(index) ? index : nil
+        }
+        return times.firstIndex { $0.sequence == sequence }
     }
 }
 struct SnapshotRule: Sendable { let order: Int; let from: Int?; let to: Int?; let type: Int; let minimum: Int?; let fromRoute: Int?; let toRoute: Int?; let fromTrip: Int?; let toTrip: Int? }
@@ -320,6 +332,12 @@ struct SnapshotServiceDay: Sendable { let offset: Int; let date: GTFSDate; let s
 private struct StopGridCell: Hashable { let latitude: Int; let longitude: Int }
 struct RoutingSnapshot: Sendable {
     let info: FeedInfo; let converter: ServiceInstantConverter; let stops: [SnapshotStop]; let stopByID: [String: Int]; let routes: [TransitRoute]; let trips: [SnapshotTrip]; let tripByID: [String: Int]; let tripIndicesByDepartureStop: [[Int]]; let serviceRoutesByStop: [[ServiceRoute]]; let boardableStops: Set<Int>; let alightableStops: Set<Int>; let serviceDays: [SnapshotServiceDay]; let lastActiveDayStartByService: [Date?]; let rulesByGroup: [RuleGroupKey: [SnapshotRule]]; let stationGroupByStop: [Int]; let pathsByFrom: [[SnapshotPath]]; let pathsByTo: [[SnapshotPath]]; let nearbyTransferStopsByStop: [[Int]]
+    let serviceDayByDate: [GTFSDate: SnapshotServiceDay]
+    let nearbyTransferSourcesByStop: [[Int]]
+    func date(serviceDate: GTFSDate, serviceSeconds: Int32) -> Date {
+        serviceDayByDate[serviceDate]?.start.addingTimeInterval(Double(serviceSeconds))
+            ?? converter.date(serviceDate: serviceDate, serviceSeconds: serviceSeconds)
+    }
     let hasContinuations: Bool
     let patterns: [SnapshotPattern]; let patternOccurrencesByStop: [[PatternOccurrence]]; let loadMilliseconds: Int
 }
@@ -468,7 +486,11 @@ private enum SnapshotBuilder {
                 lastActiveDayStartByService[service] = day.start
             }
         }
-        return .init(info: info, converter: converter, stops: stops, stopByID: stopByID, routes: routes, trips: trips, tripByID: tripByID, tripIndicesByDepartureStop: tripIndicesByDepartureStop, serviceRoutesByStop: serviceRoutesByStop.map(Array.init), boardableStops: boardableStops, alightableStops: alightableStops, serviceDays: serviceDays, lastActiveDayStartByService: lastActiveDayStartByService, rulesByGroup: rulesByGroup, stationGroupByStop: stationGroupByStop, pathsByFrom: pathsByFrom, pathsByTo: pathsByTo, nearbyTransferStopsByStop: nearbyTransferStopsByStop, hasContinuations: rulesByGroup.values.joined().contains { $0.type == 4 && $0.fromTrip != nil && $0.toTrip != nil }, patterns: patterns, patternOccurrencesByStop: patternOccurrencesByStop, loadMilliseconds: Int(RoutingDiagnostics.elapsed(since: loadStarted)))
+        var nearbyTransferSourcesByStop = Array(repeating: [Int](), count: stops.count)
+        for from in nearbyTransferStopsByStop.indices {
+            for to in nearbyTransferStopsByStop[from] { nearbyTransferSourcesByStop[to].append(from) }
+        }
+        return .init(info: info, converter: converter, stops: stops, stopByID: stopByID, routes: routes, trips: trips, tripByID: tripByID, tripIndicesByDepartureStop: tripIndicesByDepartureStop, serviceRoutesByStop: serviceRoutesByStop.map(Array.init), boardableStops: boardableStops, alightableStops: alightableStops, serviceDays: serviceDays, lastActiveDayStartByService: lastActiveDayStartByService, rulesByGroup: rulesByGroup, stationGroupByStop: stationGroupByStop, pathsByFrom: pathsByFrom, pathsByTo: pathsByTo, nearbyTransferStopsByStop: nearbyTransferStopsByStop, serviceDayByDate: Dictionary(uniqueKeysWithValues: serviceDays.map { ($0.date, $0) }), nearbyTransferSourcesByStop: nearbyTransferSourcesByStop, hasContinuations: rulesByGroup.values.joined().contains { $0.type == 4 && $0.fromTrip != nil && $0.toTrip != nil }, patterns: patterns, patternOccurrencesByStop: patternOccurrencesByStop, loadMilliseconds: Int(RoutingDiagnostics.elapsed(since: loadStarted)))
     }
 
     /// Precomputes a small geographic interchange frontier for every stop.
@@ -572,6 +594,7 @@ public actor JourneyPlanningSession {
     private var cachedEndpointEdges: (access: [Edge], egress: [Edge])?
     var cachedRealtimeBatch: RealtimePatchBatch?
     var frozenPatches: [RealtimeTripPatch]?
+    private var preparationCache = Raptor.PreparationCache()
     var latestPatchesByInstance: [RealtimePatchKey: RealtimeTripPatch] = [:]
     var latestRawPatchesByInstance: [RealtimePatchKey: RealtimeTripPatch] = [:]
     fileprivate struct BuiltJourney {
@@ -771,8 +794,12 @@ public actor JourneyPlanningSession {
         while true {
             metrics.pointRaptorScans += 1
             let raptorStarted = ContinuousClock.now
+            let prepared = preparationCache
+            preparationCache = .init()
             searchResult = try await Raptor.search(snapshot: snapshot, query: query, access: access, egress: egress,
-                patches: Array(latestPatchesByInstance.values), walking: walking, profileHorizon: searchHorizon)
+                patches: Array(latestPatchesByInstance.values), walking: walking, profileHorizon: searchHorizon, preparation: prepared)
+            preparationCache = searchResult.preparation
+            searchResult.preparation = .init()
             diagnostics.record(.raptor, since: raptorStarted)
             diagnostics.recordSearch(since: raptorStarted, horizon: searchHorizon, wave: refinementWaves,
                 rounds: searchResult.roundMetrics, candidates: searchResult.candidates.count,

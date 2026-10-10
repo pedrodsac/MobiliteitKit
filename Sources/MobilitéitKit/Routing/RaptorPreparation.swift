@@ -11,6 +11,16 @@ extension Raptor {
         searchStart: Date,
         profileUpperBound: Date, includeUnboardable: Bool = false
     ) -> [ActiveTripInstance] {
+        var preparation = PreparationCache()
+        return activeTripInstances(patternID: patternID, snapshot: snapshot, query: query,
+            relevantServiceDays: relevantServiceDays, patchesByInstance: patchesByInstance,
+            scheduledLowerBound: scheduledLowerBound, searchStart: searchStart,
+            profileUpperBound: profileUpperBound, includeUnboardable: includeUnboardable, preparation: &preparation)
+    }
+    static func activeTripInstances(patternID: Int, snapshot: RoutingSnapshot, query: RouteQuery,
+        relevantServiceDays: [SnapshotServiceDay], patchesByInstance: [PatchKey: PatchOverlay],
+        scheduledLowerBound: Date, searchStart: Date, profileUpperBound: Date,
+        includeUnboardable: Bool = false, preparation: inout PreparationCache) -> [ActiveTripInstance] {
         snapshot.patterns[patternID].trips.flatMap { tripIndex -> [ActiveTripInstance] in
             let trip = snapshot.trips[tripIndex]
             guard !trip.isFrequencyTemplate, query.preferences.allowedModes.contains(
@@ -27,49 +37,17 @@ extension Raptor {
                 // passenger onto it from a different stop.
                 guard patch?.status != .unreachable,
                       patch?.status != .cancelled else { return nil }
-                let scheduledDepartures = trip.times.map { time in
-                    time.departure.map { serviceDay.start.addingTimeInterval(TimeInterval($0)) }
-                }
-                let scheduledArrivals = trip.times.map { time in
-                    time.arrival.map { serviceDay.start.addingTimeInterval(TimeInterval($0)) }
-                }
-                let effectiveDepartures = trip.times.indices.map { position in
-                    patchTime(patch, position: position, departure: true)
-                        ?? scheduledDepartures[position]
-                }
-                let effectiveArrivals = trip.times.indices.map { position in
-                    patchTime(patch, position: position, departure: false)
-                        ?? scheduledArrivals[position]
-                }
-                var previous: Date?
-                for position in trip.times.indices {
-                    for instant in [effectiveArrivals[position], effectiveDepartures[position]].compactMap({ $0 }) {
-                        if previous.map({ instant < $0 }) == true { return nil }
-                        previous = instant
-                    }
-                }
+                guard let instance = preparation.instance(tripIndex: tripIndex, trip: trip, day: serviceDay, overlay: patch)
+                else { return nil }
                 // Access labels start no earlier than searchStart. Even with
                 // realtime delays, an instance whose every pickup has passed
                 // cannot be boarded during this query.
                 guard includeUnboardable || trip.times.indices.contains(where: { position in
                     trip.times[position].pickup == 0
                         && patch?.eventsByPosition[position]?.boardingAllowed != false
-                        && effectiveDepartures[position].map { $0 >= searchStart } == true
+                        && instance.effectiveDepartures[position].map { $0 >= searchStart } == true
                 }) else { return nil }
-                return .init(
-                    tripIndex: tripIndex, serviceDay: serviceDay,
-                    scheduledDepartures: scheduledDepartures,
-                    scheduledArrivals: scheduledArrivals,
-                    effectiveDepartures: effectiveDepartures,
-                    effectiveArrivals: effectiveArrivals,
-                    conservativeDepartures: trip.times.indices.map { position in
-                        let event = patch?.eventsByPosition[position]
-                        if event?.departureSource == .estimated, let scheduled = scheduledDepartures[position], let effective = effectiveDepartures[position] { return min(scheduled, effective) }
-                        return effectiveDepartures[position]
-                    },
-                    boardingAllowed: trip.times.indices.map { patch?.eventsByPosition[$0]?.boardingAllowed != false },
-                    alightingAllowed: trip.times.indices.map { patch?.eventsByPosition[$0]?.alightingAllowed != false }
-                )
+                return instance
             }
         }
     }

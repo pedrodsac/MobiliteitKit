@@ -63,12 +63,17 @@ enum RealtimeTimeline {
         func rejected() -> RealtimeTripPatch {
             .init(tripID: patch.tripID, serviceDate: patch.serviceDate, status: .unreachable, events: [])
         }
+        let occurrences = Dictionary(grouping: trip.times) { snapshot.stops[$0.stop].id }
+        let exactEvents = Dictionary(grouping: patch.events.filter { $0.stopSequence != nil }) {
+            RealtimeEventKey(stopID: $0.stopID, sequence: $0.stopSequence)
+        }
+        let legacyEvents = Dictionary(grouping: patch.events.filter { $0.stopSequence == nil }, by: \.stopID)
         for event in patch.events where event.stopSequence == nil {
-            let matches = trip.times.filter { snapshot.stops[$0.stop].id == event.stopID }
+            let matches = occurrences[event.stopID] ?? []
             if matches.count > 1 {
                 let timedMatches = matches.filter { occurrence in
-                    let a = occurrence.arrival.map { snapshot.converter.date(serviceDate: patch.serviceDate, serviceSeconds: $0) }
-                    let d = occurrence.departure.map { snapshot.converter.date(serviceDate: patch.serviceDate, serviceSeconds: $0) }
+                    let a = occurrence.arrival.map { snapshot.date(serviceDate: patch.serviceDate, serviceSeconds: $0) }
+                    let d = occurrence.departure.map { snapshot.date(serviceDate: patch.serviceDate, serviceSeconds: $0) }
                     return (a != nil && a == event.scheduledArrival) || (d != nil && d == event.scheduledDeparture)
                 }
                 if timedMatches.count != 1 { return rejected() }
@@ -78,12 +83,12 @@ enum RealtimeTimeline {
         var delay: (seconds: TimeInterval, scheduled: Date, observed: Date?)?
         for time in trip.times {
             let stopID = snapshot.stops[time.stop].id
-            let arrival = time.arrival.map { snapshot.converter.date(serviceDate: patch.serviceDate, serviceSeconds: $0) }
-            let departure = time.departure.map { snapshot.converter.date(serviceDate: patch.serviceDate, serviceSeconds: $0) }
-            let exact = patch.events.filter { $0.stopID == stopID && $0.stopSequence == time.sequence }
-            let legacy = patch.events.filter { event in
+            let arrival = time.arrival.map { snapshot.date(serviceDate: patch.serviceDate, serviceSeconds: $0) }
+            let departure = time.departure.map { snapshot.date(serviceDate: patch.serviceDate, serviceSeconds: $0) }
+            let exact = exactEvents[.init(stopID: stopID, sequence: time.sequence)] ?? []
+            let legacy = (legacyEvents[stopID] ?? []).filter { event in
                 guard event.stopID == stopID, event.stopSequence == nil else { return false }
-                if trip.times.filter({ $0.stop == time.stop }).count == 1 { return true }
+                if occurrences[stopID]?.count == 1 { return true }
                 return (arrival != nil && event.scheduledArrival == arrival)
                     || (departure != nil && event.scheduledDeparture == departure)
             }

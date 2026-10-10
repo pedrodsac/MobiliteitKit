@@ -158,6 +158,7 @@ public struct MobiliteitAPIClient: Sendable {
     public let baseURL: URL
     /// Shared language for board consumers and realtime routing.
     public let language: String?
+    private let diagnostics: HTTPDiagnosticsObserver?
     private let session: URLSession
 
     /// Creates a client for the Mobilitéit HAFAS API.
@@ -170,12 +171,14 @@ public struct MobiliteitAPIClient: Sendable {
         apiKey: String,
         baseURL: URL = MobiliteitAPIClient.defaultBaseURL,
         session: URLSession = .shared,
-        language: String? = nil
+        language: String? = nil,
+        diagnostics: HTTPDiagnosticsObserver? = nil
     ) {
         self.apiKey = apiKey
         self.baseURL = baseURL
         self.session = session
         self.language = language
+        self.diagnostics = diagnostics
     }
 
     /// Creates a client from a URL entered or stored by the host app.
@@ -196,7 +199,8 @@ public struct MobiliteitAPIClient: Sendable {
         apiKey: String,
         apiURL: String,
         session: URLSession = .shared,
-        language: String? = nil
+        language: String? = nil,
+        diagnostics: HTTPDiagnosticsObserver? = nil
     ) throws {
         let value = apiURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let url = URL(string: value),
@@ -205,7 +209,7 @@ public struct MobiliteitAPIClient: Sendable {
               scheme == "http" || scheme == "https" else {
             throw MobiliteitAPIError.invalidRequest("apiURL must be an absolute HTTP(S) URL")
         }
-        self.init(apiKey: apiKey, baseURL: url, session: session, language: language)
+        self.init(apiKey: apiKey, baseURL: url, session: session, language: language, diagnostics: diagnostics)
     }
 
     /// Fetches stops near a WGS-84 coordinate.
@@ -375,8 +379,17 @@ public struct MobiliteitAPIClient: Sendable {
         let started = ContinuousClock.now
         var request = URLRequest(url: requestURL)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        let (data, response) = try await session.data(for: request)
+        let publicURL = diagnostics.map { _ in HTTPTaskMetricsDelegate.sanitized(requestURL) }
+        if let publicURL { try diagnostics?.willSend(publicURL) }
+        let delegate = diagnostics == nil ? nil : HTTPTaskMetricsDelegate()
+        let (data, response) = try await session.data(for: request, delegate: delegate)
         guard let http = response as? HTTPURLResponse else { throw MobiliteitAPIError.invalidResponse }
+        if let diagnostics, let publicURL {
+            let successful = (200..<300).contains(http.statusCode)
+                && data.range(of: Data("\"errorCode\"".utf8)) == nil
+            diagnostics.didReceive(.init(request: publicURL, statusCode: http.statusCode, receivedAt: .now,
+                transport: delegate?.result(), successfulBody: successful ? data : nil))
+        }
         guard (200..<300).contains(http.statusCode) else {
             throw MobiliteitAPIError.httpStatus(http.statusCode, body: String(data: data.prefix(8_192), encoding: .utf8))
         }

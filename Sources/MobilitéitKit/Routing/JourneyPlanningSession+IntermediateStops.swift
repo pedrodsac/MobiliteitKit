@@ -15,7 +15,7 @@ extension JourneyPlanningSession {
             }.map { time in
                 let stop = snapshot.stops[time.stop].model
                 let event = patch?.event(stopID: stop.id, sequence: time.sequence)
-                let scheduled = snapshot.converter.date(serviceDate: instance.serviceDate,
+                let scheduled = snapshot.date(serviceDate: instance.serviceDate,
                     serviceSeconds: time.arrival ?? time.departure ?? 0)
                 return JourneyStopEvent(stop: stop, scheduledTime: scheduled,
                     effectiveTime: event?.effectiveArrival ?? event?.effectiveDeparture ?? scheduled,

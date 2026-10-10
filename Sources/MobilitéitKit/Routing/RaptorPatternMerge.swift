@@ -30,16 +30,17 @@ extension Raptor {
             if let compact = result.compactLabels {
                 for stop in compact.keys.sorted() {
                     let profile = compact[stop]!
+                    var target = mergedCompact.removeValue(forKey: stop) ?? CompactProfile()
                     for slot in profile.ordered {
                         var key = profile.keys[slot]!
                         key.id = nextID; nextID += 1
-                        if mergedCompact[stop] == nil { mergedCompact[stop] = CompactProfile() }
-                        let peers = mergedCompact[stop]!.byIncomingTrip[key.incomingTrip, default: 0]
-                        if !mergedCompact[stop]!.isDominated(key, peers: peers),
-                           !mergedCompact[stop]!.cannotEnter(key, peers: peers) {
-                            _ = mergedCompact[stop]!.insert(key, path: profile.paths[slot]!)
+                        let peers = target.byIncomingTrip[key.incomingTrip, default: 0]
+                        if !target.isDominated(key, peers: peers),
+                           !target.cannotEnter(key, peers: peers) {
+                            _ = target.insert(key, path: profile.paths[slot]!)
                         }
                     }
+                    mergedCompact[stop] = target
                 }
                 if Raptor.verifyKernel {
                     for stop in result.labels.keys.sorted() {

@@ -13,17 +13,17 @@ enum JourneyFeedValidator {
             guard let identity = ride.instance, let tripIndex = snapshot.tripByID[ride.tripID],
                   let boardSequence = ride.boardSequence, let alightSequence = ride.alightSequence else { return .invalidIdentity }
             let trip = snapshot.trips[tripIndex]
-            guard let board = trip.times.firstIndex(where: { $0.sequence == boardSequence }),
-                  let alight = trip.times.firstIndex(where: { $0.sequence == alightSequence }), board < alight,
+            guard let board = trip.position(of: boardSequence),
+                  let alight = trip.position(of: alightSequence), board < alight,
                   snapshot.stops[trip.times[board].stop].id == ride.board.stop.id,
                   snapshot.stops[trip.times[alight].stop].id == ride.alight.stop.id else { return .invalidOccurrence }
-            guard snapshot.serviceDays.contains(where: { $0.date == identity.serviceDate && $0.activeServices.contains(trip.service) }) else { return .inactiveService }
+            guard snapshot.serviceDayByDate[identity.serviceDate]?.activeServices.contains(trip.service) == true else { return .inactiveService }
             let continues = index > 0 && { if case .inSeatContinuation = journey.legs[index - 1] { true } else { false } }()
             let continuesNext = index + 1 < journey.legs.count && { if case .inSeatContinuation = journey.legs[index + 1] { true } else { false } }()
             guard (continues || trip.times[board].pickup == 0), (continuesNext || trip.times[alight].dropoff == 0) else { return .forbiddenAction }
             guard let departure = trip.times[board].departure, let arrival = trip.times[alight].arrival,
-                  ride.scheduledDeparture == snapshot.converter.date(serviceDate: identity.serviceDate, serviceSeconds: departure),
-                  ride.scheduledArrival == snapshot.converter.date(serviceDate: identity.serviceDate, serviceSeconds: arrival) else { return .invalidOccurrence }
+                  ride.scheduledDeparture == snapshot.date(serviceDate: identity.serviceDate, serviceSeconds: departure),
+                  ride.scheduledArrival == snapshot.date(serviceDate: identity.serviceDate, serviceSeconds: arrival) else { return .invalidOccurrence }
             if preferences.bike == .required && trip.bikesAllowed != 1 { return .constraintViolation }
             if continues {
                 guard board == 0, let previous = rides.last(where: { $0.0 < index }),

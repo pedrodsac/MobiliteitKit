@@ -127,6 +127,10 @@ extension Raptor {
             insertIndex(slot, into: &ordered, keys: keys, order: .departure)
             insertIndex(slot, into: &byArrival, keys: keys, order: .arrival)
             insertIndex(slot, into: &byWalk, keys: keys, order: .walking)
+            if ordered.count < profileWidth {
+                lastUnprotected = nil; lastPreferred = nil
+                return true
+            }
             let protected = quotas()
             if ordered.count > profileWidth,
                let victim = byArrival.reversed().first(where: { protected.mask & (1 << $0) == 0 }) {

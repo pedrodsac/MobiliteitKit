@@ -14,10 +14,10 @@ extension JourneyPlanningSession {
                 let before = old?.event(stopID: stopID, sequence: time.sequence)
                 let after = patch.event(stopID: stopID, sequence: time.sequence)
                 let scheduledDeparture = time.departure.map {
-                    snapshot.converter.date(serviceDate: key.serviceDate, serviceSeconds: $0)
+                    snapshot.date(serviceDate: key.serviceDate, serviceSeconds: $0)
                 }
                 let scheduledArrival = time.arrival.map {
-                    snapshot.converter.date(serviceDate: key.serviceDate, serviceSeconds: $0)
+                    snapshot.date(serviceDate: key.serviceDate, serviceSeconds: $0)
                 }
                 let oldDeparture = before?.effectiveDeparture ?? scheduledDeparture
                 let newDeparture = after?.effectiveDeparture ?? scheduledDeparture

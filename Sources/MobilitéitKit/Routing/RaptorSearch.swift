@@ -1,8 +1,9 @@
 import Foundation
 
 extension Raptor {
-    static func search(snapshot: RoutingSnapshot, query: RouteQuery, access: [JourneyPlanningSession.Edge], egress: [JourneyPlanningSession.Edge], patches: [RealtimeTripPatch], walking: WalkingRouteCache?, profileHorizon: TimeInterval) async throws -> SearchResult {
+    static func search(snapshot: RoutingSnapshot, query: RouteQuery, access: [JourneyPlanningSession.Edge], egress: [JourneyPlanningSession.Edge], patches: [RealtimeTripPatch], walking: WalkingRouteCache?, profileHorizon: TimeInterval, preparation: PreparationCache = .init()) async throws -> SearchResult {
         guard !access.isEmpty, !egress.isEmpty else { return .init(candidates: [], scannedPatterns: 0, scannedTripInstances: 0, cpuMilliseconds: 0, walkingTransferMilliseconds: 0, walkingTransferPairs: 0, maximumWorkerCount: 1, roundMetrics: []) }
+        var preparation = preparation
         let maxRounds = (query.preferences.maxTransfers ?? max(1, snapshot.trips.count)) + 1
         let searchStart = query.direction == .arriveBy
             ? query.departureTime.addingTimeInterval(-profileHorizon) : query.departureTime
@@ -57,7 +58,7 @@ extension Raptor {
         var roundMetrics: [RoutingRoundMetrics] = []
         let egressStops = Set(egress.map(\.stop))
         let destinationReachability = maxRounds <= 8 && !snapshot.hasContinuations
-            ? DestinationReachability(snapshot: snapshot, egressStops: egressStops, maxRides: maxRounds)
+            ? preparation.destination(snapshot: snapshot, stops: egressStops, rides: maxRounds)
             : nil
         var finalRoundAlightStops = egressStops
         for from in snapshot.nearbyTransferStopsByStop.indices
@@ -114,7 +115,7 @@ extension Raptor {
                     patchesByInstance: patchesByInstance,
                     scheduledLowerBound: scheduledLowerBound,
                     searchStart: searchStart,
-                    profileUpperBound: profileUpperBound
+                    profileUpperBound: profileUpperBound, preparation: &preparation
                 )
             }
             let preparationMilliseconds = Int(RoutingDiagnostics.elapsed(since: preparationStarted))
@@ -242,6 +243,6 @@ extension Raptor {
             for e in egress { for label in next[e.stop]?.ordered ?? [] where label.firstDeparture != nil { destination.append(.init(legs: label.legs, firstStop: label.firstStop, lastStop: e.stop, firstDeparture: label.firstDeparture!, lastArrival: label.time, minimumTransferSlack: label.minimumSlack, totalTransferSlack: label.totalSlack, pathwaySeconds: label.pathwaySeconds, pathwayDistance: label.pathwayDistance)) } }
             labels = next; if labels.isEmpty { break }
         }
-        return .init(candidates: destination, scannedPatterns: scannedPatterns, scannedTripInstances: scannedTripInstances, cpuMilliseconds: Int(cpuSeconds * 1_000), walkingTransferMilliseconds: Int(walkingTransferSeconds * 1_000), walkingTransferPairs: walkingTransferPairs, maximumWorkerCount: maximumWorkerCount, roundMetrics: roundMetrics)
+        return .init(candidates: destination, scannedPatterns: scannedPatterns, scannedTripInstances: scannedTripInstances, cpuMilliseconds: Int(cpuSeconds * 1_000), walkingTransferMilliseconds: Int(walkingTransferSeconds * 1_000), walkingTransferPairs: walkingTransferPairs, maximumWorkerCount: maximumWorkerCount, roundMetrics: roundMetrics, preparation: preparation)
     }
 }

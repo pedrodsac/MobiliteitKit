@@ -119,7 +119,12 @@ extension RealtimeTripPatch {
     }
 
     func event(stopID: String, sequence: Int) -> RealtimeStopEventPatch? {
-        events.first { $0.stopID == stopID && $0.stopSequence == sequence }
+        if !firstEventByOccurrence.isEmpty {
+            let index = firstEventByOccurrence[.init(stopID: stopID, sequence: sequence)]
+                ?? firstEventByOccurrence[.init(stopID: stopID, sequence: nil)]
+            return index.map { events[$0] }
+        }
+        return events.first { $0.stopID == stopID && $0.stopSequence == sequence }
             ?? events.first { $0.stopID == stopID && $0.stopSequence == nil }
     }
 }

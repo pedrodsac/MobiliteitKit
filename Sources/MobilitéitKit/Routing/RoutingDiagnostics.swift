@@ -42,8 +42,9 @@ public struct RoutingDiagnostics: Hashable, Sendable {
     public var milliseconds: [Stage: Double] = [:]
     public var totalMilliseconds: Double = 0
     public init(requestID: UUID = UUID(), startedAt: ContinuousClock.Instant = .now) { self.requestID = requestID; origin = startedAt }
-    public mutating func record(_ stage: Stage, since start: ContinuousClock.Instant) {
-        let elapsed = Self.elapsed(since: start)
+    public mutating func record(_ stage: Stage, since start: ContinuousClock.Instant,
+                                through end: ContinuousClock.Instant = .now) {
+        let elapsed = Self.milliseconds(start.duration(to: end))
         milliseconds[stage, default: 0] += elapsed
         spans.append(.init(stage: stage, startMilliseconds: Self.milliseconds(origin.duration(to: start)), durationMilliseconds: elapsed))
     }

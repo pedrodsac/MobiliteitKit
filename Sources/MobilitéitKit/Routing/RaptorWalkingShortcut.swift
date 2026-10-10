@@ -129,7 +129,7 @@ enum RaptorWalkingShortcut {
             guard time.stop == stop, time.dropoff == 0, let seconds = time.arrival else { continue }
             let event = patch?.event(stopID: snapshot.stops[stop].id, sequence: time.sequence)
             guard event?.alightingAllowed != false else { continue }
-            let scheduled = snapshot.converter.date(serviceDate: ride.day, serviceSeconds: seconds)
+            let scheduled = snapshot.date(serviceDate: ride.day, serviceSeconds: seconds)
             let effective = event?.effectiveArrival ?? scheduled
             guard effective >= ride.boardTime, effective <= arrival else { continue }
             return .init(trip: ride.trip, board: ride.board, alight: stop, boardPos: ride.boardPos,
