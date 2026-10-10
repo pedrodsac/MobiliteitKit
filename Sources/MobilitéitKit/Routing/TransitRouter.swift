@@ -620,7 +620,7 @@ public actor JourneyPlanningSession {
         try await initialSuggestions(count: count, searchHorizon: 3 * 3_600)
     }
 
-    /// Short initial profiles expand across empty departure windows. Arrivals
+    /// Short initial profiles expand until the requested batch is complete. Arrivals
     /// retain their proof before stopping, including older vehicle occurrences.
     func initialSuggestions(count: Int, searchHorizon: TimeInterval) async throws -> JourneyPage {
         let started = ContinuousClock.now
@@ -645,7 +645,7 @@ public actor JourneyPlanningSession {
                 ? ArrivalSearchStoppingPolicy.canStop(chosen, count: count,
                     lower: query.departureTime.addingTimeInterval(-horizon), snapshot: snapshot,
                     patches: latestPatchesByInstance, access: cachedEndpointEdges?.access ?? [])
-                : !chosen.isEmpty
+                : chosen.count >= count
             if horizon == Raptor.fullProfileHorizon || complete { break }
             horizon = min(Raptor.fullProfileHorizon, horizon * 2)
         }

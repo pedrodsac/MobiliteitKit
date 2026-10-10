@@ -77,12 +77,26 @@ struct AdjacentJourneyPagingTests {
     }
 
     @Test func shortenedInitialWindowExpandsWhenTheFirstServiceIsLater() async throws {
-        let fixture = try await RoutingPreventionFixture(files: files([2 * 3600]))
+        let fixture = try await RoutingPreventionFixture(files: files(Array(stride(from: 7200, through: 8700, by: 300))))
         defer { fixture.remove() }
         let session = try await fixture.planning(request())
         let initial = try await session.calculate(refresh: .scheduleOnly)
         #expect(initial.journeys.first?.effectiveDeparture == date(hour: 10))
         #expect(initial.diagnostics.searchPasses.map(\.horizonSeconds) == [5400, 10800])
+    }
+
+    @Test func partialWindowsExpandUntilAllSixRoutesAreFound() async throws {
+        let offsets = [300, 2 * 3600, 2 * 3600 + 300, 2 * 3600 + 600,
+                       2 * 3600 + 900, 2 * 3600 + 1200, 5 * 3600]
+        let fixture = try await RoutingPreventionFixture(files: files(offsets))
+        defer { fixture.remove() }
+        let session = try await fixture.planning(request())
+        let initial = try await session.calculate(refresh: .scheduleOnly)
+        #expect(initial.journeys.count == 6)
+        #expect(initial.diagnostics.searchPasses.map(\.horizonSeconds) == [5400, 10800])
+        let later = try await session.calculate(page: .later, refresh: .scheduleOnly)
+        #expect(later.journeys.count == 7)
+        #expect(later.journeys.contains { $0.effectiveDeparture == date(hour: 13) })
     }
 
     @Test func denseDepartureSearchStartsWithNinetyMinutes() async throws {
@@ -122,7 +136,7 @@ struct AdjacentJourneyPagingTests {
         _ = try await session.calculate(refresh: .scheduleOnly)
         let earlier = try await session.calculate(page: .earlier)
         let historical = earlier.journeys.filter { $0.effectiveDeparture < date(hour: 8) }
-        #expect(historical.count == 3)
+        #expect(historical.count == 4)
         #expect(historical.allSatisfy { $0.statusEvidence.status(at: date(hour: 8)) == .missed })
         #expect(historical.allSatisfy { $0.statusEvidence.coverage == .scheduleOnly })
         #expect(historical.allSatisfy { earlier.validationContexts[$0.id]!.anchor <= $0.effectiveDeparture })
@@ -179,10 +193,11 @@ struct AdjacentJourneyPagingTests {
         defer { fixture.remove() }
         let session = try await fixture.planning(request())
         let first = try await session.calculate(refresh: .scheduleOnly)
-        #expect(first.journeys.count == 1)
+        #expect(first.journeys.count == 2)
+        #expect(first.diagnostics.searchPasses.map(\.horizonSeconds) == [5400, 10800, 21600, 43200, 86400])
         let later = try await session.calculate(page: .later, refresh: .scheduleOnly)
         #expect(later.journeys.contains { $0.effectiveDeparture == date(hour: 16) })
-        #expect(later.hasLater) // A partial page does not establish exhaustion.
+        #expect(!later.hasLater) // An empty following page establishes exhaustion.
         let earlier = try await session.calculate(page: .earlier, refresh: .scheduleOnly)
         #expect(earlier.journeys.contains { $0.effectiveDeparture == date(hour: 1) })
         let empty = try await session.calculate(page: .later, refresh: .scheduleOnly)

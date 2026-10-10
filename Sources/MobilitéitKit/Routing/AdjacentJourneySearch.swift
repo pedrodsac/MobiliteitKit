@@ -48,7 +48,7 @@ struct AdjacentJourneySearch {
                 boundary: boundary, earlier: earlier, count: JourneyBatchPolicy.count, excludingIDs: excludingIDs,
                 searchHorizon: arrival && !earlier ? Raptor.fullProfileHorizon : horizon)
             cumulative.include(page.diagnostics)
-            if !page.journeys.isEmpty || horizon == Raptor.fullProfileHorizon {
+            if page.journeys.count >= JourneyBatchPolicy.count || horizon == Raptor.fullProfileHorizon {
                 cumulative.totalMilliseconds = RoutingDiagnostics.elapsed(since: started)
                 page.diagnostics = cumulative
                 return Result(page: page, query: query, patches: await session.currentPatches(),
