@@ -40,6 +40,42 @@ import Testing
         }
     }
 
+    @Test func measuredWalkThatMissesLastBoardingDoesNotRetainALabel() async throws {
+        let fixture = try await RealtimeTestFixture(
+            stopTimes: "ride,08:00:00,08:00:00,a,1\nride,08:20:00,08:20:00,c,2\nout,07:00:00,07:00:00,d,1\nout,07:30:00,07:30:00,b,2\n",
+            trips: "route,service,ride,Destination\nroute,service,out,Transfer\n",
+            additionalStops: "d,Boarding point,49.7001,6.2001\n")
+        defer { fixture.remove() }
+        let router = try await TransitRouter(databaseURL: fixture.database)
+        let snapshot = await router.snapshot
+        let from = try #require(snapshot.stopByID["c"]), to = try #require(snapshot.stopByID["d"])
+        let origin = try #require(snapshot.stopByID["a"])
+        let trip = try #require(snapshot.tripByID["ride"])
+        let day = try GTFSDate(parsing: "20260930")
+        let departure = RealtimeTestFixture.date("08:00:00"), arrival = RealtimeTestFixture.date("08:20:00")
+        let leg = Raptor.TransitLeg(trip: trip, board: origin, alight: from,
+            boardPos: 0, alightPos: 1, day: day, scheduledBoard: departure, scheduledAlight: arrival,
+            boardTime: departure, alightTime: arrival, requiredTransferSecondsAfterWalking: 0)
+        let source = Raptor.Label(id: 0, time: arrival, firstStop: leg.board, firstDeparture: departure,
+            lastTransit: leg, minimumSlack: .max, totalSlack: 0, accessSeconds: 0,
+            accessDistance: 0, pathwaySeconds: 0, pathwayDistance: 0, transferWalkSeconds: 0,
+            containsPreferredMode: true, walkingStopsVisited: .one(from), tripKey: .init())
+        var labels: [Int: Raptor.LabelProfile] = [:], nextID = 1
+        _ = Raptor.insert(source, at: from, into: &labels)
+        var deadlines = Array(repeating: Date.distantPast, count: snapshot.stops.count)
+        deadlines[to] = arrival.addingTimeInterval(30)
+        let pairs = try await Raptor.relaxWalkingTransfers(snapshot: snapshot, labels: &labels,
+            nextLabelID: &nextID, walking: WalkingRouteCache(provider: EgressWalking()),
+            boardingDeadlines: deadlines)
+        #expect(pairs == 1)
+        #expect(labels[to] == nil)
+        let egressPairs = try await Raptor.relaxWalkingTransfers(snapshot: snapshot, labels: &labels,
+            nextLabelID: &nextID, walking: WalkingRouteCache(provider: EgressWalking()),
+            boardingDeadlines: deadlines, egressStops: [to], canBoardAgain: false)
+        #expect(egressPairs == 1)
+        #expect(labels[to]?.ordered.first?.time == arrival.addingTimeInterval(60))
+    }
+
     @Test func finalWalkingEgressNeedsNoFutureDeparture() async throws {
         let fixture = try await RealtimeTestFixture(
             stopTimes: "ride,08:00:00,08:00:00,a,1\nride,08:20:00,08:20:00,c,2\n",

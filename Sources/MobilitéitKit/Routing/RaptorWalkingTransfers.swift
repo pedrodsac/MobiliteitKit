@@ -97,6 +97,10 @@ extension Raptor {
                   route.durationSeconds <= 15 * 60,
                   route.distanceMeters <= 1_500 else { continue }
             let arrival = item.source.time.addingTimeInterval(TimeInterval(route.durationSeconds))
+            // Once the measured duration is known, do not retain a label that
+            // has missed every eligible departure. Final walks remain valid.
+            guard egressStops.contains(item.to)
+                || arrival <= (boardingDeadlines?[item.to] ?? .distantFuture) else { continue }
             let leg = WalkingTransferLeg(
                 from: item.from,
                 to: item.to,
