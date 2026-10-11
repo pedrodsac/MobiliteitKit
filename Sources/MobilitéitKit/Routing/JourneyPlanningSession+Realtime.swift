@@ -13,8 +13,11 @@ extension JourneyPlanningSession {
         let from = query.direction == .arriveBy ? anchor.addingTimeInterval(-searchHorizon) : anchor
         let through = query.direction == .arriveBy ? anchor : anchor.addingTimeInterval(searchHorizon)
         let maxRides = min(8, max(1, (query.preferences.maxTransfers ?? 7) + 1))
+        // Discovery deliberately keeps its optimistic walking envelope and
+        // board priority. Only the executable RAPTOR rounds use the tighter
+        // one-batch bound; final routing proves each acquired trip feasible.
         let reachability = Raptor.DestinationReachability(snapshot: snapshot,
-            egressStops: Set(egress.map(\.stop)), maxRides: maxRides + 1)
+            egressStops: Set(egress.map(\.stop)), maxRides: maxRides + 1, allowWalkingChains: true)
         var arrivals = Dictionary(access.map { ($0.stop, from.addingTimeInterval(Double($0.seconds))) },
                                   uniquingKeysWith: min)
         func reach(_ stopID: String, at date: Date) {

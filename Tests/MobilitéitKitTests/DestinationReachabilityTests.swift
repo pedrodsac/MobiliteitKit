@@ -28,5 +28,8 @@ import Testing
         // pathway can precede the one permitted pedestrian batch instead.
         #expect(reachability.stopsByRemainingRides[0][a] == (pathwayDirection == 1))
         #expect(reachability.stopsByRemainingRides[1][a])
+        let discovery = Raptor.DestinationReachability(snapshot: snapshot,
+            egressStops: [c], maxRides: 2, allowWalkingChains: true)
+        #expect(discovery.stopsByRemainingRides[0][a])
     }
 }

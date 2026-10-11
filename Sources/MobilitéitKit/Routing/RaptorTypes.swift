@@ -225,7 +225,8 @@ enum Raptor {
         let stopsByRemainingRides: [[Bool]]
         let lastAlightPositionByRemainingRides: [[Int]]
 
-        init(snapshot: RoutingSnapshot, egressStops: Set<Int>, maxRides: Int) {
+        init(snapshot: RoutingSnapshot, egressStops: Set<Int>, maxRides: Int,
+             allowWalkingChains: Bool = false) {
             let stopCount = snapshot.stops.count
             let walkingSources = snapshot.nearbyTransferSourcesByStop
             func zeroBoardingClosure(_ seeds: [Bool]) -> [Bool] {
@@ -243,7 +244,8 @@ enum Raptor {
                 while cursor < queue.count {
                     let to = queue[cursor]
                     cursor += 1
-                    for from in snapshot.pathsByTo[to].map(\.from) + snapshot.continuations.sourcesByStop[to] where !result[from] {
+                    let walking = allowWalkingChains ? walkingSources[to] : []
+                    for from in snapshot.pathsByTo[to].map(\.from) + snapshot.continuations.sourcesByStop[to] + walking where !result[from] {
                         result[from] = true
                         queue.append(from)
                     }
