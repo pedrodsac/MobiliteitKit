@@ -11,6 +11,28 @@ actor WalkingRouteCache: WalkingRoutingProvider {
         let hits: Int
     }
 
+    private enum PendingRoute: Sendable {
+        case single(Task<WalkingRoute, Error>)
+        case batch(Task<[WalkingRoute?], Never>, Int)
+        var value: WalkingRoute {
+            get async throws {
+                switch self {
+                case .single(let task): return try await task.value
+                case .batch(let task, let index):
+                    let values = await task.value
+                    guard values.indices.contains(index), let value = values[index] else { throw CacheError.noRoute }
+                    return value
+                }
+            }
+        }
+        func cancelSingle() { if case .single(let task) = self { task.cancel() } }
+    }
+    private struct RouteFlight: Sendable {
+        let id: UInt64
+        let pending: PendingRoute
+    }
+    private var nextFlightID: UInt64 = 0
+
     private struct Key: Hashable, Sendable {
         let source: Coordinate
         let destination: Coordinate
@@ -37,7 +59,7 @@ actor WalkingRouteCache: WalkingRoutingProvider {
     private var generation: UInt64 = 0
     private var routesByKey: [Key: Cached<WalkingRoute>] = [:]
     private var estimatesByKey: [Key: Cached<WalkingEstimate>] = [:]
-    private var routeTasks: [Key: Task<WalkingRoute, Error>] = [:]
+    private var routeTasks: [Key: RouteFlight] = [:]
     private var estimateTasks: [Key: Task<WalkingEstimate, Error>] = [:]
     private var requestCount = 0
     private var hitCount = 0
@@ -59,7 +81,7 @@ actor WalkingRouteCache: WalkingRoutingProvider {
     func correct(_ request: WalkingRequest, with route: WalkingRoute) async {
         let revision = await provider.cacheRevision()
         let key = key(for: request, revision: revision)
-        routeTasks[key]?.cancel()
+        routeTasks[key]?.pending.cancelSingle()
         estimateTasks[key]?.cancel()
         routeTasks[key] = nil
         estimateTasks[key] = nil
@@ -105,21 +127,35 @@ actor WalkingRouteCache: WalkingRoutingProvider {
             touchRoute(cached.value, for: key)
             return cached.value
         }
-        if let task = routeTasks[key] {
+        if let flight = routeTasks[key] {
             hitCount += 1
-            return try await task.value
+            return try await resolve(flight, for: key)
         }
-
         let provider = self.provider
-        let task = Task { try await provider.route(request) }
-        routeTasks[key] = task
+        let flight = makeFlight(.single(Task { try await provider.route(request) }))
+        routeTasks[key] = flight
+        return try await resolve(flight, for: key)
+    }
+
+    private func makeFlight(_ pending: PendingRoute) -> RouteFlight {
+        nextFlightID &+= 1
+        return .init(id: nextFlightID, pending: pending)
+    }
+
+    private func resolve(_ flight: RouteFlight, for key: Key) async throws -> WalkingRoute {
         do {
-            let value = try await task.value
-            routeTasks[key] = nil
-            storeRoute(value, for: key)
-            return value
+            let value = try await flight.pending.value
+            if routeTasks[key]?.id == flight.id {
+                routeTasks[key] = nil
+                storeRoute(value, for: key)
+                return value
+            }
+            // A refinement may have replaced this route while its shared batch
+            // was running. Late work must not overwrite the corrected path.
+            return routesByKey[key]?.value ?? value
         } catch {
-            routeTasks[key] = nil
+            if routeTasks[key]?.id == flight.id { routeTasks[key] = nil }
+            if let corrected = routesByKey[key]?.value { return corrected }
             throw error
         }
     }
@@ -132,7 +168,7 @@ actor WalkingRouteCache: WalkingRoutingProvider {
         guard !Task.isCancelled else { return Array(repeating: nil, count: requests.count) }
         let revision = await provider.cacheRevision()
         var results = Array<WalkingRoute?>(repeating: nil, count: requests.count)
-        var tasks = Array<Task<WalkingRoute, Error>?>(repeating: nil, count: requests.count)
+        var tasks = Array<RouteFlight?>(repeating: nil, count: requests.count)
         var missingRequests: [WalkingRequest] = []
         var missingKeys: [Key] = []
         var positionsByMissingKey: [Key: [Int]] = [:]
@@ -163,15 +199,11 @@ actor WalkingRouteCache: WalkingRoutingProvider {
             : nil
         if let batchTask {
             for (batchIndex, key) in missingKeys.enumerated() {
-                let task = Task<WalkingRoute, Error> {
-                    let values = await batchTask.value
-                    guard values.indices.contains(batchIndex), let value = values[batchIndex] else {
-                        throw CacheError.noRoute
-                    }
-                    return value
-                }
-                routeTasks[key] = task
-                for position in positionsByMissingKey[key] ?? [] { tasks[position] = task }
+                // One shared batch future, indexed directly. A forwarding Task
+                // for each pair only wakes thousands of redundant continuations.
+                let flight = makeFlight(.batch(batchTask, batchIndex))
+                routeTasks[key] = flight
+                for position in positionsByMissingKey[key] ?? [] { tasks[position] = flight }
             }
         }
 
@@ -181,20 +213,19 @@ actor WalkingRouteCache: WalkingRoutingProvider {
                 guard let task = tasks[index] else { continue }
                 let key = key(for: requests[index], revision: revision)
                 do {
-                    let value = try await task.value
+                    let value = try await resolve(task, for: key)
                     guard !Task.isCancelled else { break }
                     results[index] = value
-                    routeTasks[key] = nil
-                    storeRoute(value, for: key)
-                } catch {
-                    routeTasks[key] = nil
-                }
+                } catch { }
             }
         } onCancel: {
             batchTask?.cancel()
         }
         if Task.isCancelled {
-            for key in missingKeys { routeTasks[key] = nil }
+            for key in missingKeys {
+                if let index = positionsByMissingKey[key]?.first, let flight = tasks[index],
+                   routeTasks[key]?.id == flight.id { routeTasks[key] = nil }
+            }
         }
         return results
     }
