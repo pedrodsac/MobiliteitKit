@@ -41,10 +41,6 @@ extension Raptor {
             },
             uniquingKeysWith: { _, latest in latest }
         )
-        let walkingDeadlines = walking == nil ? nil : try walkingBoardingDeadlines(
-            snapshot: snapshot, query: query, serviceDays: relevantServiceDays,
-            patches: patchesByInstance, scheduledLowerBound: scheduledLowerBound,
-            profileUpperBound: profileUpperBound)
         var activeInstancesByPattern: [Int: [ActiveTripInstance]] = [:]
         var labels: [Int: LabelProfile] = [:]
         var nextLabelID = 0
@@ -250,6 +246,12 @@ extension Raptor {
             } else {
                 relaxPathways(snapshot: snapshot, labels: &next, nextLabelID: &nextLabelID, preferences: query.preferences)
             }
+            let nextRoundLastAlight = remainingRides == 1 ? finalRoundLastAlight
+                : (remainingRides > 1 ? destinationReachability?.lastAlightPositionByRemainingRides[remainingRides - 1] : nil)
+            let walkingDeadlines = walking == nil || remainingRides == 0 ? nil : try walkingBoardingDeadlines(
+                snapshot: snapshot, query: query, serviceDays: relevantServiceDays,
+                patches: patchesByInstance, scheduledLowerBound: scheduledLowerBound,
+                profileUpperBound: profileUpperBound, lastAlightPositions: nextRoundLastAlight)
             cpuSeconds += RoutingDiagnostics.elapsed(since: cpuStarted) / 1_000
             let walkingStarted = ContinuousClock.now
             if query.preferences.wheelchair != .required { walkingTransferPairs += try await relaxWalkingTransfers(snapshot: snapshot, labels: &next, nextLabelID: &nextLabelID, walking: walking, reachableStops: reachableStops, boardingDeadlines: walkingDeadlines, egressStops: egressStops, canBoardAgain: remainingRides > 0) }

@@ -41,10 +41,10 @@ struct ContinuationReachabilityTests {
         let bound = Raptor.DestinationReachability(snapshot: snapshot, egressStops: [snapshot.stopByID["d"]!], maxRides: 2)
         #expect(snapshot.hasContinuations)
         if nearContinuation {
-            // The loose topology bound admits walking C → B before the onward
-            // run. That would require another boarding, so the final-round
-            // bound must still reject C for a zero-transfer query.
-            #expect(bound.stopsByRemainingRides[0][snapshot.stopByID["c"]!])
+            // Walking C → B cannot keep the passenger aboard the first
+            // vehicle. The onward run needs another boarding, so even the
+            // zero-ride topology bound now rejects C.
+            #expect(!bound.stopsByRemainingRides[0][snapshot.stopByID["c"]!])
         } else {
             #expect(bound.stopsByRemainingRides.allSatisfy { !$0[snapshot.stopByID["c"]!] })
         }

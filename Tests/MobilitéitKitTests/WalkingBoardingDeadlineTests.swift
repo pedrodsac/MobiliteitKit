@@ -40,6 +40,27 @@ import Testing
         }
     }
 
+    @Test(arguments: [-1, 0, 1, 2])
+    func pickupsMustPrecedeTheNextRoundsLastUsefulAlighting(lastAlight: Int) async throws {
+        let fixture = try await RealtimeTestFixture()
+        defer { fixture.remove() }
+        let router = try await TransitRouter(databaseURL: fixture.database)
+        let snapshot = await router.snapshot
+        let date = try GTFSDate(parsing: "20260930")
+        let query = RouteQuery(origin: .stop(id: "a"), destination: .stop(id: "c"),
+            departureTime: RealtimeTestFixture.date("07:55:00"), realtimePolicy: .disabled)
+        let deadlines = try Raptor.walkingBoardingDeadlines(snapshot: snapshot, query: query,
+            serviceDays: snapshot.serviceDays.filter { $0.date == date }, patches: [:],
+            scheduledLowerBound: query.departureTime, profileUpperBound: RealtimeTestFixture.date("09:00:00"),
+            lastAlightPositions: Array(repeating: lastAlight, count: snapshot.patterns.count))
+        for (position, id) in ["a", "b", "c"].enumerated() {
+            let stop = try #require(snapshot.stopByID[id])
+            let expected = position < lastAlight
+                ? RealtimeTestFixture.date(["08:00:00", "08:10:00", "08:20:00"][position]) : .distantPast
+            #expect(deadlines[stop] == expected)
+        }
+    }
+
     @Test func measuredWalkThatMissesLastBoardingDoesNotRetainALabel() async throws {
         let fixture = try await RealtimeTestFixture(
             stopTimes: "ride,08:00:00,08:00:00,a,1\nride,08:20:00,08:20:00,c,2\nout,07:00:00,07:00:00,d,1\nout,07:30:00,07:30:00,b,2\n",

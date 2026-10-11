@@ -230,12 +230,20 @@ enum Raptor {
             let walkingSources = snapshot.nearbyTransferSourcesByStop
             func zeroBoardingClosure(_ seeds: [Bool]) -> [Bool] {
                 var result = seeds
+                // Each search round relaxes pathways, then one batch of
+                // pedestrian transfers. Chaining nearby walking edges here
+                // made almost the entire country reachable with zero rides.
+                // Reverse at most that one walking batch, then close over
+                // pathways and stay-aboard links (conservatively in either order).
+                for to in seeds.indices where seeds[to] {
+                    for from in walkingSources[to] { result[from] = true }
+                }
                 var queue = result.indices.filter { result[$0] }
                 var cursor = 0
                 while cursor < queue.count {
                     let to = queue[cursor]
                     cursor += 1
-                    for from in snapshot.pathsByTo[to].map(\.from) + walkingSources[to] + snapshot.continuations.sourcesByStop[to] where !result[from] {
+                    for from in snapshot.pathsByTo[to].map(\.from) + snapshot.continuations.sourcesByStop[to] where !result[from] {
                         result[from] = true
                         queue.append(from)
                     }

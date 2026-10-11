@@ -4,13 +4,14 @@ import ZIPFoundation
 @testable import MobiliteitKit
 
 @Suite struct WalkingTransferCompletenessTests {
-    @Test func laterInterchangeSurvivesMoreThanNinetySixEarlierPairs() async throws {
+    @Test(arguments: [false, true])
+    func laterInterchangeSurvivesMoreThanNinetySixEarlierPairs(activeDistractors: Bool) async throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: folder) }
         let archive = folder.appendingPathComponent("fixture.zip")
         let database = folder.appendingPathComponent("fixture.sqlite")
-        try writeFixture(to: archive)
+        try writeFixture(to: archive, activeDistractors: activeDistractors)
         _ = try await GTFSArchiveInstaller.install(archiveAt: archive, databaseAt: database)
         let anchor = try #require(ISO8601DateFormatter().date(from: "2026-10-10T23:30:00+02:00"))
         let walking = InterchangeWalking()
@@ -34,24 +35,29 @@ import ZIPFoundation
         #expect(journey.scheduledArrival == ISO8601DateFormatter().date(from: "2026-10-11T01:25:00+02:00"))
     }
 
-    private func writeFixture(to url: URL) throws {
+    private func writeFixture(to url: URL, activeDistractors: Bool) throws {
         var stops = "stop_id,stop_name,stop_lat,stop_lon\norigin,Origin,49.5,5.5\ndestination,Destination,49.8,7.8\n"
         var trips = "route_id,service_id,trip_id\n"
         var times = "trip_id,arrival_time,departure_time,stop_id,stop_sequence\n"
-        // The first 110 interchanges are topologically useful but their
-        // departures lie outside this search window. The last one is the
-        // only catchable midnight connection. Every pedestrian pair must be
-        // considered, independent of the order of earlier arrival labels.
+        if activeDistractors {
+            stops += "hub,Remote hub,49.9,7.9\n"
+            trips += "out,sunday,connector\n"
+            times += "connector,01:30:00,01:30:00,hub,1\nconnector,01:40:00,01:40:00,destination,2\n"
+        }
+        // The first 110 interchanges either depart outside this window or
+        // require one ride beyond the transfer budget. The last is the only
+        // useful midnight connection. Prune by feasibility, never pair order.
         for index in 0...110 {
             let longitude = 6.0 + Double(index) * 0.02
             stops += "a-\(index),Alight \(index),49.6,\(longitude)\n"
             stops += "b-\(index),Board \(index),49.601,\(longitude)\n"
             trips += "in,saturday,in-\(index)\nout,sunday,out-\(index)\n"
             let inboundArrival = index == 110 ? "23:50:00" : "23:40:00"
-            let outboundDeparture = index == 110 ? "01:14:00" : "12:00:00"
-            let outboundArrival = index == 110 ? "01:25:00" : "12:30:00"
+            let outboundDeparture = index == 110 ? "01:14:00" : activeDistractors ? "01:10:00" : "12:00:00"
+            let outboundArrival = index == 110 ? "01:25:00" : activeDistractors ? "01:25:00" : "12:30:00"
+            let target = activeDistractors && index < 110 ? "hub" : "destination"
             times += "in-\(index),23:35:00,23:35:00,origin,1\nin-\(index),\(inboundArrival),\(inboundArrival),a-\(index),2\n"
-            times += "out-\(index),\(outboundDeparture),\(outboundDeparture),b-\(index),1\nout-\(index),\(outboundArrival),\(outboundArrival),destination,2\n"
+            times += "out-\(index),\(outboundDeparture),\(outboundDeparture),b-\(index),1\nout-\(index),\(outboundArrival),\(outboundArrival),\(target),2\n"
         }
         let files = [
             "agency.txt": "agency_id,agency_name,agency_url,agency_timezone\noperator,Operator,https://example.com,Europe/Luxembourg\n",
