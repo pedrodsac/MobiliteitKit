@@ -9,7 +9,7 @@ extension Raptor {
         patternStartPositions: [Int], activeInstancesByPattern: [Int: [ActiveTripInstance]],
         reachableStops: [Bool]?, round: Int, maxRounds: Int, finalRoundAlightStops: Set<Int>,
         scratch: CompactScratch = .init()) throws -> PatternScanResult {
-        if referenceKernel || !boardings.uniformDepth {
+        if referenceKernel {
             return try scanPatternsReference(chunkIndex: chunkIndex, patternIDs: patternIDs, snapshot: snapshot,
                 query: query, previousLabels: previousLabels, patternStartPositions: patternStartPositions,
                 activeInstancesByPattern: activeInstancesByPattern, reachableStops: reachableStops,

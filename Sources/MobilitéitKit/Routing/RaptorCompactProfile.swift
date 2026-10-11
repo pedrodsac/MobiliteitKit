@@ -16,6 +16,10 @@ extension Raptor {
         let incomingTrip: Int
         let serviceDate: GTFSDate
         var alightPosition: Int = 1
+        // Equal-depth prefixes use their scalar ranks. Linked vehicle services
+        // can add several trips in one round; retain only the existing source
+        // reference for lexicographic comparison when depths differ.
+        var mixedDepthSource: Label? = nil
 
         @inline(__always) func sameTrips(as other: Self) -> Bool {
             prefixRank == other.prefixRank && incomingTrip == other.incomingTrip && serviceDate == other.serviceDate
@@ -24,10 +28,28 @@ extension Raptor {
             if departure != other.departure { return departure < other.departure }
             if arrival != other.arrival { return arrival < other.arrival }
             if walkingSeconds != other.walkingSeconds { return walkingSeconds < other.walkingSeconds }
-            if prefixRank != other.prefixRank { return prefixRank < other.prefixRank }
+            if prefixRank != other.prefixRank {
+                if let source = mixedDepthSource, let otherSource = other.mixedDepthSource {
+                    return Self.precedesAppending(source.tripKey, trip: incomingTrip, day: serviceDate,
+                        otherSource.tripKey, trip: other.incomingTrip, day: other.serviceDate)
+                }
+                return prefixRank < other.prefixRank
+            }
             if incomingTrip != other.incomingTrip { return incomingTrip < other.incomingTrip }
             if serviceDate != other.serviceDate { return serviceDate < other.serviceDate }
             return id < other.id
+        }
+        @inline(__always) private static func precedesAppending(
+            _ lhs: TripKey, trip lhsTrip: Int, day lhsDay: GTFSDate,
+            _ rhs: TripKey, trip rhsTrip: Int, day rhsDay: GTFSDate
+        ) -> Bool {
+            for index in 0..<min(lhs.count + 1, rhs.count + 1) {
+                let a = index < lhs.count ? lhs[index] : TripInstance(trip: lhsTrip, day: lhsDay)
+                let b = index < rhs.count ? rhs[index] : TripInstance(trip: rhsTrip, day: rhsDay)
+                if a.trip != b.trip { return a.trip < b.trip }
+                if a.day != b.day { return a.day < b.day }
+            }
+            return lhs.count < rhs.count
         }
         @inline(__always) func arrivesBefore(_ other: Self) -> Bool {
             arrival == other.arrival ? precedes(other) : arrival < other.arrival

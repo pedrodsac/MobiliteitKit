@@ -27,7 +27,8 @@ extension Raptor {
             }
             // Every round adds exactly one ride. Rank its equal-length prefixes
             // once, instead of retaining and comparing entire trip keys in every
-            // alighting candidate. A mixed-depth profile uses the reference scan.
+            // alighting candidate. Mixed depths keep a source reference for the
+            // appended-trip comparison whose order cannot use prefix ranks.
             self.uniformDepth = Set(sources.map { $0.tripKey.count }).count <= 1
             let sorted = sources.indices.sorted { Raptor.precedes(sources[$0].tripKey, sources[$1].tripKey) }
             var ranks = [Int](repeating: 0, count: sources.count)
@@ -160,7 +161,8 @@ extension Raptor {
                                 doorDeparture: firstDeparture - Double(source.accessSeconds),
                                 walkingSeconds: source.walkingSeconds, minimumSlack: minimumSlack,
                                 totalSlack: totalSlack, preferred: source.containsPreferredMode || preferred,
-                                prefixRank: boardings.prefixRanks[sourceIndex], incomingTrip: tripIndex, serviceDate: day)
+                                prefixRank: boardings.prefixRanks[sourceIndex], incomingTrip: tripIndex, serviceDate: day,
+                                mixedDepthSource: boardings.uniformDepth ? nil : source)
                             for position in firstAlight..<alights.count {
                                 let alight = alights[position]
                                 let alightPos = alight.position
