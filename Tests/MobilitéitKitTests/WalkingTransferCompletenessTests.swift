@@ -13,11 +13,13 @@ import ZIPFoundation
         try writeFixture(to: archive)
         _ = try await GTFSArchiveInstaller.install(archiveAt: archive, databaseAt: database)
         let anchor = try #require(ISO8601DateFormatter().date(from: "2026-10-10T23:30:00+02:00"))
-        let router = try await TransitRouter(databaseURL: database, walkingProvider: InterchangeWalking())
+        let walking = InterchangeWalking()
+        let router = try await TransitRouter(databaseURL: database, walkingProvider: walking)
         let session = try await router.makeSession(for: .init(origin: .stop(id: "origin"),
             destination: .stop(id: "destination"), departureTime: anchor,
             preferences: .init(maxTransfers: 1), realtimePolicy: .disabled))
         let page = try await session.initial(count: 1, searchHorizon: 7200)
+        #expect(await walking.calls == 1)
         let journey = try #require(page.journeys.first)
         let trips = journey.legs.compactMap { if case let .transit(ride) = $0 { ride.tripID } else { nil } }
         #expect(trips == ["in-110", "out-110"])
@@ -67,12 +69,14 @@ import ZIPFoundation
     }
 }
 
-private struct InterchangeWalking: WalkingRoutingProvider {
+private actor InterchangeWalking: WalkingRoutingProvider {
+    var calls = 0
     func estimate(_ request: WalkingRequest) async throws -> WalkingEstimate {
         let route = try await route(request)
         return .init(durationSeconds: route.durationSeconds, distanceMeters: route.distanceMeters)
     }
     func route(_ request: WalkingRequest) async throws -> WalkingRoute {
+        calls += 1
         guard request.source.latitude == 49.6, request.destination.latitude == 49.601,
               request.source.longitude == request.destination.longitude else { throw NoRoute.unavailable }
         let middle = Coordinate(latitude: 49.6005, longitude: request.source.longitude)

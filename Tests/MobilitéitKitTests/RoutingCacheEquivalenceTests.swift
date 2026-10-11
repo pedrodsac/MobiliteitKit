@@ -46,6 +46,27 @@ import Testing
         #expect(actual.hasEarlier == expected.hasEarlier && actual.hasLater == expected.hasLater)
     }
 
+    @Test func walkingCacheEvictsLeastRecentlyUsedAcrossRoutesAndEstimates() async throws {
+        let provider = RevisionWalkingProvider()
+        let cache = WalkingRouteCache(provider: provider, capacity: 64)
+        func request(_ index: Int) -> WalkingRequest {
+            .init(source: .init(latitude: 49.6, longitude: 6.0 + Double(index) / 1000),
+                  destination: .init(latitude: 49.61, longitude: 6.11))
+        }
+        for index in 0..<64 { _ = try await cache.route(request(index)) }
+        // Repeated hits exercise access-log compaction while retaining LRU order.
+        for _ in 0..<1000 { _ = try await cache.route(request(0)) }
+        _ = try await cache.estimate(request(0))
+        _ = try await cache.route(request(0))
+        _ = try await cache.route(request(2))
+        #expect(await provider.calls == 64)
+        _ = try await cache.route(request(1))
+        #expect(await provider.calls == 65)
+        _ = try await cache.estimate(request(0))
+        _ = try await cache.route(request(0))
+        #expect(await provider.calls == 65)
+    }
+
     @Test func walkingCacheSeparatesDirectionAndGraphRevision() async throws {
         let provider = RevisionWalkingProvider()
         let cache = WalkingRouteCache(provider: provider)

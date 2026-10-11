@@ -29,7 +29,10 @@ extension Raptor {
         labels: inout [Int: LabelProfile],
         nextLabelID: inout Int,
         walking: WalkingRouteCache?,
-        reachableStops: [Bool]? = nil
+        reachableStops: [Bool]? = nil,
+        boardingDeadlines: [Date]? = nil,
+        egressStops: Set<Int> = [],
+        canBoardAgain: Bool = true
     ) async throws -> Int {
         guard let walking else { return 0 }
         struct Pair: Hashable { let from: Int; let to: Int }
@@ -53,6 +56,11 @@ extension Raptor {
                 // dense profiles. Keep every potentially useful transfer;
                 // destination topology can safely exclude impossible targets.
                 guard reachableStops?[to] != false else { continue }
+                // An egress target can finish the journey without another
+                // vehicle. All other targets must still offer a boarding.
+                let isEgress = egressStops.contains(to)
+                guard isEgress || canBoardAgain else { continue }
+                let deadline = isEgress ? Date.distantFuture : boardingDeadlines?[to] ?? .distantFuture
                 guard eligible.contains(where: { !$0.walkingStopsVisited.contains(to) }) else { continue }
                 try Task.checkCancellation()
                 let fromCoordinate = snapshot.stops[from].model.coordinate
@@ -61,7 +69,7 @@ extension Raptor {
                 // to every retained arrival label: sampling only the first,
                 // middle, and last arrival can discard the safer bus.
                 for source in eligible {
-                    guard !source.walkingStopsVisited.contains(to) else { continue }
+                    guard !source.walkingStopsVisited.contains(to), source.time <= deadline else { continue }
                     let pair = Pair(from: from, to: to)
                     let routeIndex: Int
                     if let existing = routeIndexByPair[pair] {

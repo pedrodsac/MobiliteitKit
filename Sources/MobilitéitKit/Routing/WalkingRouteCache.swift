@@ -23,6 +23,14 @@ actor WalkingRouteCache: WalkingRoutingProvider {
         let generation: UInt64
     }
 
+    private struct Access: Sendable {
+        let key: Key
+        let isRoute: Bool
+        let generation: UInt64
+    }
+
+    private var accesses: [Access] = []
+    private var accessCursor = 0
     private let provider: any WalkingRoutingProvider
     private let capacity: Int
     private let departureBucketSeconds: TimeInterval?
@@ -206,11 +214,13 @@ actor WalkingRouteCache: WalkingRoutingProvider {
     private func touchRoute(_ value: WalkingRoute, for key: Key) {
         generation &+= 1
         routesByKey[key] = .init(value: value, generation: generation)
+        recordAccess(key, isRoute: true)
     }
 
     private func touchEstimate(_ value: WalkingEstimate, for key: Key) {
         generation &+= 1
         estimatesByKey[key] = .init(value: value, generation: generation)
+        recordAccess(key, isRoute: false)
     }
 
     private func storeRoute(_ value: WalkingRoute, for key: Key) {
@@ -223,14 +233,28 @@ actor WalkingRouteCache: WalkingRoutingProvider {
         trimIfNeeded()
     }
 
+    private func isCurrent(_ access: Access) -> Bool {
+        (access.isRoute ? routesByKey[access.key]?.generation
+            : estimatesByKey[access.key]?.generation) == access.generation
+    }
+
+    private func recordAccess(_ key: Key, isRoute: Bool) {
+        accesses.append(.init(key: key, isRoute: isRoute, generation: generation))
+        // Lazy LRU records avoid sorting the full cache on every overflow.
+        // Compact on hits too, keeping repeated access to a hot key bounded.
+        if accesses.count >= capacity * 4 {
+            accesses = accesses[accessCursor...].filter { isCurrent($0) }
+            accessCursor = 0
+        }
+    }
+
     private func trimIfNeeded() {
-        let overflow = routesByKey.count + estimatesByKey.count - capacity
-        guard overflow > 0 else { return }
-        let oldestRoutes = routesByKey.map { (kind: 0, key: $0.key, generation: $0.value.generation) }
-        let oldestEstimates = estimatesByKey.map { (kind: 1, key: $0.key, generation: $0.value.generation) }
-        for item in (oldestRoutes + oldestEstimates).sorted(by: { $0.generation < $1.generation }).prefix(overflow) {
-            if item.kind == 0 { routesByKey[item.key] = nil }
-            else { estimatesByKey[item.key] = nil }
+        while routesByKey.count + estimatesByKey.count > capacity {
+            let access = accesses[accessCursor]
+            accessCursor += 1
+            guard isCurrent(access) else { continue }
+            if access.isRoute { routesByKey[access.key] = nil }
+            else { estimatesByKey[access.key] = nil }
         }
     }
 }
