@@ -23,6 +23,19 @@ struct BoardCacheScope: Sendable {
     let namespace: String
     let interval: DateInterval
     let maximumJourneys: Int?
+    let namespaceWithoutLines: String
+    let selectedLines: [String]
+
+    init(namespace: String, interval: DateInterval, maximumJourneys: Int?) {
+        self.namespace = namespace; self.interval = interval; self.maximumJourneys = maximumJourneys
+        var components = URLComponents(string: namespace)
+        selectedLines = components?.queryItems?.first { $0.name == "lines" }?.value?
+            .split(separator: ",").map(String.init).sorted() ?? []
+        let remainingItems = components?.queryItems?.filter { $0.name != "lines" }
+        components?.queryItems = remainingItems
+        namespaceWithoutLines = components?.string ?? namespace
+    }
+
     var unlimited: Bool { maximumJourneys == -1 }
     func complete(_ board: HafasDepartureBoard) -> Bool {
         unlimited || maximumJourneys.map { $0 > 0 && board.departures.values.count < $0 } == true

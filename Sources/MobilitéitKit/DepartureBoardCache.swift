@@ -98,10 +98,12 @@ actor DepartureBoardCache {
                         $0.value.scope?.unlimited == true && $0.value.scope?.contains(scope) == true
                             && $0.value.scopeRevision == scopeRevisions[scope.namespace, default: 0]
                             && (refreshPolicy == .useCache || $0.value.refreshPolicy == .forceRefresh)
+                            && now().timeIntervalSince($0.value.startedAt) < min(lifetime, maximumCacheAge)
                     }?.key
                 }
                 if let id = compatibleFlight ?? latestByKey[key], var flight = flights[id],
                    (refreshPolicy == .useCache || flight.refreshPolicy == .forceRefresh),
+                   now().timeIntervalSince(flight.startedAt) < min(lifetime, maximumCacheAge),
                    flight.scope.map({ scopeRevisions[$0.namespace, default: 0] == flight.scopeRevision }) ?? true {
                     flight.waiters[waiter] = continuation
                     flights[id] = flight
@@ -155,6 +157,40 @@ actor DepartureBoardCache {
             if position >= scope.interval.end { break }
         }
         return min(1, seconds / scope.interval.duration)
+    }
+
+    /// Realtime can reuse a complete broader line filter, then restrict the
+    /// matched departures itself. Other request parameters and credentials must
+    /// be identical. Unknown line metadata cannot prove safe subset filtering.
+    func coveringLines(for scope: BoardCacheScope, maximumCacheAge: TimeInterval) -> [String]? {
+        guard scope.unlimited, !scope.selectedLines.isEmpty else { return nil }
+        let required = Set(scope.selectedLines)
+        return entries.values.compactMap { entry -> CachedBoardResponse? in
+            guard let cached = entry.response.scope, cached.unlimited, entry.response.isComplete,
+                  cached.namespaceWithoutLines == scope.namespaceWithoutLines,
+                  cached.interval.start <= scope.interval.start, cached.interval.end >= scope.interval.end,
+                  cached.selectedLines.isEmpty || Set(cached.selectedLines).isSuperset(of: required),
+                  now().timeIntervalSince(entry.response.fetchedAt) < min(lifetime, maximumCacheAge),
+                  entry.response.board.departures.values.allSatisfy({ $0.product?.line?.isEmpty == false })
+            else { return nil }
+            return entry.response
+        }.max { $0.fetchedAt < $1.fetchedAt }?.scope?.selectedLines
+    }
+
+    /// The caller must verify line metadata after this flight arrives, falling
+    /// back to its original request if safe subset filtering is impossible.
+    func inFlightCoveringLines(for scope: BoardCacheScope, maximumCacheAge: TimeInterval) -> [String]? {
+        guard scope.unlimited, !scope.selectedLines.isEmpty else { return nil }
+        let required = Set(scope.selectedLines)
+        return flights.values.filter { flight in
+            guard let prior = flight.scope, prior.unlimited,
+                  prior.namespaceWithoutLines == scope.namespaceWithoutLines,
+                  prior.interval.start <= scope.interval.start, prior.interval.end >= scope.interval.end,
+                  prior.selectedLines.isEmpty || Set(prior.selectedLines).isSuperset(of: required),
+                  flight.scopeRevision == scopeRevisions[prior.namespace, default: 0]
+            else { return false }
+            return now().timeIntervalSince(flight.startedAt) < min(lifetime, maximumCacheAge)
+        }.max { $0.startedAt < $1.startedAt }?.scope?.selectedLines
     }
 
     private func cacheHit(_ response: CachedBoardResponse) -> CachedBoardResponse {
