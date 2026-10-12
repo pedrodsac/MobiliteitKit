@@ -111,10 +111,17 @@ actor DepartureBoardCache {
                 }
                 entries[key] = nil
                 if refreshPolicy == .forceRefresh, let scope {
-                    scopeRevisions[scope.namespace, default: 0] &+= 1
+                    // A filtered refresh also supersedes older broader filters
+                    // that could otherwise reintroduce rows from this interval.
+                    let invalidatedNamespaces = (entries.values.compactMap { $0.response.scope }
+                        + flights.values.compactMap(\.scope))
+                        .filter { scopesOverlap($0, scope) }.map(\.namespace)
+                    for namespace in Set(invalidatedNamespaces).union([scope.namespace]) {
+                        scopeRevisions[namespace, default: 0] &+= 1
+                    }
                     entries = entries.filter { entry in
-                        guard let prior = entry.value.response.scope, prior.namespace == scope.namespace else { return true }
-                        return prior.interval.end < scope.interval.start || prior.interval.start > scope.interval.end
+                        guard let prior = entry.value.response.scope else { return true }
+                        return !scopesOverlap(prior, scope)
                     }
                 }
                 let id = UUID()
@@ -136,6 +143,13 @@ actor DepartureBoardCache {
             Task { await self.cancel(waiter) }
         }
         return response.restricted(to: scope)
+    }
+
+    private func scopesOverlap(_ first: BoardCacheScope, _ second: BoardCacheScope) -> Bool {
+        guard first.namespaceWithoutLines == second.namespaceWithoutLines,
+              first.interval.end >= second.interval.start, first.interval.start <= second.interval.end else { return false }
+        return first.selectedLines.isEmpty || second.selectedLines.isEmpty
+            || !Set(first.selectedLines).isDisjoint(with: second.selectedLines)
     }
 
     /// Metadata-only lookup lets acquisition consume fresh boards before
