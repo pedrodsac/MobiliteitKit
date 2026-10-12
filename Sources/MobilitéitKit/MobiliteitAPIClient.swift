@@ -269,7 +269,8 @@ public struct MobiliteitAPIClient: Sendable {
 
     func departureBoardResponse(
         _ request: HafasDepartureBoardRequest, refreshPolicy: RealtimeRefreshPolicy,
-        preservePartialOnFailure: Bool = false, maximumCacheAge: TimeInterval = 60
+        preservePartialOnFailure: Bool = false, maximumCacheAge: TimeInterval = 60,
+        refreshStartedAt: Date? = nil
     ) async throws -> CachedBoardResponse {
         guard !request.stationID.isEmpty else { throw MobiliteitAPIError.invalidRequest("stationID is required") }
         if let duration = request.durationMinutes, !(0...1_439).contains(duration) {
@@ -284,9 +285,13 @@ public struct MobiliteitAPIClient: Sendable {
         let resolved = request.covering(interval)
         let scope = try boardScope(resolved)
         guard let scope else { return try await fetchBoardResponse(resolved, refreshPolicy: refreshPolicy, maximumCacheAge: maximumCacheAge) }
+        let minimumFetchedAt = refreshPolicy == .forceRefresh ? refreshStartedAt : nil
         return try await Self.departureBoardCache.intervalResponse(scope: scope, refreshPolicy: refreshPolicy,
-                                                                  preservePartialOnFailure: preservePartialOnFailure, maximumCacheAge: maximumCacheAge) { interval in
-            try await fetchBoardResponse(resolved.covering(interval), refreshPolicy: refreshPolicy, maximumCacheAge: maximumCacheAge)
+            preservePartialOnFailure: preservePartialOnFailure, maximumCacheAge: maximumCacheAge,
+            minimumFetchedAt: minimumFetchedAt) { interval in
+            try await fetchBoardResponse(resolved.covering(interval),
+                refreshPolicy: minimumFetchedAt == nil ? refreshPolicy : .useCache,
+                maximumCacheAge: maximumCacheAge, minimumFetchedAt: minimumFetchedAt)
         }
     }
 
@@ -296,21 +301,32 @@ public struct MobiliteitAPIClient: Sendable {
         return await Self.departureBoardCache.coverage(of: scope, maximumCacheAge: maximumCacheAge)
     }
 
-    func cachedDepartureBoardSupersetLines(_ request: HafasDepartureBoardRequest,
-                                           maximumCacheAge: TimeInterval) async -> [String]? {
-        guard let scope = try? boardScope(request) else { return nil }
-        return await Self.departureBoardCache.coveringLines(for: scope, maximumCacheAge: maximumCacheAge)
+    func departureBoardLineCoverageParts(_ request: HafasDepartureBoardRequest,
+                                         maximumCacheAge: TimeInterval,
+                                         minimumFetchedAt: Date? = nil) async -> [DepartureBoardLineCoveragePart] {
+        guard let scope = try? boardScope(request) else { return [] }
+        return await Self.departureBoardCache.lineCoverageParts(for: scope, maximumCacheAge: maximumCacheAge,
+            minimumFetchedAt: minimumFetchedAt)
     }
 
-    func departureBoardLineCoverageParts(_ request: HafasDepartureBoardRequest,
-                                         maximumCacheAge: TimeInterval) async -> [DepartureBoardLineCoveragePart] {
+    func departureBoardLineCoverageIntervals(_ request: HafasDepartureBoardRequest,
+                                             maximumCacheAge: TimeInterval,
+                                             minimumFetchedAt: Date? = nil) async -> [DateInterval] {
         guard let scope = try? boardScope(request) else { return [] }
-        return await Self.departureBoardCache.lineCoverageParts(for: scope, maximumCacheAge: maximumCacheAge)
+        return await Self.departureBoardCache.lineCoverageIntervals(for: scope,
+            maximumCacheAge: maximumCacheAge, minimumFetchedAt: minimumFetchedAt)
     }
 
     func reuseDepartureBoardLineCoveragePart(_ part: DepartureBoardLineCoveragePart,
-                                             maximumCacheAge: TimeInterval) async throws -> CachedBoardResponse? {
-        try await Self.departureBoardCache.reuseLineCoveragePart(part, maximumCacheAge: maximumCacheAge)
+                                             maximumCacheAge: TimeInterval,
+                                             minimumFetchedAt: Date? = nil) async throws -> CachedBoardResponse? {
+        try await Self.departureBoardCache.reuseLineCoveragePart(part, maximumCacheAge: maximumCacheAge,
+            minimumFetchedAt: minimumFetchedAt)
+    }
+
+    func retireDepartureBoardCoverage(_ request: HafasDepartureBoardRequest, before boundary: Date) async {
+        guard let scope = try? boardScope(request) else { return }
+        await Self.departureBoardCache.retireCoverage(before: boundary, overlapping: scope)
     }
 
     private func boardURL(_ request: HafasDepartureBoardRequest) throws -> URL {
@@ -355,10 +371,12 @@ public struct MobiliteitAPIClient: Sendable {
     }
 
     private func fetchBoardResponse(_ request: HafasDepartureBoardRequest,
-                                    refreshPolicy: RealtimeRefreshPolicy, maximumCacheAge: TimeInterval = 60) async throws -> CachedBoardResponse {
+                                    refreshPolicy: RealtimeRefreshPolicy, maximumCacheAge: TimeInterval = 60,
+                                    minimumFetchedAt: Date? = nil) async throws -> CachedBoardResponse {
         let requestURL = try boardURL(request)
         return try await Self.departureBoardCache.measuredResponse(
-            for: requestURL.absoluteString, refreshPolicy: refreshPolicy, scope: try boardScope(request), maximumCacheAge: maximumCacheAge
+            for: requestURL.absoluteString, refreshPolicy: refreshPolicy, scope: try boardScope(request),
+            maximumCacheAge: maximumCacheAge, minimumFetchedAt: minimumFetchedAt
         ) {
             let measured: (value: HafasDepartureBoardEnvelope, http: Int, decode: Int, transport: [HTTPTransportMeasurement]) = try await fetchMeasured(requestURL: requestURL)
             let response = measured.value

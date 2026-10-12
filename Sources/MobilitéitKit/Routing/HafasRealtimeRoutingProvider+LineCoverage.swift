@@ -8,9 +8,35 @@ extension HafasRealtimeRoutingProvider {
         request: RealtimeRoutingRequest, now: @escaping @Sendable () -> Date,
         cacheLifetime: TimeInterval
     ) async -> BoardResult {
+        guard !selectedLines.isEmpty else {
+            return await acquireBoardSlice(client: client, stopID: stopID, selectedLines: selectedLines,
+                interval: interval, request: request, now: now, cacheLifetime: cacheLifetime)
+        }
+        let minimumFetchedAt = request.refreshPolicy == .forceRefresh ? request.refreshStartedAt : nil
+        let (date, time) = requestDateAndTime(interval.start)
+        let whole = HafasDepartureBoardRequest(stationID: stopID, language: client.language ?? "en", date: date,
+            time: time, durationMinutes: max(1, Int(ceil(interval.duration / 60))), maximumJourneys: -1,
+            lines: selectedLines, realtimeMode: .serverDefault, includePasslist: true)
+        if let minimumFetchedAt { await client.retireDepartureBoardCoverage(whole, before: minimumFetchedAt) }
+        let slices = request.refreshPolicy == .useCache || minimumFetchedAt != nil
+            ? await client.departureBoardLineCoverageIntervals(whole, maximumCacheAge: cacheLifetime, minimumFetchedAt: minimumFetchedAt)
+            : [interval]
+        var values: [BoardResult] = []
+        for slice in slices {
+            guard !Task.isCancelled else { break }
+            values.append(await acquireBoardSlice(client: client, stopID: stopID, selectedLines: selectedLines,
+                interval: slice, request: request, now: now, cacheLifetime: cacheLifetime))
+        }
+        return combineBoards(values, stopID: stopID, incomplete: Task.isCancelled || slices.isEmpty, now: now())
+    }
+
+    private nonisolated static func acquireBoardSlice(
+        client: MobiliteitAPIClient, stopID: String, selectedLines: [String], interval: DateInterval,
+        request: RealtimeRoutingRequest, now: @escaping @Sendable () -> Date,
+        cacheLifetime: TimeInterval
+    ) async -> BoardResult {
         let scopedRefresh = request.refreshPolicy == .forceRefresh && request.refreshStartedAt != nil
-        let maximumAge = scopedRefresh
-            ? min(cacheLifetime, max(0, now().timeIntervalSince(request.refreshStartedAt!))) : cacheLifetime
+        let minimumFetchedAt = scopedRefresh ? request.refreshStartedAt : nil
         let (date, time) = requestDateAndTime(interval.start)
         func boardRequest(_ lines: [String]) -> HafasDepartureBoardRequest {
             .init(stationID: stopID, language: client.language ?? "en", date: date, time: time,
@@ -19,12 +45,17 @@ extension HafasRealtimeRoutingProvider {
         }
         var result = LineCoverageAccumulator(stopID: stopID, fetchedAt: now())
         var missing = Set(selectedLines)
+        if let minimumFetchedAt {
+            await client.retireDepartureBoardCoverage(boardRequest(selectedLines), before: minimumFetchedAt)
+        }
         if !selectedLines.isEmpty, request.refreshPolicy == .useCache || scopedRefresh {
-            let parts = await client.departureBoardLineCoverageParts(boardRequest(selectedLines), maximumCacheAge: maximumAge)
+            let parts = await client.departureBoardLineCoverageParts(boardRequest(selectedLines),
+                maximumCacheAge: cacheLifetime, minimumFetchedAt: minimumFetchedAt)
             for part in parts {
                 guard !Task.isCancelled else { break }
                 do {
-                    guard let response = try await client.reuseDepartureBoardLineCoveragePart(part, maximumCacheAge: maximumAge) else { continue }
+                    guard let response = try await client.reuseDepartureBoardLineCoveragePart(part,
+                        maximumCacheAge: cacheLifetime, minimumFetchedAt: minimumFetchedAt) else { continue }
                     let safe = response.isComplete && response.board.departures.values.allSatisfy { $0.product?.line?.isEmpty == false }
                     result.record(response, retaining: safe ? Set(part.requestedLines) : nil, discard: !safe)
                     if safe { missing.subtract(part.requestedLines) }
@@ -37,13 +68,9 @@ extension HafasRealtimeRoutingProvider {
         }
         if (selectedLines.isEmpty || !missing.isEmpty), !Task.isCancelled {
             let fallback = boardRequest(selectedLines.isEmpty ? [] : missing.sorted())
-            var refresh = request.refreshPolicy
-            if scopedRefresh, await client.cachedDepartureBoardCoverage(fallback, maximumCacheAge: maximumAge) >= 1 {
-                refresh = .useCache
-            }
             do {
-                let response = try await client.departureBoardResponse(fallback, refreshPolicy: refresh,
-                    preservePartialOnFailure: true, maximumCacheAge: maximumAge)
+                let response = try await client.departureBoardResponse(fallback, refreshPolicy: request.refreshPolicy,
+                    preservePartialOnFailure: true, maximumCacheAge: cacheLifetime, refreshStartedAt: minimumFetchedAt)
                 // ATP's original line filter is authoritative even when its
                 // response lacks the metadata needed to filter a wider board.
                 result.record(response)

@@ -133,7 +133,7 @@ import Testing
         }
         if inFlight { await gate.release() }
         _ = try await first.value
-        #expect(await cache.coveringLines(for: requested, maximumCacheAge: 60) == nil)
+        #expect(await cache.lineCoverageParts(for: requested, maximumCacheAge: 60).isEmpty)
         let renewed = try await cache.measuredResponse(for: "broad", refreshPolicy: .useCache, scope: broad) {
             .init(board: fresh, networkRequests: 1, cacheHits: 0)
         }
@@ -150,8 +150,6 @@ import Testing
         let (client, host) = RealtimeBoardProtocol.client { _ in payload }
         defer { RealtimeBoardProtocol.remove(host) }
         _ = try await client.departureBoardSnapshot(try request(lines: ["201", "202"]))
-        #expect(await client.cachedDepartureBoardSupersetLines(try request(lines: ["201"]),
-            maximumCacheAge: 60) == nil)
         #expect(await client.departureBoardLineCoverageParts(try request(lines: ["201"]),
             maximumCacheAge: 60).isEmpty)
     }
@@ -160,23 +158,23 @@ import Testing
         let (client, host) = RealtimeBoardProtocol.client { _ in liveBoard(stops: "") }
         defer { RealtimeBoardProtocol.remove(host) }
         _ = try await client.departureBoardSnapshot(try request(lines: ["201", "202"]))
-        #expect(await client.cachedDepartureBoardSupersetLines(try request(lines: ["201"]),
-            maximumCacheAge: 60) == ["201", "202"])
-        #expect(await client.cachedDepartureBoardSupersetLines(try request(lines: ["201"]),
-            maximumCacheAge: 0) == nil)
-        #expect(await client.cachedDepartureBoardSupersetLines(try request(lines: ["203"]),
-            maximumCacheAge: 60) == nil)
-        #expect(await client.cachedDepartureBoardSupersetLines(try request(lines: []),
-            maximumCacheAge: 60) == nil)
-        #expect(await client.cachedDepartureBoardSupersetLines(try request(lines: ["201"], language: "fr"),
-            maximumCacheAge: 60) == nil)
-        #expect(await client.cachedDepartureBoardSupersetLines(try request(lines: ["201"], passlist: false),
-            maximumCacheAge: 60) == nil)
-        #expect(await client.cachedDepartureBoardSupersetLines(try request(lines: ["201"], maximum: 1),
-            maximumCacheAge: 60) == nil)
+        #expect(await client.departureBoardLineCoverageParts(try request(lines: ["201"]),
+            maximumCacheAge: 60).first?.scope.selectedLines == ["201", "202"])
+        #expect(await client.departureBoardLineCoverageParts(try request(lines: ["201"]),
+            maximumCacheAge: 0).isEmpty)
+        #expect(await client.departureBoardLineCoverageParts(try request(lines: ["203"]),
+            maximumCacheAge: 60).isEmpty)
+        #expect(await client.departureBoardLineCoverageParts(try request(lines: []),
+            maximumCacheAge: 60).isEmpty)
+        #expect(await client.departureBoardLineCoverageParts(try request(lines: ["201"], language: "fr"),
+            maximumCacheAge: 60).isEmpty)
+        #expect(await client.departureBoardLineCoverageParts(try request(lines: ["201"], passlist: false),
+            maximumCacheAge: 60).isEmpty)
+        #expect(await client.departureBoardLineCoverageParts(try request(lines: ["201"], maximum: 1),
+            maximumCacheAge: 60).isEmpty)
         let other = MobiliteitAPIClient(apiKey: "other", baseURL: client.baseURL)
-        #expect(await other.cachedDepartureBoardSupersetLines(try request(lines: ["201"]),
-            maximumCacheAge: 60) == nil)
+        #expect(await other.departureBoardLineCoverageParts(try request(lines: ["201"]),
+            maximumCacheAge: 60).isEmpty)
     }
 
     private func request(lines: [String], language: String = "en", passlist: Bool = true,

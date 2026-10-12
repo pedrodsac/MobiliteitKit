@@ -1,29 +1,5 @@
 import Foundation
 
-struct CachedBoardResponse: Sendable {
-    var board: HafasDepartureBoard
-    let networkRequests: Int
-    let cacheHits: Int
-    var fetchedAt: Date = .now
-    var httpMilliseconds: Int = 0
-    var decodeMilliseconds: Int = 0
-    var transport: [HTTPTransportMeasurement] = []
-    var scope: BoardCacheScope? = nil
-    var isComplete: Bool = false
-    var observations: [String: Date] = [:]
-
-    func restricted(to requested: BoardCacheScope?) -> Self {
-        guard let requested, let scope, scope.contains(requested) else { return self }
-        var result = self
-        let filter = BoardIntervalFilter()
-        result.board = .init(departures: board.departures.values.filter {
-            filter.contains($0, in: requested.interval)
-        }, responseBytes: board.responseBytes)
-        result.scope = requested
-        return result
-    }
-}
-
 /// Shares boards and in-flight requests. Each waiter can cancel independently;
 /// the URLSession task is cancelled as soon as its last waiter leaves.
 actor DepartureBoardCache {
@@ -38,6 +14,7 @@ actor DepartureBoardCache {
         let startedAt: Date
         let scope: BoardCacheScope?
         let scopeRevision: UInt64
+        var invalidated = false
     }
     private let lifetime: TimeInterval
     private let capacity: Int
@@ -70,10 +47,11 @@ actor DepartureBoardCache {
 
     func measuredResponse(for key: String, refreshPolicy: RealtimeRefreshPolicy,
                           scope: BoardCacheScope? = nil, maximumCacheAge: TimeInterval = 60,
+                          minimumFetchedAt: Date? = nil,
                           fetch: @escaping @Sendable () async throws -> CachedBoardResponse) async throws -> CachedBoardResponse {
         try Task.checkCancellation()
         if refreshPolicy == .useCache, let entry = entries[key],
-           now().timeIntervalSince(entry.response.fetchedAt) < min(lifetime, maximumCacheAge) {
+           fresh(entry.response.fetchedAt, maximumCacheAge: maximumCacheAge, since: minimumFetchedAt) {
             var response = entry.response
             response = response.restricted(to: scope)
             response = cacheHit(response)
@@ -82,7 +60,7 @@ actor DepartureBoardCache {
         if refreshPolicy == .useCache, let scope, scope.unlimited,
            let entry = entries.values.filter({
                $0.response.isComplete && $0.response.scope?.contains(scope) == true
-                   && now().timeIntervalSince($0.response.fetchedAt) < min(lifetime, maximumCacheAge)
+                   && fresh($0.response.fetchedAt, maximumCacheAge: maximumCacheAge, since: minimumFetchedAt)
            }).max(by: { $0.response.fetchedAt < $1.response.fetchedAt }) {
             return cacheHit(entry.response.restricted(to: scope))
         }
@@ -96,15 +74,16 @@ actor DepartureBoardCache {
                 let compatibleFlight = scope.flatMap { scope in
                     guard scope.unlimited else { return nil as UUID? }
                     return flights.first {
-                        $0.value.scope?.unlimited == true && $0.value.scope?.contains(scope) == true
+                        !$0.value.invalidated && $0.value.scope?.unlimited == true && $0.value.scope?.contains(scope) == true
                             && $0.value.scopeRevision == scopeRevisions[scope.namespace, default: 0]
                             && (refreshPolicy == .useCache || $0.value.refreshPolicy == .forceRefresh)
-                            && now().timeIntervalSince($0.value.startedAt) < min(lifetime, maximumCacheAge)
+                            && fresh($0.value.startedAt, maximumCacheAge: maximumCacheAge, since: minimumFetchedAt)
                     }?.key
                 }
                 if let id = compatibleFlight ?? latestByKey[key], var flight = flights[id],
+                   !flight.invalidated,
                    (refreshPolicy == .useCache || flight.refreshPolicy == .forceRefresh),
-                   now().timeIntervalSince(flight.startedAt) < min(lifetime, maximumCacheAge),
+                   fresh(flight.startedAt, maximumCacheAge: maximumCacheAge, since: minimumFetchedAt),
                    flight.scope.map({ scopeRevisions[$0.namespace, default: 0] == flight.scopeRevision }) ?? true {
                     flight.waiters[waiter] = continuation
                     flights[id] = flight
@@ -153,6 +132,25 @@ actor DepartureBoardCache {
             || !Set(first.selectedLines).isDisjoint(with: second.selectedLines)
     }
 
+    private func fresh(_ acquired: Date, maximumCacheAge: TimeInterval, since minimum: Date?) -> Bool {
+        now().timeIntervalSince(acquired) < min(lifetime, maximumCacheAge)
+            && minimum.map { acquired >= $0 } != false
+    }
+
+    /// Retire only evidence that predates this calculation. A namespace revision
+    /// would also retire newer flights, so scoped refresh marks old flights alone.
+    func retireCoverage(before boundary: Date, overlapping scope: BoardCacheScope) {
+        entries = entries.filter { _, entry in
+            guard entry.response.fetchedAt < boundary, let prior = entry.response.scope else { return true }
+            return !scopesOverlap(prior, scope)
+        }
+        for (id, var flight) in flights {
+            guard flight.startedAt < boundary, let prior = flight.scope, scopesOverlap(prior, scope) else { continue }
+            flight.invalidated = true
+            flights[id] = flight
+        }
+    }
+
     /// Metadata-only lookup lets acquisition consume fresh boards before
     /// unrelated network waits occupy all of its bounded request slots.
     func coverage(of scope: BoardCacheScope, maximumCacheAge: TimeInterval = 60) -> Double {
@@ -174,34 +172,16 @@ actor DepartureBoardCache {
         return min(1, seconds / scope.interval.duration)
     }
 
-    /// Realtime can reuse a complete broader line filter, then restrict the
-    /// matched departures itself. Other request parameters and credentials must
-    /// be identical. Unknown line metadata cannot prove safe subset filtering.
-    func coveringLines(for scope: BoardCacheScope, maximumCacheAge: TimeInterval) -> [String]? {
-        guard scope.unlimited, !scope.selectedLines.isEmpty else { return nil }
-        let required = Set(scope.selectedLines)
-        return entries.values.compactMap { entry -> CachedBoardResponse? in
-            guard let cached = entry.response.scope, cached.unlimited, entry.response.isComplete,
-                  cached.namespaceWithoutLines == scope.namespaceWithoutLines,
-                  cached.interval.start <= scope.interval.start, cached.interval.end >= scope.interval.end,
-                  cached.selectedLines.isEmpty || Set(cached.selectedLines).isSuperset(of: required),
-                  now().timeIntervalSince(entry.response.fetchedAt) < min(lifetime, maximumCacheAge),
-                  entry.response.board.departures.values.allSatisfy({ $0.product?.line?.isEmpty == false })
-            else { return nil }
-            return entry.response
-        }.max { $0.fetchedAt < $1.fetchedAt }?.scope?.selectedLines
-    }
-
     /// Different board partitions can together cover a later line filter. Every
     /// selected source must cover the entire interval; temporal gap reuse stays
     /// in intervalResponse. Cached sources take precedence over pending work.
     func lineCoverageParts(for scope: BoardCacheScope,
-                           maximumCacheAge: TimeInterval) -> [DepartureBoardLineCoveragePart] {
+                           maximumCacheAge: TimeInterval, minimumFetchedAt: Date? = nil) -> [DepartureBoardLineCoveragePart] {
         guard scope.unlimited, !scope.selectedLines.isEmpty else { return [] }
         func compatible(_ prior: BoardCacheScope?, acquired: Date) -> Bool {
             guard let prior, prior.unlimited, prior.namespaceWithoutLines == scope.namespaceWithoutLines,
                   prior.interval.start <= scope.interval.start, prior.interval.end >= scope.interval.end else { return false }
-            return now().timeIntervalSince(acquired) < min(lifetime, maximumCacheAge)
+            return fresh(acquired, maximumCacheAge: maximumCacheAge, since: minimumFetchedAt)
         }
         var candidates: [DepartureBoardLineCoveragePart.Candidate] = entries.compactMap { key, entry in
             let value = entry.response
@@ -210,23 +190,52 @@ actor DepartureBoardCache {
             return .init(source: .cached(key), scope: value.scope!, acquired: value.fetchedAt, cached: true)
         }
         candidates += flights.compactMap { id, flight in
-            guard compatible(flight.scope, acquired: flight.startedAt), let prior = flight.scope,
+            guard !flight.invalidated, compatible(flight.scope, acquired: flight.startedAt), let prior = flight.scope,
                   flight.scopeRevision == scopeRevisions[prior.namespace, default: 0] else { return nil }
             return .init(source: .flight(id), scope: prior, acquired: flight.startedAt, cached: false)
         }
         return DepartureBoardLineCoveragePart.select(candidates, for: scope)
     }
 
+    /// Slice at reusable temporal boundaries before composing line partitions.
+    /// A wider line filter can then supply its overlap without fetching its tail.
+    func lineCoverageIntervals(for scope: BoardCacheScope, maximumCacheAge: TimeInterval,
+                               minimumFetchedAt: Date? = nil) -> [DateInterval] {
+        let requested = Set(scope.selectedLines)
+        func compatible(_ prior: BoardCacheScope?) -> Bool {
+            guard let prior, prior.unlimited, prior.namespaceWithoutLines == scope.namespaceWithoutLines,
+                  prior.interval.end > scope.interval.start, prior.interval.start < scope.interval.end else { return false }
+            return prior.selectedLines.isEmpty || !requested.isDisjoint(with: prior.selectedLines)
+        }
+        let cached = entries.values.compactMap { entry -> DateInterval? in
+            let response = entry.response
+            guard response.isComplete, compatible(response.scope),
+                  fresh(response.fetchedAt, maximumCacheAge: maximumCacheAge, since: minimumFetchedAt),
+                  response.board.departures.values.allSatisfy({ $0.product?.line?.isEmpty == false }) else { return nil }
+            return response.scope!.interval
+        }
+        let pending = flights.values.compactMap { flight -> DateInterval? in
+            guard !flight.invalidated, compatible(flight.scope), let prior = flight.scope,
+                  flight.scopeRevision == scopeRevisions[prior.namespace, default: 0],
+                  fresh(flight.startedAt, maximumCacheAge: maximumCacheAge, since: minimumFetchedAt) else { return nil }
+            return prior.interval
+        }
+        let boundaries = Set([scope.interval.start, scope.interval.end] + (cached + pending).flatMap {
+            [$0.start, $0.end].filter { $0 > scope.interval.start && $0 < scope.interval.end }
+        }).sorted()
+        return zip(boundaries, boundaries.dropFirst()).map { .init(start: $0, end: $1) }
+    }
+
     /// Takes only existing work. A source lost to cancellation, expiry, or a
     /// refresh returns nil so the caller can acquire its original missing lines.
     func reuseLineCoveragePart(_ part: DepartureBoardLineCoveragePart,
-                               maximumCacheAge: TimeInterval) async throws -> CachedBoardResponse? {
+                               maximumCacheAge: TimeInterval, minimumFetchedAt: Date? = nil) async throws -> CachedBoardResponse? {
         try Task.checkCancellation()
         // A selected flight may have completed while an earlier partition was
         // awaited. Its complete cached response is still the same reusable work.
         if let response = entries.values.map(\.response).filter({
             $0.isComplete && $0.scope?.contains(part.scope) == true
-                && now().timeIntervalSince($0.fetchedAt) < min(lifetime, maximumCacheAge)
+                && fresh($0.fetchedAt, maximumCacheAge: maximumCacheAge, since: minimumFetchedAt)
         }).max(by: { $0.fetchedAt < $1.fetchedAt }) {
             return cacheHit(response.restricted(to: part.scope))
         }
@@ -238,9 +247,9 @@ actor DepartureBoardCache {
                 let response: CachedBoardResponse = try await withTaskCancellationHandler {
                     try await withCheckedThrowingContinuation { continuation in
                         guard !Task.isCancelled else { continuation.resume(throwing: CancellationError()); return }
-                        guard var flight = flights[id], flight.scope?.contains(part.scope) == true,
+                        guard var flight = flights[id], !flight.invalidated, flight.scope?.contains(part.scope) == true,
                               flight.scopeRevision == scopeRevisions[part.scope.namespace, default: 0],
-                              now().timeIntervalSince(flight.startedAt) < min(lifetime, maximumCacheAge) else {
+                              fresh(flight.startedAt, maximumCacheAge: maximumCacheAge, since: minimumFetchedAt) else {
                             continuation.resume(throwing: CoverageUnavailable()); return
                         }
                         flight.waiters[waiter] = continuation
@@ -264,14 +273,18 @@ actor DepartureBoardCache {
     /// remains in measuredResponse, including containing unrestricted requests.
     func intervalResponse(scope: BoardCacheScope, refreshPolicy: RealtimeRefreshPolicy,
                           preservePartialOnFailure: Bool = false, maximumCacheAge: TimeInterval = 60,
+                          minimumFetchedAt: Date? = nil,
                           fetch: @escaping @Sendable (DateInterval) async throws -> CachedBoardResponse) async throws -> CachedBoardResponse {
         try Task.checkCancellation()
-        if refreshPolicy == .forceRefresh || !scope.unlimited {
+        if refreshPolicy == .forceRefresh, let minimumFetchedAt {
+            retireCoverage(before: minimumFetchedAt, overlapping: scope)
+        }
+        if (refreshPolicy == .forceRefresh && minimumFetchedAt == nil) || !scope.unlimited {
             return try await fetch(scope.interval)
         }
         let cached = entries.values.map(\.response).filter {
             $0.isComplete && $0.scope?.namespace == scope.namespace
-                && now().timeIntervalSince($0.fetchedAt) < min(lifetime, maximumCacheAge)
+                && fresh($0.fetchedAt, maximumCacheAge: maximumCacheAge, since: minimumFetchedAt)
                 && $0.scope!.interval.end > scope.interval.start
                 && $0.scope!.interval.start < scope.interval.end
         }.sorted { $0.scope!.interval.start < $1.scope!.interval.start }
@@ -290,7 +303,7 @@ actor DepartureBoardCache {
             gaps.append(.init(start: position, end: scope.interval.end))
         }
         var failedRequests = 0
-        for gap in coalescedGaps(gaps, namespace: scope.namespace) {
+        for gap in coalescedGaps(gaps, namespace: scope.namespace, maximumCacheAge: maximumCacheAge, minimumFetchedAt: minimumFetchedAt) {
             do { pieces.append(try await fetch(gap)) }
             catch {
                 guard preservePartialOnFailure, !pieces.isEmpty else { throw error }
@@ -321,9 +334,11 @@ actor DepartureBoardCache {
 
     /// Split an uncovered range at compatible flight boundaries. Its covered
     /// pieces join those flights; only the tails start additional requests.
-    private func coalescedGaps(_ gaps: [DateInterval], namespace: String) -> [DateInterval] {
+    private func coalescedGaps(_ gaps: [DateInterval], namespace: String,
+                               maximumCacheAge: TimeInterval, minimumFetchedAt: Date?) -> [DateInterval] {
         let pending = flights.values.compactMap { flight -> DateInterval? in
-            guard let scope = flight.scope, scope.unlimited, scope.namespace == namespace,
+            guard !flight.invalidated, let scope = flight.scope, scope.unlimited, scope.namespace == namespace,
+                  fresh(flight.startedAt, maximumCacheAge: maximumCacheAge, since: minimumFetchedAt),
                   flight.scopeRevision == scopeRevisions[namespace, default: 0] else { return nil }
             return scope.interval
         }
@@ -368,7 +383,7 @@ actor DepartureBoardCache {
         }
         if latestByKey[flight.key] == id {
             latestByKey[flight.key] = nil
-            if case let .success(board) = stamped,
+            if !flight.invalidated, case let .success(board) = stamped,
                flight.scope.map({ scopeRevisions[$0.namespace, default: 0] == flight.scopeRevision }) ?? true {
                 entries[flight.key] = Entry(response: board)
                 if entries.count > capacity,
