@@ -437,25 +437,24 @@ private enum SnapshotBuilder {
         let tripByID = Dictionary(uniqueKeysWithValues: trips.enumerated().map { ($0.element.id, $0.offset) })
         var tripIndicesByDepartureStop = Array(repeating: [Int](), count: stops.count)
         var serviceRoutesByStop = Array(repeating: Set<ServiceRoute>(), count: stops.count)
+        var boardableStops: Set<Int> = []
+        var alightableStops: Set<Int> = []
         for (tripIndex, trip) in trips.enumerated() {
             let serviceRoute = ServiceRoute(service: trip.service, route: trip.route)
+            var seenDepartureStops: Set<Int> = []
             for time in trip.times {
                 serviceRoutesByStop[time.stop].insert(serviceRoute)
-            }
-            for stop in Set(trip.times.compactMap { $0.departure == nil ? nil : $0.stop }) {
-                tripIndicesByDepartureStop[stop].append(tripIndex)
+                if time.departure != nil {
+                    // Departure indexing includes occurrences without pickup;
+                    // each stop retains the ascending input trip order once.
+                    if seenDepartureStops.insert(time.stop).inserted {
+                        tripIndicesByDepartureStop[time.stop].append(tripIndex)
+                    }
+                    if time.pickup == 0 { boardableStops.insert(time.stop) }
+                }
+                if time.dropoff == 0, time.arrival != nil { alightableStops.insert(time.stop) }
             }
         }
-        let boardableStops = Set(trips.flatMap { trip in
-            trip.times.compactMap { time in
-                time.pickup == 0 && time.departure != nil ? time.stop : nil
-            }
-        })
-        let alightableStops = Set(trips.flatMap { trip in
-            trip.times.compactMap { time in
-                time.dropoff == 0 && time.arrival != nil ? time.stop : nil
-            }
-        })
         var active = Array(repeating: Set<Int>(), count: info.firstServiceDate.days(until: info.lastServiceDate) + 1); let activeStmt = try db.prepare("SELECT day_index,service_id FROM service_date"); while try activeStmt.step() { let day = activeStmt.int(0); if active.indices.contains(day), let s = serviceIndex[activeStmt.int(1)] { active[day].insert(s) } }
         let rstmt = try db.prepare("SELECT from_stop_id,to_stop_id,transfer_type,min_transfer_sec,from_route_id,to_route_id,from_trip_id,to_trip_id FROM transfer_rule"); var rules: [SnapshotRule] = []; while try rstmt.step() { if (!rstmt.isNull(6) && tripIndex[rstmt.int(6)] == nil) || (!rstmt.isNull(7) && tripIndex[rstmt.int(7)] == nil) { continue }; rules.append(.init(order: rules.count, from: rstmt.isNull(0) ? nil : sqliteStopIndex[rstmt.int(0)], to: rstmt.isNull(1) ? nil : sqliteStopIndex[rstmt.int(1)], type: rstmt.int(2), minimum: rstmt.isNull(3) ? nil : rstmt.int(3), fromRoute: rstmt.isNull(4) ? nil : routeIndex[rstmt.int(4)], toRoute: rstmt.isNull(5) ? nil : routeIndex[rstmt.int(5)], fromTrip: rstmt.isNull(6) ? nil : tripIndex[rstmt.int(6)], toTrip: rstmt.isNull(7) ? nil : tripIndex[rstmt.int(7)])) }
         let stationGroupByStop = stops.indices.map { stop in stops[stop].parent.flatMap { stopByID[$0] } ?? stop }
@@ -478,11 +477,7 @@ private enum SnapshotBuilder {
         // Grouping by route + ordered occurrence sequence gives RAPTOR patterns,
         // never merely route_id. Families are split conservatively by an
         // overtaking check at search time (small feeds remain inexpensive).
-        var grouped: [String: [Int]] = [:]; for (i,t) in trips.enumerated() { grouped["\(t.route)|\(t.times.map(\.stop).map(String.init).joined(separator: ","))", default: []].append(i) }
-        let patterns = grouped.keys.sorted().map { key in
-            let family = grouped[key] ?? []
-            return SnapshotPattern(trips: family, stops: family.first.map { trips[$0].times.map(\.stop) } ?? [])
-        }
+        let patterns = SnapshotPatternGrouping.patterns(for: trips)
         var patternOccurrencesByStop = Array(repeating: [PatternOccurrence](), count: stops.count)
         for (patternID, pattern) in patterns.enumerated() {
             var firstPositionByStop: [Int: Int] = [:]
