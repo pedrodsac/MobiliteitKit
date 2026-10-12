@@ -612,6 +612,7 @@ public actor JourneyPlanningSession {
     private var cachedEndpointEdges: (access: [Edge], egress: [Edge])?
     var cachedRealtimeBatch: RealtimePatchBatch?
     var frozenPatches: [RealtimeTripPatch]?
+    var realtimeRefreshStartedAt: Date?
     private var preparationCache = Raptor.PreparationCache()
     var latestPatchesByInstance: [RealtimePatchKey: RealtimeTripPatch] = [:]
     var latestRawPatchesByInstance: [RealtimePatchKey: RealtimeTripPatch] = [:]
@@ -642,7 +643,23 @@ public actor JourneyPlanningSession {
         let realtimeBefore = metrics.realtimePreparationMilliseconds
         var cumulative = RoutingDiagnostics()
         var cpu = 0, walkingPairs = 0
-        let initialHorizon = min(Raptor.fullProfileHorizon, max(1, searchHorizon))
+        var initialHorizon = min(Raptor.fullProfileHorizon, max(1, searchHorizon))
+        if shouldPrepareLongDistanceHorizon {
+            // Leave one scheduled alternative so a live cancellation does not
+            // immediately require another HTTP wave. Sparse profiles must not
+            // jump to a full day merely to fill a second unpublished batch.
+            let scheduledCount = max(0, count) + 1
+            while true {
+                let scheduled = try await generate(anchor: query.departureTime, searchHorizon: initialHorizon,
+                    realtimeBudgetLimit: 0, suggestionCount: count)
+                cumulative.include(diagnostics)
+                cpu += metrics.raptorCPUMilliseconds
+                walkingPairs += metrics.walkingTransferPairs
+                if initialHorizon == Raptor.fullProfileHorizon
+                    || JourneyQualityPolicy.primarySuggestions(scheduled, count: scheduledCount, query: query).count >= scheduledCount { break }
+                initialHorizon = min(Raptor.fullProfileHorizon, initialHorizon * 2)
+            }
+        }
         var horizon = initialHorizon
         let budget: Int
         if case let .bestEffort(configuration, _) = query.realtimePolicy { budget = configuration.acquisitionBudgetMilliseconds }
@@ -785,6 +802,7 @@ public actor JourneyPlanningSession {
             if case let .bestEffort(_, refresh) = query.realtimePolicy { return refresh == .forceRefresh }
             return false
         }())
+        realtimeRefreshStartedAt = refreshing ? clock() : nil
         let acquiring = realtimeProvider != nil && query.realtimePolicy != .disabled
         let seeds = refreshing || !acquiring ? [] : (frozenPatches ?? Array(latestRawPatchesByInstance.values))
             .map { $0.retainingFreshObservations(at: clock()) }
@@ -802,22 +820,85 @@ public actor JourneyPlanningSession {
         async let directJourney = Self.directWalk(snapshot: snapshot, query: query, walking: walking, anchor: anchor)
         var attempted: Set<ItineraryBoarding> = []
         var refinementWaves = 0
+        // Prime reusable pedestrian paths while the initial board requests wait.
+        // These schedule-only candidates are never published; the authoritative
+        // search below still evaluates the complete acquired realtime overlay.
+        let warmSnapshot = snapshot, warmQuery = query, warmWalking = walking
+        let warmPatches = Array(latestPatchesByInstance.values)
+        let shouldPrepareWalking = remainingRealtimeMilliseconds > 0 && searchWorkBudget != 0
+            && !reusingRealtime && walking != nil
+        async let walkingPreparation: WalkingPreparation? = Self.prepareWalkingWhileAcquiring(
+            enabled: shouldPrepareWalking, snapshot: warmSnapshot, query: warmQuery,
+            access: access, egress: egress, patches: warmPatches, walking: warmWalking,
+            horizon: searchHorizon)
+        let concurrentCompletion = shouldPrepareWalking && {
+            if case let .bestEffort(configuration, _) = query.realtimePolicy {
+                return configuration.maximumConcurrentBoardRequests >= 32
+            }
+            return false
+        }()
+        let shouldPrepareEarlyVehicles = concurrentCompletion && !shouldPrepareLongDistanceHorizon
+        async let earlyVehicles = Self.prepareEarlyVehicles(
+            enabled: shouldPrepareEarlyVehicles,
+            snapshot: warmSnapshot, query: warmQuery, access: access, egress: egress,
+            patches: warmPatches, walking: warmWalking, horizon: searchHorizon)
+        var pedestrianPreparation: WalkingPreparation?
+        var earlyPreparation: WalkingPreparation?
         // The optimistic frontier needs only endpoint edges and the timetable.
         // Acquire its observations before the first full profile, so routing
         // does not spend a complete scan discovering schedule-only winners.
         if remainingRealtimeMilliseconds > 0, searchWorkBudget != 0 {
             let acquisitionStarted = ContinuousClock.now
-            _ = try await completeItineraryRealtime([], access: access, egress: egress,
+            let acquisitionBudget = remainingRealtimeMilliseconds
+            async let discovery: Void = acquireInitialRealtime(access: access, egress: egress,
                 anchor: anchor, searchHorizon: searchHorizon, force: forceRealtime,
-                budgetMilliseconds: remainingRealtimeMilliseconds, includeDiscovery: true, reusingRealtime: reusingRealtime, attempted: &attempted)
+                budgetMilliseconds: acquisitionBudget, reusingRealtime: reusingRealtime,
+                maximumConcurrentRequests: concurrentCompletion ? 28 : nil)
+            earlyPreparation = try await earlyVehicles
+            if earlyPreparation == nil { pedestrianPreparation = try await walkingPreparation }
+            if concurrentCompletion, let preliminaryPreparation = earlyPreparation ?? pedestrianPreparation {
+                let preliminaryStarted = ContinuousClock.now
+                let priorRejections = diagnostics.rejections
+                let preliminary = buildJourneys(preliminaryPreparation.result.candidates,
+                    access: access, egress: egress, accepting: accepting).journeys
+                diagnostics.rejections = priorRejections
+                diagnostics.record(.candidateBuilding, since: preliminaryStarted)
+                let selected = selecting?(preliminary) ?? JourneyQualityPolicy.primarySuggestions(
+                    preliminary, count: suggestionCount, query: query)
+                var speculativeAttempts: Set<ItineraryBoarding> = []
+                let remaining = max(0, remainingRealtimeMilliseconds
+                    - Int(RoutingDiagnostics.elapsed(since: acquisitionStarted).rounded(.up)))
+                _ = try await completeItineraryRealtime(selected, access: access, egress: egress,
+                    anchor: anchor, searchHorizon: searchHorizon, force: forceRealtime,
+                    budgetMilliseconds: remaining, includeDiscovery: false,
+                    reusingRealtime: reusingRealtime, attempted: &speculativeAttempts,
+                    maximumConcurrentRequests: 4)
+            }
+            pedestrianPreparation = try await walkingPreparation
+            try await discovery
             let elapsed = RoutingDiagnostics.elapsed(since: acquisitionStarted)
             remainingRealtimeMilliseconds = max(0, remainingRealtimeMilliseconds - Int(elapsed.rounded(.up)))
             metrics.realtimePreparationMilliseconds += Int(elapsed)
             diagnostics.record(.realtime, since: acquisitionStarted)
             discovered = true
+        } else {
+            pedestrianPreparation = try await walkingPreparation
         }
-        var cpuMilliseconds = 0
-        var walkingPairs = 0
+        if let pedestrianPreparation {
+            preparationCache = pedestrianPreparation.result.preparation
+            metrics.pointRaptorScans += 1
+            diagnostics.record(.walkingPreparation, since: pedestrianPreparation.started,
+                through: pedestrianPreparation.finished)
+        }
+        if let earlyPreparation {
+            metrics.pointRaptorScans += 1
+            diagnostics.record(.earlyVehiclePreparation, since: earlyPreparation.started,
+                through: earlyPreparation.finished)
+        }
+        var cpuMilliseconds = (pedestrianPreparation?.result.cpuMilliseconds ?? 0)
+            + (earlyPreparation?.result.cpuMilliseconds ?? 0)
+        var walkingPairs = (pedestrianPreparation?.result.walkingTransferPairs ?? 0)
+            + (earlyPreparation?.result.walkingTransferPairs ?? 0)
         var searchResult: Raptor.SearchResult
         var built: (journeys: [Journey], validCandidates: Int, representativeCount: Int)
         let rejectionsBefore = diagnostics.rejections

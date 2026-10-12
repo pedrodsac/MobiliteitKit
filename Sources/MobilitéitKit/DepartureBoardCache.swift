@@ -27,6 +27,7 @@ struct CachedBoardResponse: Sendable {
 /// Shares boards and in-flight requests. Each waiter can cancel independently;
 /// the URLSession task is cancelled as soon as its last waiter leaves.
 actor DepartureBoardCache {
+    private struct CoverageUnavailable: Error {}
     private struct Entry { let response: CachedBoardResponse }
     private struct Flight {
         let key: String
@@ -191,20 +192,64 @@ actor DepartureBoardCache {
         }.max { $0.fetchedAt < $1.fetchedAt }?.scope?.selectedLines
     }
 
-    /// The caller must verify line metadata after this flight arrives, falling
-    /// back to its original request if safe subset filtering is impossible.
-    func inFlightCoveringLines(for scope: BoardCacheScope, maximumCacheAge: TimeInterval) -> [String]? {
-        guard scope.unlimited, !scope.selectedLines.isEmpty else { return nil }
-        let required = Set(scope.selectedLines)
-        return flights.values.filter { flight in
-            guard let prior = flight.scope, prior.unlimited,
-                  prior.namespaceWithoutLines == scope.namespaceWithoutLines,
-                  prior.interval.start <= scope.interval.start, prior.interval.end >= scope.interval.end,
-                  prior.selectedLines.isEmpty || Set(prior.selectedLines).isSuperset(of: required),
-                  flight.scopeRevision == scopeRevisions[prior.namespace, default: 0]
-            else { return false }
-            return now().timeIntervalSince(flight.startedAt) < min(lifetime, maximumCacheAge)
-        }.max { $0.startedAt < $1.startedAt }?.scope?.selectedLines
+    /// Different board partitions can together cover a later line filter. Every
+    /// selected source must cover the entire interval; temporal gap reuse stays
+    /// in intervalResponse. Cached sources take precedence over pending work.
+    func lineCoverageParts(for scope: BoardCacheScope,
+                           maximumCacheAge: TimeInterval) -> [DepartureBoardLineCoveragePart] {
+        guard scope.unlimited, !scope.selectedLines.isEmpty else { return [] }
+        func compatible(_ prior: BoardCacheScope?, acquired: Date) -> Bool {
+            guard let prior, prior.unlimited, prior.namespaceWithoutLines == scope.namespaceWithoutLines,
+                  prior.interval.start <= scope.interval.start, prior.interval.end >= scope.interval.end else { return false }
+            return now().timeIntervalSince(acquired) < min(lifetime, maximumCacheAge)
+        }
+        var candidates: [DepartureBoardLineCoveragePart.Candidate] = entries.compactMap { key, entry in
+            let value = entry.response
+            guard value.isComplete, compatible(value.scope, acquired: value.fetchedAt),
+                  value.board.departures.values.allSatisfy({ $0.product?.line?.isEmpty == false }) else { return nil }
+            return .init(source: .cached(key), scope: value.scope!, acquired: value.fetchedAt, cached: true)
+        }
+        candidates += flights.compactMap { id, flight in
+            guard compatible(flight.scope, acquired: flight.startedAt), let prior = flight.scope,
+                  flight.scopeRevision == scopeRevisions[prior.namespace, default: 0] else { return nil }
+            return .init(source: .flight(id), scope: prior, acquired: flight.startedAt, cached: false)
+        }
+        return DepartureBoardLineCoveragePart.select(candidates, for: scope)
+    }
+
+    /// Takes only existing work. A source lost to cancellation, expiry, or a
+    /// refresh returns nil so the caller can acquire its original missing lines.
+    func reuseLineCoveragePart(_ part: DepartureBoardLineCoveragePart,
+                               maximumCacheAge: TimeInterval) async throws -> CachedBoardResponse? {
+        try Task.checkCancellation()
+        // A selected flight may have completed while an earlier partition was
+        // awaited. Its complete cached response is still the same reusable work.
+        if let response = entries.values.map(\.response).filter({
+            $0.isComplete && $0.scope?.contains(part.scope) == true
+                && now().timeIntervalSince($0.fetchedAt) < min(lifetime, maximumCacheAge)
+        }).max(by: { $0.fetchedAt < $1.fetchedAt }) {
+            return cacheHit(response.restricted(to: part.scope))
+        }
+        switch part.source {
+        case .cached: return nil
+        case let .flight(id):
+            let waiter = UUID()
+            do {
+                let response: CachedBoardResponse = try await withTaskCancellationHandler {
+                    try await withCheckedThrowingContinuation { continuation in
+                        guard !Task.isCancelled else { continuation.resume(throwing: CancellationError()); return }
+                        guard var flight = flights[id], flight.scope?.contains(part.scope) == true,
+                              flight.scopeRevision == scopeRevisions[part.scope.namespace, default: 0],
+                              now().timeIntervalSince(flight.startedAt) < min(lifetime, maximumCacheAge) else {
+                            continuation.resume(throwing: CoverageUnavailable()); return
+                        }
+                        flight.waiters[waiter] = continuation
+                        flights[id] = flight
+                    }
+                } onCancel: { Task { await self.cancel(waiter) } }
+                return response.restricted(to: part.scope)
+            } catch is CoverageUnavailable { return nil }
+        }
     }
 
     private func cacheHit(_ response: CachedBoardResponse) -> CachedBoardResponse {

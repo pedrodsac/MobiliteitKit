@@ -66,7 +66,7 @@ actor WalkingRouteCache: WalkingRoutingProvider {
 
     init(
         provider: any WalkingRoutingProvider,
-        capacity: Int = 8_192,
+        capacity: Int = 16_384,
         departureBucketSeconds: TimeInterval? = nil
     ) {
         self.provider = provider

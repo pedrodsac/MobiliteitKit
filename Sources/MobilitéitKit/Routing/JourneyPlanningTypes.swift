@@ -65,7 +65,7 @@ public struct JourneyPlanningRequest: Hashable, Sendable {
         self.origin = origin; self.destination = destination
         self.time = time; self.preferences = preferences
         self.realtimeAcquisitionBudgetMilliseconds = max(0, realtimeAcquisitionBudgetMilliseconds)
-        self.realtimeMaximumConcurrentBoardRequests = min(16, max(1, realtimeMaximumConcurrentBoardRequests))
+        self.realtimeMaximumConcurrentBoardRequests = min(32, max(1, realtimeMaximumConcurrentBoardRequests))
         self.realtimeSearchWorkBudgetMilliseconds = realtimeSearchWorkBudgetMilliseconds.map { max(0, $0) }
         self.pagingPolicy = pagingPolicy
     }

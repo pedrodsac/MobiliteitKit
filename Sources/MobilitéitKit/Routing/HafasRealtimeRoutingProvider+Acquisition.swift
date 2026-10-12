@@ -42,8 +42,18 @@ extension HafasRealtimeRoutingProvider {
             }.map(\.element)
         }
         guard !Task.isCancelled, ContinuousClock.now < deadline else { return [:] }
-        return await Self.fetchResults(
-            stopIDs: ordered,
+        // Partition line-heavy boards without changing their temporal coverage.
+        // The shared scheduler bounds actual HTTP work across all partitions.
+        let units = ordered.flatMap { stopID -> [(key: String, stopID: String, lines: [String])] in
+            let lines = Self.selectedLines(in: request.targets.filter { $0.stopID == stopID })
+            let partitions = lines.isEmpty ? [[]] : stride(from: 0, to: lines.count, by: 8).map {
+                Array(lines[$0..<min($0 + 8, lines.count)])
+            }
+            return partitions.enumerated().map { ("\(stopID)|\($0.offset)", stopID, $0.element) }
+        }
+        let byKey = Dictionary(uniqueKeysWithValues: units.map { ($0.key, $0) })
+        let fetched = await Self.fetchResults(
+            stopIDs: units.map(\.key),
             maximumConcurrentRequests: min(maximumConcurrentBoardRequests, request.maximumConcurrentRequests),
             timeout: max(.zero, ContinuousClock.now.duration(to: deadline)),
             prepared: { [weak self] value in
@@ -51,9 +61,16 @@ extension HafasRealtimeRoutingProvider {
                     from: request.from.addingTimeInterval(-Double(request.scheduledLookbackSeconds)),
                     through: request.through, deadline: deadline)
             }
-        ) { [client, now, cacheLifetime] stopID in
-            await Self.acquireStop(client: client, stopID: stopID, request: request, now: now, cacheLifetime: cacheLifetime)
+        ) { [client, now, cacheLifetime] key in
+            let unit = byKey[key]!
+            return await Self.acquireStop(client: client, stopID: unit.stopID, request: request,
+                now: now, cacheLifetime: cacheLifetime, linesOverride: unit.lines).identified(as: key)
         }
+        return Dictionary(uniqueKeysWithValues: ordered.map { stopID in
+            let values = units.filter { $0.stopID == stopID }.compactMap { fetched[$0.key] }
+            return (stopID, Self.combineBoards(values, stopID: stopID,
+                incomplete: values.count != units.filter { $0.stopID == stopID }.count, now: now()))
+        })
     }
 
     private nonisolated static func selectedLines(in targets: [RealtimeBoardTarget]) -> [String] {
@@ -65,10 +82,11 @@ extension HafasRealtimeRoutingProvider {
     /// cache supplies complete overlapping boards and fetches only their gaps.
     private nonisolated static func acquireStop(
         client: MobiliteitAPIClient, stopID: String, request: RealtimeRoutingRequest,
-        now: @escaping @Sendable () -> Date, cacheLifetime: TimeInterval
+        now: @escaping @Sendable () -> Date, cacheLifetime: TimeInterval,
+        linesOverride: [String]? = nil
     ) async -> BoardResult {
         let targets = request.targets.filter { $0.stopID == stopID && $0.through >= $0.from }
-        let selectedLines = selectedLines(in: targets)
+        let selectedLines = linesOverride ?? selectedLines(in: targets)
         let windows = targets.isEmpty ? [DateInterval(start: request.from, end: request.through)]
             : targets.map { DateInterval(start: $0.from, end: $0.through) }
         let width: TimeInterval = 30 * 60
@@ -90,59 +108,18 @@ extension HafasRealtimeRoutingProvider {
                 bounded.append(.init(start: start, end: end)); start = end
             }
         }
-        var incomplete = bounded.count > 8
-        var departures: [String: HafasDeparture] = [:]
-        var observations: [String: Date] = [:]
-        var requests = 0; var hits = 0; var bytes = 0
-        var httpMilliseconds = 0; var decodeMilliseconds = 0
-        var transport: [HTTPTransportMeasurement] = []
-        var successful = false
-        var fetchedAt = now()
-        for interval in bounded.prefix(8) {
-            guard !Task.isCancelled else { incomplete = true; break }
-            let (date, time) = requestDateAndTime(interval.start)
-            do {
-                var lines = selectedLines
-                // A complete unrestricted board can satisfy a narrower request;
-                // a filtered board must never claim unrestricted coverage.
-                if !lines.isEmpty, request.refreshPolicy == .useCache {
-                    let coverage = await client.cachedDepartureBoardCoverage(.init(
-                        stationID: stopID, language: client.language ?? "en", date: date, time: time,
-                        durationMinutes: max(1, Int(ceil(interval.duration / 60))),
-                        maximumJourneys: -1, realtimeMode: .serverDefault, includePasslist: true
-                    ), maximumCacheAge: cacheLifetime)
-                    if coverage >= 1 { lines = [] }
-                }
-                let response = try await client.departureBoardResponse(.init(
-                    stationID: stopID, language: client.language ?? "en", date: date, time: time,
-                    durationMinutes: max(1, Int(ceil(interval.duration / 60))),
-                    maximumJourneys: -1, lines: lines, realtimeMode: .serverDefault, includePasslist: true
-                ), refreshPolicy: request.refreshPolicy, preservePartialOnFailure: true, maximumCacheAge: cacheLifetime)
-                successful = true
-                incomplete = incomplete || !response.isComplete
-                httpMilliseconds += response.httpMilliseconds; decodeMilliseconds += response.decodeMilliseconds
-                transport += response.transport
-                requests += response.networkRequests; hits += response.cacheHits
-                if response.networkRequests > 0 { bytes += response.board.responseBytes }
-                fetchedAt = min(fetchedAt, response.fetchedAt)
-                for departure in response.board.departures.values {
-                    let key = departure.cacheIdentity
-                    let observed = response.observations[key] ?? response.fetchedAt
-                    if observed >= (observations[key] ?? .distantPast) {
-                        departures[key] = departure; observations[key] = observed
-                    }
-                }
-            } catch {
-                requests += 1; incomplete = true
-                if Task.isCancelled { break }
-            }
+        var values: [BoardResult] = []
+        for requestedInterval in bounded.prefix(8) {
+            let interval = DateInterval(start: requestedInterval.start,
+                end: max(requestedInterval.end, requestedInterval.start.addingTimeInterval(
+                    Double(request.minimumBoardCoverageMinutes) * 60)))
+            guard !Task.isCancelled else { break }
+            values.append(await Self.acquireBoardInterval(client: client, stopID: stopID,
+                selectedLines: selectedLines, interval: interval, request: request,
+                now: now, cacheLifetime: cacheLifetime))
         }
-        return .init(stopID: stopID,
-                     board: successful ? .init(departures: Array(departures.values)) : nil,
-                     fetchedAt: fetchedAt, incomplete: incomplete || Task.isCancelled,
-                     requests: requests, hits: hits, bytes: bytes,
-                     httpMilliseconds: httpMilliseconds, decodeMilliseconds: decodeMilliseconds, transport: transport,
-                     observations: observations)
+        return Self.combineBoards(values, stopID: stopID,
+            incomplete: bounded.count > 8 || Task.isCancelled, now: now())
     }
 
     private nonisolated static func fetchResults(

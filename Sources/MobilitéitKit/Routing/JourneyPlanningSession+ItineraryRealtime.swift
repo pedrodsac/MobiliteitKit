@@ -11,7 +11,8 @@ extension JourneyPlanningSession {
     func completeItineraryRealtime(_ journeys: [Journey], access: [Edge], egress: [Edge],
                                    anchor: Date, searchHorizon: TimeInterval,
                                    force: Bool, budgetMilliseconds: Int, includeDiscovery: Bool, reusingRealtime: Bool = false,
-                                   attempted: inout Set<ItineraryBoarding>) async throws -> Bool {
+                                   attempted: inout Set<ItineraryBoarding>,
+                                   maximumConcurrentRequests: Int? = nil) async throws -> Bool {
         guard case let .bestEffort(configuration, refresh) = query.realtimePolicy,
               let realtimeProvider, budgetMilliseconds > 0 else { return false }
         let deadline = ContinuousClock.now.advanced(by: .milliseconds(budgetMilliseconds))
@@ -72,9 +73,12 @@ extension JourneyPlanningSession {
                 from: targets.map(\.from).min()!, through: targets.map(\.through).max()!,
                 scheduledLookbackSeconds: configuration.scheduledLookbackSeconds,
                 refreshPolicy: reusingRealtime ? .useCache : (force ? .forceRefresh : refresh),
-                maximumConcurrentRequests: min(16, configuration.maximumConcurrentBoardRequests),
+                maximumConcurrentRequests: min(maximumConcurrentRequests ?? 32, configuration.maximumConcurrentBoardRequests),
                 timeout: max(.zero, ContinuousClock.now.duration(to: deadline)), deadline: deadline, targets: targets,
-                tripIDs: matchingTripIDs))
+                tripIDs: matchingTripIDs,
+                minimumBoardCoverageMinutes: boardLookaheadMinutes(
+                    includeDiscovery: includeDiscovery, reusingRealtime: reusingRealtime),
+                refreshStartedAt: realtimeRefreshStartedAt))
         } catch is CancellationError { throw CancellationError() }
         catch { return false }
         try Task.checkCancellation()

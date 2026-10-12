@@ -168,12 +168,19 @@ public struct RealtimeRoutingRequest: Sendable {
     /// Keep matched timetable-only trips when a detail screen needs platform
     /// metadata. Their timings remain scheduled, never live predictions.
     public let includeTripMetadata: Bool
+    /// Optional transport lookahead. Matching remains restricted to from/through;
+    /// the shared board cache retains the extra coverage for expanded profiles.
+    public let minimumBoardCoverageMinutes: Int
+    /// A forced calculation may reuse boards acquired since it began. Boards
+    /// and flights from before this boundary still require a new acquisition.
+    public let refreshStartedAt: Date?
     public init(stopIDs: [String], from: Date, through: Date,
                 scheduledLookbackSeconds: Int = 7_200,
                 refreshPolicy: RealtimeRefreshPolicy = .useCache,
                 maximumConcurrentRequests: Int = 4, timeout: Duration = .seconds(4),
                 deadline: ContinuousClock.Instant? = nil, targets: [RealtimeBoardTarget] = [],
-                tripIDs: Set<String> = [], includeTripMetadata: Bool = false) {
+                tripIDs: Set<String> = [], includeTripMetadata: Bool = false,
+                minimumBoardCoverageMinutes: Int = 0, refreshStartedAt: Date? = nil) {
         self.stopIDs = stopIDs; self.from = from; self.through = through
         self.scheduledLookbackSeconds = max(0, scheduledLookbackSeconds)
         self.refreshPolicy = refreshPolicy
@@ -183,6 +190,8 @@ public struct RealtimeRoutingRequest: Sendable {
         self.targets = targets
         self.tripIDs = tripIDs
         self.includeTripMetadata = includeTripMetadata
+        self.minimumBoardCoverageMinutes = min(1_439, max(0, minimumBoardCoverageMinutes))
+        self.refreshStartedAt = refreshStartedAt
     }
 }
 

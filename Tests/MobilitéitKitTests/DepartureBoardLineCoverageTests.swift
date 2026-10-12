@@ -3,6 +3,96 @@ import Testing
 @testable import MobiliteitKit
 
 @Suite struct DepartureBoardLineCoverageTests {
+    @Test func composedCoverageRevalidatesFreshnessAndOverlappingRefreshes() async throws {
+        let clock = LineCoverageClock()
+        let cache = DepartureBoardCache(now: { clock.read() })
+        let start = RealtimeTestFixture.date("08:00:00")
+        func scope(_ lines: [String], duration: TimeInterval = 5_400,
+                   language: String = "en") -> BoardCacheScope {
+            .init(namespace: "https://board.invalid/departureBoard?id=a&lang=\(language)&lines=\(lines.joined(separator: ","))",
+                interval: .init(start: start, duration: duration), maximumJourneys: -1)
+        }
+        let empty = HafasDepartureBoard(departures: [])
+        for lines in [["201", "202"], ["203", "204"]] {
+            let value = scope(lines)
+            _ = try await cache.measuredResponse(for: value.namespace, refreshPolicy: .useCache, scope: value) {
+                .init(board: empty, networkRequests: 1, cacheHits: 0)
+            }
+        }
+        let requested = scope(["201", "203"])
+        let parts = await cache.lineCoverageParts(for: requested, maximumCacheAge: 60)
+        #expect(parts.count == 2)
+        #expect(Set(parts.flatMap(\.requestedLines)) == ["201", "203"])
+        #expect(await cache.lineCoverageParts(for: scope(["201", "203"], language: "fr"), maximumCacheAge: 60).isEmpty)
+        clock.advance(2)
+        #expect(await cache.lineCoverageParts(for: requested, maximumCacheAge: 1).isEmpty)
+        let expired = try await cache.reuseLineCoveragePart(try #require(parts.first), maximumCacheAge: 1)
+        #expect(expired?.cacheHits == nil)
+        _ = try await cache.measuredResponse(for: "refresh", refreshPolicy: .forceRefresh,
+            scope: scope(["201"], duration: 1_800)) {
+            .init(board: empty, networkRequests: 1, cacheHits: 0)
+        }
+        for part in parts {
+            let reused = try await cache.reuseLineCoveragePart(part, maximumCacheAge: 60)
+            #expect(reused?.cacheHits == (part.requestedLines == ["203"] ? 1 : nil))
+        }
+    }
+
+    @Test func invalidatedPendingPartitionCannotBeJoinedFromAnEarlierPlan() async throws {
+        let cache = DepartureBoardCache()
+        let gate = LineCoverageGate()
+        let start = RealtimeTestFixture.date("08:00:00")
+        let broad = BoardCacheScope(namespace: "https://board.invalid/departureBoard?lines=201,202",
+            interval: .init(start: start, duration: 5_400), maximumJourneys: -1)
+        let requested = BoardCacheScope(namespace: "https://board.invalid/departureBoard?lines=201",
+            interval: broad.interval, maximumJourneys: -1)
+        let empty = HafasDepartureBoard(departures: [])
+        let owner = Task {
+            try await cache.measuredResponse(for: "broad", refreshPolicy: .useCache, scope: broad) {
+                await gate.wait()
+                return .init(board: empty, networkRequests: 1, cacheHits: 0)
+            }
+        }
+        while !(await gate.entered) { await Task.yield() }
+        let parts = await cache.lineCoverageParts(for: requested, maximumCacheAge: 60)
+        _ = try await cache.measuredResponse(for: "refresh", refreshPolicy: .forceRefresh,
+            scope: .init(namespace: requested.namespace, interval: .init(start: start, duration: 1_800), maximumJourneys: -1)) {
+            .init(board: empty, networkRequests: 1, cacheHits: 0)
+        }
+        let reused = try await cache.reuseLineCoveragePart(try #require(parts.first), maximumCacheAge: 60)
+        #expect(reused?.cacheHits == nil)
+        await gate.release()
+        _ = try await owner.value
+        #expect(await cache.lineCoverageParts(for: requested, maximumCacheAge: 60).isEmpty)
+    }
+
+    @Test func cancellingAPartitionWaiterPreservesItsOwner() async throws {
+        let cache = DepartureBoardCache()
+        let gate = LineCoverageGate()
+        let start = RealtimeTestFixture.date("08:00:00")
+        let scope = BoardCacheScope(namespace: "https://board.invalid/departureBoard?lines=201,202",
+            interval: .init(start: start, duration: 5_400), maximumJourneys: -1)
+        let requested = BoardCacheScope(namespace: "https://board.invalid/departureBoard?lines=201",
+            interval: scope.interval, maximumJourneys: -1)
+        let empty = HafasDepartureBoard(departures: [])
+        let owner = Task {
+            try await cache.measuredResponse(for: "broad", refreshPolicy: .useCache, scope: scope) {
+                await gate.wait()
+                return .init(board: empty, networkRequests: 1, cacheHits: 0)
+            }
+        }
+        while !(await gate.entered) { await Task.yield() }
+        let parts = await cache.lineCoverageParts(for: requested, maximumCacheAge: 60)
+        let part = try #require(parts.first)
+        let waiter = Task { try await cache.reuseLineCoveragePart(part, maximumCacheAge: 60) }
+        waiter.cancel()
+        await #expect(throws: CancellationError.self) { try await waiter.value }
+        await gate.release()
+        #expect(try await owner.value.networkRequests == 1)
+        let reused = try await cache.reuseLineCoveragePart(part, maximumCacheAge: 60)
+        #expect(reused?.cacheHits == 1)
+    }
+
     @Test(arguments: [false, true])
     func filteredRefreshInvalidatesOlderBroaderCoverage(inFlight: Bool) async throws {
         let cache = DepartureBoardCache()
@@ -62,6 +152,8 @@ import Testing
         _ = try await client.departureBoardSnapshot(try request(lines: ["201", "202"]))
         #expect(await client.cachedDepartureBoardSupersetLines(try request(lines: ["201"]),
             maximumCacheAge: 60) == nil)
+        #expect(await client.departureBoardLineCoverageParts(try request(lines: ["201"]),
+            maximumCacheAge: 60).isEmpty)
     }
 
     @Test func scopeAndFreshnessMustMatch() async throws {
@@ -103,4 +195,11 @@ private actor LineCoverageGate {
         await withCheckedContinuation { continuation = $0 }
     }
     func release() { continuation?.resume(); continuation = nil }
+}
+
+private final class LineCoverageClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = Date(timeIntervalSince1970: 1_000)
+    func read() -> Date { lock.withLock { value } }
+    func advance(_ seconds: TimeInterval) { lock.withLock { value.addTimeInterval(seconds) } }
 }
