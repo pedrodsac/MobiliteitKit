@@ -46,6 +46,7 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
     let store: GTFSStore
     let client: MobiliteitAPIClient
     let maximumConcurrentBoardRequests: Int
+    let boardRequestScheduler: RealtimeBoardRequestScheduler
     let cacheLifetime: TimeInterval
     let requestTimeout: Duration
     let matchingNow: @Sendable () -> ContinuousClock.Instant
@@ -70,6 +71,7 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
         self.store = try GTFSStore(databaseAt: databaseURL)
         self.client = client
         self.maximumConcurrentBoardRequests = max(1, maximumConcurrentBoardRequests)
+        self.boardRequestScheduler = .init(capacity: max(1, maximumConcurrentBoardRequests))
         self.cacheLifetime = max(0, cacheLifetime)
         self.requestTimeout = requestTimeout
         self.now = { .now }; matchingNow = { .now }
@@ -83,6 +85,7 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
          matchingNow: @escaping @Sendable () -> ContinuousClock.Instant = { .now }) {
         self.store = store; self.client = client
         self.maximumConcurrentBoardRequests = max(1, maximumConcurrentBoardRequests)
+        self.boardRequestScheduler = .init(capacity: max(1, maximumConcurrentBoardRequests))
         self.cacheLifetime = max(0, cacheLifetime); self.requestTimeout = requestTimeout
         self.now = now; self.matchingNow = matchingNow
         fullTimestampFormatter = Self.makeFormatter("yyyy-MM-dd HH:mm:ss")

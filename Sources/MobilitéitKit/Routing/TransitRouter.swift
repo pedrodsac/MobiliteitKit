@@ -832,6 +832,12 @@ public actor JourneyPlanningSession {
             }
             return false
         }()
+        let sharesBoardCapacity = {
+            guard let provider = realtimeProvider as? any SharedRealtimeBoardScheduling,
+                  case let .bestEffort(configuration, _) = query.realtimePolicy else { return false }
+            return provider.sharedBoardRequestCapacity > 0
+                && provider.sharedBoardRequestCapacity <= configuration.maximumConcurrentBoardRequests
+        }()
         var pedestrianPreparation: WalkingPreparation?
         // The optimistic frontier needs only endpoint edges and the timetable.
         // Acquire its observations before the first full profile, so routing
@@ -842,7 +848,7 @@ public actor JourneyPlanningSession {
             async let discovery: Void = acquireInitialRealtime(access: access, egress: egress,
                 anchor: anchor, searchHorizon: searchHorizon, force: forceRealtime,
                 budgetMilliseconds: acquisitionBudget, reusingRealtime: reusingRealtime,
-                maximumConcurrentRequests: concurrentCompletion ? 28 : nil)
+                maximumConcurrentRequests: concurrentCompletion && !sharesBoardCapacity ? 28 : nil)
             pedestrianPreparation = try await walkingPreparation
             if concurrentCompletion, let pedestrianPreparation {
                 let preliminaryStarted = ContinuousClock.now

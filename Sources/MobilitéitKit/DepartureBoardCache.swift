@@ -356,17 +356,20 @@ actor DepartureBoardCache {
         scopeRevisions = scopeRevisions.filter { active.contains($0.key) }
     }
 
-    private func cancel(_ waiter: UUID) {
+    private func cancel(_ waiter: UUID) async {
         guard let id = flights.first(where: { $0.value.waiters[waiter] != nil })?.key,
               var flight = flights[id], let continuation = flight.waiters.removeValue(forKey: waiter)
         else { return }
-        continuation.resume(throwing: CancellationError())
         if flight.waiters.isEmpty {
             flight.task.cancel()
             flights[id] = nil
             if latestByKey[flight.key] == id { latestByKey[flight.key] = nil }
         } else { flights[id] = flight }
         pruneRevisions()
+        // The final caller may own a transport permit. Keep that ownership
+        // until the cancelled fetch exits; a surviving caller already owns it.
+        if flight.waiters.isEmpty { await flight.task.value }
+        continuation.resume(throwing: CancellationError())
     }
 
     private func complete(_ id: UUID, result: Result<CachedBoardResponse, any Error>) {

@@ -63,10 +63,21 @@ extension HafasRealtimeRoutingProvider {
                     from: request.from.addingTimeInterval(-Double(request.scheduledLookbackSeconds)),
                     through: request.through, deadline: deadline)
             }
-        ) { [client, now, cacheLifetime] key in
+        ) { [client, now, cacheLifetime, boardRequestScheduler] key in
             let unit = byKey[key]!
-            return await Self.acquireStop(client: client, stopID: unit.stopID, request: request,
-                now: now, cacheLifetime: cacheLifetime, linesOverride: unit.lines).identified(as: key)
+            do {
+                return try await boardRequestScheduler.withPermit {
+                    guard ContinuousClock.now < deadline else {
+                        return .init(stopID: key, board: nil, fetchedAt: now(),
+                            incomplete: true, requests: 0, hits: 0, bytes: 0)
+                    }
+                    return await Self.acquireStop(client: client, stopID: unit.stopID, request: request,
+                        now: now, cacheLifetime: cacheLifetime, linesOverride: unit.lines).identified(as: key)
+                }
+            } catch {
+                return .init(stopID: key, board: nil, fetchedAt: now(),
+                    incomplete: true, requests: 0, hits: 0, bytes: 0)
+            }
         }
         return Dictionary(uniqueKeysWithValues: ordered.map { stopID in
             let values = units.filter { $0.stopID == stopID }.compactMap { fetched[$0.key] }
