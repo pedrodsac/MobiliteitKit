@@ -1,18 +1,6 @@
 import Foundation
 
 extension JourneyPlanningSession {
-    /// Long cross-country profiles commonly expand beyond two hours. Acquire
-    /// reusable coverage up front instead of waiting for a new board at every
-    /// expansion. This changes transport lookahead only, never routing horizons,
-    /// the discovery frontier, matching bounds or the number of results.
-    func boardLookaheadMinutes(includeDiscovery: Bool, reusingRealtime: Bool) -> Int {
-        // Later horizons consume the initial prefetched coverage and acquire
-        // their actual gaps. Padding a shifted start again can turn an already
-        // covered window into another overlapping four-hour request.
-        guard includeDiscovery, !reusingRealtime, shouldPrepareLongDistanceHorizon else { return 0 }
-        return 240
-    }
-
     /// A cheap scheduled profile can choose the starting horizon for sparse,
     /// long-distance services before any acquisition budget is spent. The live
     /// profile still evaluates every candidate and expands further if needed.

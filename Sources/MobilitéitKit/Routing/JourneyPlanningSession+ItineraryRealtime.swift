@@ -75,10 +75,7 @@ extension JourneyPlanningSession {
                 refreshPolicy: reusingRealtime ? .useCache : (force ? .forceRefresh : refresh),
                 maximumConcurrentRequests: min(maximumConcurrentRequests ?? 32, configuration.maximumConcurrentBoardRequests),
                 timeout: max(.zero, ContinuousClock.now.duration(to: deadline)), deadline: deadline, targets: targets,
-                tripIDs: matchingTripIDs,
-                minimumBoardCoverageMinutes: boardLookaheadMinutes(
-                    includeDiscovery: includeDiscovery, reusingRealtime: reusingRealtime),
-                refreshStartedAt: realtimeRefreshStartedAt))
+                tripIDs: matchingTripIDs, refreshStartedAt: realtimeRefreshStartedAt))
         } catch is CancellationError { throw CancellationError() }
         catch { return false }
         try Task.checkCancellation()

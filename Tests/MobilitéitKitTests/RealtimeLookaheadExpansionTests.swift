@@ -3,7 +3,7 @@ import Testing
 @testable import MobiliteitKit
 
 @Suite struct RealtimeLookaheadExpansionTests {
-    @Test func expandedLiveSearchConsumesPrefetchWithoutPaddingAnotherFutureWindow() async throws {
+    @Test func cancelledPreliminaryRoutesExpandUsingOriginalBoardWindows() async throws {
         let fixture = try await RealtimeTestFixture(
             stopTimes: "first,11:30:00,11:30:00,d,1\nfirst,12:00:00,12:00:00,c,2\n"
                 + "second,14:00:00,14:00:00,d,1\nsecond,14:30:00,14:30:00,c,2\n"
@@ -21,14 +21,14 @@ import Testing
         let page = try await session.initialSuggestions(count: 1, searchHorizon: 3_600)
         let requests = await provider.requests
         let initial = try #require(requests.first)
-        #expect(initial.minimumBoardCoverageMinutes == 240)
+        #expect(initial.minimumBoardCoverageMinutes == 0)
         let expanded = try #require(requests.first { $0.through > initial.through })
         #expect(expanded.minimumBoardCoverageMinutes == 0)
         #expect(expanded.refreshPolicy == .useCache)
         #expect(expanded.targets.contains { $0.stopID == "d"
             && $0.from <= RealtimeTestFixture.date("18:00:00")
             && $0.through >= RealtimeTestFixture.date("18:00:00") })
-        #expect(requests.dropFirst().allSatisfy { $0.minimumBoardCoverageMinutes == 0 })
+        #expect(requests.allSatisfy { $0.minimumBoardCoverageMinutes == 0 })
         let tripIDs = page.journeys.flatMap { journey in
             journey.legs.compactMap { leg -> String? in
                 if case let .transit(ride) = leg { return ride.tripID }
