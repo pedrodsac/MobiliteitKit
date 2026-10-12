@@ -101,6 +101,11 @@ extension Raptor {
             // has missed every eligible departure. Final walks remain valid.
             guard egressStops.contains(item.to)
                 || arrival <= (boardingDeadlines?[item.to] ?? .distantFuture) else { continue }
+            let labelID = nextLabelID
+            nextLabelID += 1
+            guard !walkingCandidateCannotEnterProfile(labels[item.to], source: item.source,
+                to: item.to, durationSeconds: route.durationSeconds, arrival: arrival,
+                candidateID: labelID) else { continue }
             let leg = WalkingTransferLeg(
                 from: item.from,
                 to: item.to,
@@ -109,7 +114,7 @@ extension Raptor {
                 arrival: arrival
             )
             let label = Label(
-                id: nextLabelID,
+                id: labelID,
                 time: arrival,
                 prior: item.source, appendedLeg: .walkingTransfer(leg),
                 firstStop: item.source.firstStop,
@@ -126,7 +131,6 @@ extension Raptor {
                 walkingStopsVisited: item.source.walkingStopsVisited.adding(item.to),
                 tripKey: item.source.tripKey
             )
-            nextLabelID += 1
             _ = insert(label, at: item.to, into: &labels)
         }
         return uniqueRequests.count
