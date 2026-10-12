@@ -21,7 +21,7 @@ import Testing
         #expect(await provider.peak <= 32)
     }
 
-    @Test func earlyVehicleProfileDoesNotLimitThePublishedTransferCount() async throws {
+    @Test func preliminaryVehicleChecksPreserveThePublishedTransferCount() async throws {
         let fixture = try await RealtimeTestFixture(
             stopTimes: "first,08:00:00,08:00:00,a,1\nfirst,08:10:00,08:10:00,b,2\n"
                 + "second,08:15:00,08:15:00,b,1\nsecond,08:25:00,08:25:00,d,2\n"
@@ -45,7 +45,7 @@ import Testing
             return ride.tripID
         }
         #expect(tripIDs == ["first", "second", "third"])
-        #expect(page.metrics.pointRaptorScans >= 3)
+        #expect(page.metrics.pointRaptorScans >= 2)
         #expect(await provider.limits.contains(4))
         #expect(await provider.peak <= 32)
     }

@@ -837,13 +837,7 @@ public actor JourneyPlanningSession {
             }
             return false
         }()
-        let shouldPrepareEarlyVehicles = concurrentCompletion && !shouldPrepareLongDistanceHorizon
-        async let earlyVehicles = Self.prepareEarlyVehicles(
-            enabled: shouldPrepareEarlyVehicles,
-            snapshot: warmSnapshot, query: warmQuery, access: access, egress: egress,
-            patches: warmPatches, walking: warmWalking, horizon: searchHorizon)
         var pedestrianPreparation: WalkingPreparation?
-        var earlyPreparation: WalkingPreparation?
         // The optimistic frontier needs only endpoint edges and the timetable.
         // Acquire its observations before the first full profile, so routing
         // does not spend a complete scan discovering schedule-only winners.
@@ -854,12 +848,11 @@ public actor JourneyPlanningSession {
                 anchor: anchor, searchHorizon: searchHorizon, force: forceRealtime,
                 budgetMilliseconds: acquisitionBudget, reusingRealtime: reusingRealtime,
                 maximumConcurrentRequests: concurrentCompletion ? 28 : nil)
-            earlyPreparation = try await earlyVehicles
-            if earlyPreparation == nil { pedestrianPreparation = try await walkingPreparation }
-            if concurrentCompletion, let preliminaryPreparation = earlyPreparation ?? pedestrianPreparation {
+            pedestrianPreparation = try await walkingPreparation
+            if concurrentCompletion, let pedestrianPreparation {
                 let preliminaryStarted = ContinuousClock.now
                 let priorRejections = diagnostics.rejections
-                let preliminary = buildJourneys(preliminaryPreparation.result.candidates,
+                let preliminary = buildJourneys(pedestrianPreparation.result.candidates,
                     access: access, egress: egress, accepting: accepting).journeys
                 diagnostics.rejections = priorRejections
                 diagnostics.record(.candidateBuilding, since: preliminaryStarted)
@@ -874,7 +867,6 @@ public actor JourneyPlanningSession {
                     reusingRealtime: reusingRealtime, attempted: &speculativeAttempts,
                     maximumConcurrentRequests: 4)
             }
-            pedestrianPreparation = try await walkingPreparation
             try await discovery
             let elapsed = RoutingDiagnostics.elapsed(since: acquisitionStarted)
             remainingRealtimeMilliseconds = max(0, remainingRealtimeMilliseconds - Int(elapsed.rounded(.up)))
@@ -890,15 +882,8 @@ public actor JourneyPlanningSession {
             diagnostics.record(.walkingPreparation, since: pedestrianPreparation.started,
                 through: pedestrianPreparation.finished)
         }
-        if let earlyPreparation {
-            metrics.pointRaptorScans += 1
-            diagnostics.record(.earlyVehiclePreparation, since: earlyPreparation.started,
-                through: earlyPreparation.finished)
-        }
-        var cpuMilliseconds = (pedestrianPreparation?.result.cpuMilliseconds ?? 0)
-            + (earlyPreparation?.result.cpuMilliseconds ?? 0)
-        var walkingPairs = (pedestrianPreparation?.result.walkingTransferPairs ?? 0)
-            + (earlyPreparation?.result.walkingTransferPairs ?? 0)
+        var cpuMilliseconds = pedestrianPreparation?.result.cpuMilliseconds ?? 0
+        var walkingPairs = pedestrianPreparation?.result.walkingTransferPairs ?? 0
         var searchResult: Raptor.SearchResult
         var built: (journeys: [Journey], validCandidates: Int, representativeCount: Int)
         let rejectionsBefore = diagnostics.rejections
