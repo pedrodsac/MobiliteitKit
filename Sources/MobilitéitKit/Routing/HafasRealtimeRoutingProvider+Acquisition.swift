@@ -42,19 +42,21 @@ extension HafasRealtimeRoutingProvider {
             }.map(\.element)
         }
         guard !Task.isCancelled, ContinuousClock.now < deadline else { return [:] }
-        // Partition line-heavy boards without changing their temporal coverage.
-        // The shared scheduler bounds actual HTTP work across all partitions.
-        let units = ordered.flatMap { stopID -> [(key: String, stopID: String, lines: [String])] in
-            let lines = Self.selectedLines(in: request.targets.filter { $0.stopID == stopID })
-            let partitions = lines.isEmpty ? [[]] : stride(from: 0, to: lines.count, by: 8).map {
-                Array(lines[$0..<min($0 + 8, lines.count)])
-            }
-            return partitions.enumerated().map { ("\(stopID)|\($0.offset)", stopID, $0.element) }
+        // Use otherwise idle request slots to split large line filters without
+        // adding a second HTTP wave. Every partition retains its full windows.
+        let concurrency = min(maximumConcurrentBoardRequests, request.maximumConcurrentRequests)
+        let lineGroups = ordered.map { stopID in
+            Self.selectedLines(in: request.targets.filter { $0.stopID == stopID })
+        }
+        let partitions = RealtimeBoardPartitioning.partitions(for: lineGroups,
+            maximumConcurrentRequests: concurrency)
+        let units = ordered.enumerated().flatMap { index, stopID -> [(key: String, stopID: String, lines: [String])] in
+            partitions[index].enumerated().map { ("\(stopID)|\($0.offset)", stopID, $0.element) }
         }
         let byKey = Dictionary(uniqueKeysWithValues: units.map { ($0.key, $0) })
         let fetched = await Self.fetchResults(
             stopIDs: units.map(\.key),
-            maximumConcurrentRequests: min(maximumConcurrentBoardRequests, request.maximumConcurrentRequests),
+            maximumConcurrentRequests: concurrency,
             timeout: max(.zero, ContinuousClock.now.duration(to: deadline)),
             prepared: { [weak self] value in
                 await self?.prepareBoard(value.board,
