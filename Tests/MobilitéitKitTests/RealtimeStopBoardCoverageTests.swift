@@ -2,12 +2,12 @@ import Foundation
 import Testing
 @testable import MobiliteitKit
 
-@Suite struct RealtimeBoardPartitionTests {
+@Suite struct RealtimeStopBoardCoverageTests {
     @Test(arguments: [0, 1, 8, 9, 17])
-    func partitionsRetainEveryLineAndTheCompleteInterval(count: Int) async throws {
+    func oneRequestPerStopRetainsEveryLineAndTheCompleteInterval(count: Int) async throws {
         let fixture = try await RealtimeTestFixture(); defer { fixture.remove() }
         let lines = (0..<count).map { String(201 + $0) }
-        let probe = PartitionConcurrency()
+        let probe = StopBoardConcurrency()
         let (client, host) = RealtimeBoardProtocol.client(responseDelay: { _ in
             probe.started()
             return .milliseconds(30)
@@ -25,7 +25,7 @@ import Testing
                 .init(stopID: "a", from: from, through: through, lines: lines),
                 .init(stopID: "b", from: from, through: through, lines: lines)]))
         let requests = RealtimeBoardProtocol.requests(host)
-        #expect(requests.count == 2 * max(1, (count + 7) / 8))
+        #expect(requests.count == 2)
         #expect(probe.peak == 2)
         #expect(batch.coveredStopIDs == ["a", "b"])
         #expect(batch.incompleteStopIDs.isEmpty)
@@ -47,12 +47,12 @@ import Testing
         }
     }
 
-    @Test func aTimedOutPartitionRetainsTheOtherPartitionsLiveEvidence() async throws {
+    @Test func aTimedOutLaterWindowRetainsTheEarlierWindowsLiveEvidence() async throws {
         let fixture = try await RealtimeTestFixture(); defer { fixture.remove() }
         let (client, host) = RealtimeBoardProtocol.client(responseDelay: { request in
-            Self.lines(request).contains("201") ? .milliseconds(20) : .seconds(5)
+            Self.time(request) == "08:00:00" ? .milliseconds(20) : .seconds(5)
         }) { request in
-            Self.lines(request).contains("201")
+            Self.time(request) == "08:00:00"
                 ? liveBoard(stops: liveStop("a", planned: "08:00:00", predicted: "08:08:00") + ","
                     + liveStop("c", planned: "08:20:00", predicted: "08:28:00", arrival: "08:28:00"))
                 : #"{"Departure":[]}"#
@@ -66,7 +66,10 @@ import Testing
         let batch = try await provider.patches(for: .init(stopIDs: ["a"], from: from, through: through,
             maximumConcurrentRequests: 2, timeout: .milliseconds(500),
             deadline: started.advanced(by: .milliseconds(500)), targets: [
-                .init(stopID: "a", from: from, through: through, lines: (201...209).map(String.init))]))
+                .init(stopID: "a", from: from, through: RealtimeTestFixture.date("08:30:00"),
+                    lines: (201...209).map(String.init)),
+                .init(stopID: "a", from: RealtimeTestFixture.date("09:00:00"), through: through,
+                    lines: (201...209).map(String.init))]))
         #expect(batch.coveredStopIDs == ["a"])
         #expect(batch.incompleteStopIDs == ["a"])
         #expect(batch.networkRequests == 2)
@@ -76,13 +79,13 @@ import Testing
         #expect(started.duration(to: .now) < .seconds(2))
     }
 
-    private static func lines(_ request: URLRequest) -> [String] {
+    private static func time(_ request: URLRequest) -> String? {
         URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?
-            .first { $0.name == "lines" }?.value?.split(separator: ",").map(String.init) ?? []
+            .first { $0.name == "time" }?.value
     }
 }
 
-private final class PartitionConcurrency: Sendable {
+private final class StopBoardConcurrency: Sendable {
     private let lock = NSLock()
     private nonisolated(unsafe) var active = 0
     private nonisolated(unsafe) var maximum = 0

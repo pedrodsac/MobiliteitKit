@@ -26,11 +26,3 @@ extension HafasRealtimeRoutingProvider {
             transport: values.flatMap(\.transport), observations: observations)
     }
 }
-
-extension HafasRealtimeRoutingProvider.BoardResult {
-    func identified(as value: String) -> Self {
-        .init(stopID: value, board: board, fetchedAt: fetchedAt, incomplete: incomplete,
-            requests: requests, hits: hits, bytes: bytes, httpMilliseconds: httpMilliseconds,
-            decodeMilliseconds: decodeMilliseconds, transport: transport, observations: observations)
-    }
-}

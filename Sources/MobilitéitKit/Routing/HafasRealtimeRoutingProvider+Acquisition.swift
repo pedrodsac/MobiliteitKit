@@ -42,20 +42,14 @@ extension HafasRealtimeRoutingProvider {
             }.map(\.element)
         }
         guard !Task.isCancelled, ContinuousClock.now < deadline else { return [:] }
-        // Use otherwise idle request slots to split large line filters without
-        // adding a second HTTP wave. Every partition retains its full windows.
+        // One work unit keeps every selected line for a stop together. Its
+        // outward-rounded windows still acquire their slices sequentially.
         let concurrency = min(maximumConcurrentBoardRequests, request.maximumConcurrentRequests)
-        let lineGroups = ordered.map { stopID in
-            Self.selectedLines(in: request.targets.filter { $0.stopID == stopID })
-        }
-        let partitions = RealtimeBoardPartitioning.partitions(for: lineGroups,
-            maximumConcurrentRequests: concurrency)
-        let units = ordered.enumerated().flatMap { index, stopID -> [(key: String, stopID: String, lines: [String])] in
-            partitions[index].enumerated().map { ("\(stopID)|\($0.offset)", stopID, $0.element) }
-        }
-        let byKey = Dictionary(uniqueKeysWithValues: units.map { ($0.key, $0) })
+        let linesByStopID = Dictionary(uniqueKeysWithValues: ordered.map { stopID in
+            (stopID, Self.selectedLines(in: request.targets.filter { $0.stopID == stopID }))
+        })
         let fetched = await Self.fetchResults(
-            stopIDs: units.map(\.key),
+            stopIDs: ordered,
             maximumConcurrentRequests: concurrency,
             timeout: max(.zero, ContinuousClock.now.duration(to: deadline)),
             prepared: { [weak self] value in
@@ -63,26 +57,24 @@ extension HafasRealtimeRoutingProvider {
                     from: request.from.addingTimeInterval(-Double(request.scheduledLookbackSeconds)),
                     through: request.through, deadline: deadline)
             }
-        ) { [client, now, cacheLifetime, boardRequestScheduler] key in
-            let unit = byKey[key]!
+        ) { [client, now, cacheLifetime, boardRequestScheduler] stopID in
             do {
                 return try await boardRequestScheduler.withPermit {
                     guard ContinuousClock.now < deadline else {
-                        return .init(stopID: key, board: nil, fetchedAt: now(),
+                        return .init(stopID: stopID, board: nil, fetchedAt: now(),
                             incomplete: true, requests: 0, hits: 0, bytes: 0)
                     }
-                    return await Self.acquireStop(client: client, stopID: unit.stopID, request: request,
-                        now: now, cacheLifetime: cacheLifetime, linesOverride: unit.lines).identified(as: key)
+                    return await Self.acquireStop(client: client, stopID: stopID, request: request,
+                        now: now, cacheLifetime: cacheLifetime, selectedLines: linesByStopID[stopID]!)
                 }
             } catch {
-                return .init(stopID: key, board: nil, fetchedAt: now(),
+                return .init(stopID: stopID, board: nil, fetchedAt: now(),
                     incomplete: true, requests: 0, hits: 0, bytes: 0)
             }
         }
         return Dictionary(uniqueKeysWithValues: ordered.map { stopID in
-            let values = units.filter { $0.stopID == stopID }.compactMap { fetched[$0.key] }
-            return (stopID, Self.combineBoards(values, stopID: stopID,
-                incomplete: values.count != units.filter { $0.stopID == stopID }.count, now: now()))
+            (stopID, fetched[stopID] ?? .init(stopID: stopID, board: nil, fetchedAt: now(),
+                incomplete: true, requests: 0, hits: 0, bytes: 0))
         })
     }
 
@@ -96,10 +88,9 @@ extension HafasRealtimeRoutingProvider {
     private nonisolated static func acquireStop(
         client: MobiliteitAPIClient, stopID: String, request: RealtimeRoutingRequest,
         now: @escaping @Sendable () -> Date, cacheLifetime: TimeInterval,
-        linesOverride: [String]? = nil
+        selectedLines: [String]
     ) async -> BoardResult {
         let targets = request.targets.filter { $0.stopID == stopID && $0.through >= $0.from }
-        let selectedLines = linesOverride ?? selectedLines(in: targets)
         let windows = targets.isEmpty ? [DateInterval(start: request.from, end: request.through)]
             : targets.map { DateInterval(start: $0.from, end: $0.through) }
         let width: TimeInterval = 30 * 60
