@@ -22,6 +22,7 @@ struct AdjacentJourneySearch {
         let started = ContinuousClock.now
         var cumulative = RoutingDiagnostics(startedAt: started)
         var horizon = JourneyBatchPolicy.initialHorizon
+        let count = earlier ? JourneyBatchPolicy.earlierAdjacentCount : JourneyBatchPolicy.count
         while true {
             try Task.checkCancellation()
             let start = earlier ? boundary.departure.addingTimeInterval(-horizon) : boundary.departure
@@ -47,10 +48,10 @@ struct AdjacentJourneySearch {
             // boundary while the future window grows, so partial-page journeys
             // cannot fall out of the search during expansion.
             var page = try await session.adjacentTimePage(axis: arrival ? .arrival : .departure,
-                boundary: boundary, earlier: earlier, count: JourneyBatchPolicy.count, excludingIDs: excludingIDs,
+                boundary: boundary, earlier: earlier, count: count, excludingIDs: excludingIDs,
                 searchHorizon: arrival && !earlier ? Raptor.fullProfileHorizon + horizon : horizon)
             cumulative.include(page.diagnostics)
-            if page.journeys.count >= JourneyBatchPolicy.count || horizon == Raptor.fullProfileHorizon {
+            if page.journeys.count >= count || horizon == Raptor.fullProfileHorizon {
                 cumulative.totalMilliseconds = RoutingDiagnostics.elapsed(since: started)
                 page.diagnostics = cumulative
                 return Result(page: page, query: query, patches: await session.currentPatches(),

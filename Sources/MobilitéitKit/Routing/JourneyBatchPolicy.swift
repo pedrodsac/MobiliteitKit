@@ -3,6 +3,8 @@ import Foundation
 /// Shared by initial, adjacent and walking-replacement searches in the facade.
 enum JourneyBatchPolicy {
     static let count = 6
+    /// Earlier pages stay short: riders rarely browse far into the past.
+    static let earlierAdjacentCount = 3
     static let initialHorizon: TimeInterval = 2 * 60 * 60
 
     static func adjacentSuggestions(_ profile: [Journey], axis: JourneyTimeAxis,

@@ -59,7 +59,7 @@ struct AdjacentJourneyPagingTests {
     }
 
     @Test(arguments: [JourneyPlanningTime.departAt(date(hour: 8)), .arriveBy(date(hour: 8, minute: 40))])
-    func everyAdjacentBatchAddsSixUniqueJourneys(time: JourneyPlanningTime) async throws {
+    func laterBatchesAddSixAndEarlierBatchesAddThreeUniqueJourneys(time: JourneyPlanningTime) async throws {
         let fixture = try await RoutingPreventionFixture(files: files(Array(stride(from: -7200, through: 10800, by: 300))))
         defer { fixture.remove() }
         let session = try await fixture.planning(request(time))
@@ -69,7 +69,7 @@ struct AdjacentJourneyPagingTests {
             let current = try await session.calculate(page: page, refresh: .scheduleOnly)
             let previousIDs = Set(previous.journeys.map(\.id))
             let currentIDs = Set(current.journeys.map(\.id))
-            #expect(currentIDs.subtracting(previousIDs).count == 6)
+            #expect(currentIDs.subtracting(previousIDs).count == (page == .earlier ? 3 : 6))
             #expect(previousIDs.isSubset(of: currentIDs))
             #expect(currentIDs.count == current.journeys.count)
             previous = current
@@ -109,7 +109,7 @@ struct AdjacentJourneyPagingTests {
     }
 
     @Test(arguments: [JourneyPlanningTime.departAt(date(hour: 8)), .arriveBy(date(hour: 8, minute: 40))])
-    func liveCompletionTargetsTheSixJourneysActuallyPublishedOnEachPage(time: JourneyPlanningTime) async throws {
+    func liveCompletionTargetsTheJourneysActuallyPublishedOnEachPage(time: JourneyPlanningTime) async throws {
         let provider = BatchRecordingRealtime()
         let fixture = try await RoutingPreventionFixture(
             files: files(Array(stride(from: -7200, through: 10800, by: 300))),
@@ -123,7 +123,7 @@ struct AdjacentJourneyPagingTests {
             let added = result.journeys.filter { !previousIDs.contains($0.id) }
             let expected = Set(added.compactMap { $0.firstRide?.tripID })
             let requests = await provider.drainRequests()
-            #expect(expected.count == 6)
+            #expect(expected.count == (page == .earlier ? 3 : 6))
             #expect(requests.last == expected)
             previousIDs = Set(result.journeys.map(\.id))
         }
@@ -136,7 +136,7 @@ struct AdjacentJourneyPagingTests {
         _ = try await session.calculate(refresh: .scheduleOnly)
         let earlier = try await session.calculate(page: .earlier)
         let historical = earlier.journeys.filter { $0.effectiveDeparture < date(hour: 8) }
-        #expect(historical.count == 4)
+        #expect(historical.count == 3)
         #expect(historical.allSatisfy { $0.statusEvidence.status(at: date(hour: 8)) == .missed })
         #expect(historical.allSatisfy { $0.statusEvidence.coverage == .scheduleOnly })
         #expect(historical.allSatisfy { earlier.validationContexts[$0.id]!.anchor <= $0.effectiveDeparture })
