@@ -180,3 +180,14 @@ extension Raptor {
         return lhs.count < rhs.count
     }
 }
+
+/// Hashes the same logical elements that `==` compares.
+extension Raptor.TripKey: Hashable {
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(count)
+        for index in 0..<count {
+            hasher.combine(self[index].trip)
+            hasher.combine(self[index].day)
+        }
+    }
+}

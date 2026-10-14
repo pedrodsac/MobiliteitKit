@@ -29,7 +29,41 @@ extension Raptor {
             // once, instead of retaining and comparing entire trip keys in every
             // alighting candidate. Mixed depths keep a source reference for the
             // appended-trip comparison whose order cannot use prefix ranks.
-            self.uniformDepth = Set(sources.map { $0.tripKey.count }).count <= 1
+            // `precedes` is lexicographic, so equal keys share one rank. Many
+            // labels share a key; sort each distinct key once.
+            var minimumDepth = Int.max, maximumDepth = Int.min
+            var keyIDs = [Int](repeating: 0, count: sources.count)
+            var distinctKeys: [TripKey] = []
+            var idByKey: [TripKey: Int] = [:]
+            for index in sources.indices {
+                let key = sources[index].tripKey
+                minimumDepth = min(minimumDepth, key.count)
+                maximumDepth = max(maximumDepth, key.count)
+                if let id = idByKey[key] {
+                    keyIDs[index] = id
+                } else {
+                    keyIDs[index] = distinctKeys.count
+                    idByKey[key] = distinctKeys.count
+                    distinctKeys.append(key)
+                }
+            }
+            self.uniformDepth = minimumDepth >= maximumDepth
+            var rankByKey = [Int](repeating: 0, count: distinctKeys.count)
+            for (rank, key) in distinctKeys.indices.sorted(by: {
+                Raptor.precedes(distinctKeys[$0], distinctKeys[$1])
+            }).enumerated() {
+                rankByKey[key] = rank
+            }
+            self.prefixRanks = keyIDs.map { rankByKey[$0] }
+            self.sources = sources; self.profiles = profiles
+            if Raptor.verifyKernel {
+                precondition(uniformDepth == (Set(sources.map { $0.tripKey.count }).count <= 1),
+                    "Boarding depth mismatch")
+                precondition(prefixRanks == Self.referencePrefixRanks(sources), "Boarding prefix rank mismatch")
+            }
+        }
+
+        static func referencePrefixRanks(_ sources: [Label]) -> [Int] {
             let sorted = sources.indices.sorted { Raptor.precedes(sources[$0].tripKey, sources[$1].tripKey) }
             var ranks = [Int](repeating: 0, count: sources.count)
             var rank = 0
@@ -37,8 +71,7 @@ extension Raptor {
                 if position > 0, sources[sorted[position]].tripKey != sources[sorted[position - 1]].tripKey { rank += 1 }
                 ranks[sorted[position]] = rank
             }
-            self.prefixRanks = ranks
-            self.sources = sources; self.profiles = profiles
+            return ranks
         }
 
         /// Iterate the original departure order, so temporary IDs and quota tie
