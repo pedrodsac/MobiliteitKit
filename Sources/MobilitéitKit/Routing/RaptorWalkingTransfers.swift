@@ -90,6 +90,10 @@ extension Raptor {
         try Task.checkCancellation()
         let routes = await walking.routes(uniqueRequests, maximumConcurrency: 4)
         try Task.checkCancellation()
+        // Assign IDs in the original request order. Each target profile then
+        // receives its own requests in that order, so targets are independent:
+        // sources are immutable labels captured before any insertion.
+        var worksByTarget: [Int: [WalkingTransferWork]] = [:]
         for item in requests {
             // A straight-line or unverified fallback cannot prove that a
             // connection between two boarding points is physically catchable.
@@ -101,38 +105,101 @@ extension Raptor {
             // has missed every eligible departure. Final walks remain valid.
             guard egressStops.contains(item.to)
                 || arrival <= (boardingDeadlines?[item.to] ?? .distantFuture) else { continue }
-            let labelID = nextLabelID
+            worksByTarget[item.to, default: []].append(.init(
+                from: item.from, to: item.to, source: item.source, route: route,
+                arrival: arrival, labelID: nextLabelID))
             nextLabelID += 1
-            guard !walkingCandidateCannotEnterProfile(labels[item.to], source: item.source,
-                to: item.to, durationSeconds: route.durationSeconds, arrival: arrival,
-                candidateID: labelID) else { continue }
-            let leg = WalkingTransferLeg(
-                from: item.from,
-                to: item.to,
-                route: route,
-                departure: item.source.time,
-                arrival: arrival
-            )
-            let label = Label(
-                id: labelID,
-                time: arrival,
-                prior: item.source, appendedLeg: .walkingTransfer(leg),
-                firstStop: item.source.firstStop,
-                firstDeparture: item.source.firstDeparture,
-                lastTransit: item.source.lastTransit,
-                minimumSlack: item.source.minimumSlack,
-                totalSlack: item.source.totalSlack,
-                accessSeconds: item.source.accessSeconds,
-                accessDistance: item.source.accessDistance,
-                pathwaySeconds: item.source.pathwaySeconds + route.durationSeconds,
-                pathwayDistance: item.source.pathwayDistance + route.distanceMeters,
-                transferWalkSeconds: item.source.transferWalkSeconds + route.durationSeconds,
-                containsPreferredMode: item.source.containsPreferredMode,
-                walkingStopsVisited: item.source.walkingStopsVisited.adding(item.to),
-                tripKey: item.source.tripKey
-            )
-            _ = insert(label, at: item.to, into: &labels)
+        }
+        let reference = verifyKernel ? labels : nil
+        try await applyWalkingTransfers(worksByTarget, to: &labels)
+        if var reference {
+            // The original single loop, in global request order.
+            for work in worksByTarget.values.joined().sorted(by: { $0.labelID < $1.labelID }) {
+                applyWalkingTransfer(work, to: &reference[work.to])
+            }
+            precondition(reference.keys.sorted() == labels.keys.sorted(), "Walking transfer stops mismatch")
+            for stop in labels.keys {
+                let actual = labels[stop]!, expected = reference[stop]!
+                precondition(actual.ordered.map(\.id) == expected.ordered.map(\.id)
+                    && actual.byWalk.map(\.id) == expected.byWalk.map(\.id)
+                    && actual.byArrival.map(\.id) == expected.byArrival.map(\.id)
+                    && actual.lastUnprotectedArrival?.id == expected.lastUnprotectedArrival?.id
+                    && actual.lastPreferredArrival?.id == expected.lastPreferredArrival?.id,
+                    "Walking transfer profile mismatch")
+            }
         }
         return uniqueRequests.count
+    }
+
+    struct WalkingTransferWork: Sendable {
+        let from: Int; let to: Int; let source: Label; let route: WalkingRoute
+        let arrival: Date; let labelID: Int
+    }
+
+    static let minimumTargetsForParallelWalking = 64
+
+    /// Applies each target's ordered transfers to that target's profile only.
+    static func applyWalkingTransfers(_ worksByTarget: [Int: [WalkingTransferWork]],
+                                      to labels: inout [Int: LabelProfile]) async throws {
+        let targets = worksByTarget.keys.sorted()
+        let workerCount = min(maximumPatternWorkers, ProcessInfo.processInfo.activeProcessorCount)
+        guard targets.count >= minimumTargetsForParallelWalking, workerCount > 1 else {
+            for target in targets {
+                for work in worksByTarget[target]! { applyWalkingTransfer(work, to: &labels[target]) }
+            }
+            return
+        }
+        let owned = targets.map { (target: $0, profile: labels.removeValue(forKey: $0)) }
+        let chunkSize = max(1, (owned.count + workerCount * 4 - 1) / (workerCount * 4))
+        try await withThrowingTaskGroup(of: [(Int, LabelProfile?)].self) { group in
+            for start in stride(from: 0, to: owned.count, by: chunkSize) {
+                let chunk = owned[start..<min(start + chunkSize, owned.count)]
+                group.addTask(priority: .userInitiated) {
+                    try chunk.map { entry in
+                        try Task.checkCancellation()
+                        var profile = entry.profile
+                        for work in worksByTarget[entry.target]! { applyWalkingTransfer(work, to: &profile) }
+                        return (entry.target, profile)
+                    }
+                }
+            }
+            for try await results in group {
+                for (target, profile) in results { labels[target] = profile }
+            }
+        }
+    }
+
+    @inline(__always) static func applyWalkingTransfer(_ work: WalkingTransferWork, to profile: inout LabelProfile?) {
+        let source = work.source, route = work.route
+        guard !walkingCandidateCannotEnterProfile(profile, source: source,
+            to: work.to, durationSeconds: route.durationSeconds, arrival: work.arrival,
+            candidateID: work.labelID) else { return }
+        let leg = WalkingTransferLeg(
+            from: work.from,
+            to: work.to,
+            route: route,
+            departure: source.time,
+            arrival: work.arrival
+        )
+        let label = Label(
+            id: work.labelID,
+            time: work.arrival,
+            prior: source, appendedLeg: .walkingTransfer(leg),
+            firstStop: source.firstStop,
+            firstDeparture: source.firstDeparture,
+            lastTransit: source.lastTransit,
+            minimumSlack: source.minimumSlack,
+            totalSlack: source.totalSlack,
+            accessSeconds: source.accessSeconds,
+            accessDistance: source.accessDistance,
+            pathwaySeconds: source.pathwaySeconds + route.durationSeconds,
+            pathwayDistance: source.pathwayDistance + route.distanceMeters,
+            transferWalkSeconds: source.transferWalkSeconds + route.durationSeconds,
+            containsPreferredMode: source.containsPreferredMode,
+            walkingStopsVisited: source.walkingStopsVisited.adding(work.to),
+            tripKey: source.tripKey
+        )
+        if profile == nil { profile = LabelProfile() }
+        _ = insert(label, into: &profile!)
     }
 }
