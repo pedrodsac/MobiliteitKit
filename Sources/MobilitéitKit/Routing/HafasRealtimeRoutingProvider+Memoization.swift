@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 extension HafasRealtimeRoutingProvider {
     // Boards at several transfer stops repeat vehicle passlists. Memoize pure
@@ -33,8 +34,11 @@ extension HafasRealtimeRoutingProvider {
 extension HafasRealtimeRoutingProvider {
     /// Populate only pure conversions while other HTTP requests are in flight.
     /// Matching and patch merging still visit boards in their original order.
-    func prepareBoard(_ board: HafasDepartureBoard?, from: Date, through: Date, deadline: ContinuousClock.Instant) {
+    func prepareBoard(_ board: HafasDepartureBoard?, from: Date, through: Date, deadline: ContinuousClock.Instant,
+                      telemetry: BoardTelemetry? = nil) {
         guard let board else { return }
+        let started = ContinuousClock.now
+        defer { telemetry?.addPreparation(Self.fractionalMilliseconds(started.duration(to: .now))) }
         for live in board.departures.values {
             guard !Task.isCancelled, ContinuousClock.now < deadline else { return }
             guard Self.hasRealtimeSignal(live), let planned = date(date: live.plannedDate, time: live.plannedTime),
@@ -50,4 +54,11 @@ extension HafasRealtimeRoutingProvider {
             }
         }
     }
+}
+
+/// Measurements taken while one batch's boards arrive. Prepared boards report from other tasks.
+final class BoardTelemetry: Sendable {
+    private let preparation = OSAllocatedUnfairLock(initialState: 0.0)
+    var preparationMilliseconds: Double { preparation.withLock { $0 } }
+    func addPreparation(_ milliseconds: Double) { preparation.withLock { $0 += milliseconds } }
 }

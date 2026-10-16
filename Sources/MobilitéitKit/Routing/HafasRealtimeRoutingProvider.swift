@@ -15,6 +15,8 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
         var decodeMilliseconds: Int = 0
         var transport: [HTTPTransportMeasurement] = []
         var observations: [String: Date] = [:]
+        /// When the board's data became available to this batch.
+        var arrivedAt: ContinuousClock.Instant? = nil
     }
     struct RealtimeMatchingFailure: Error { let reason: RealtimeMatchingRejection }
     struct Candidate {
@@ -124,15 +126,25 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
         let matchingFrom = request.from.addingTimeInterval(-Double(request.scheduledLookbackSeconds))
         async let schedules = prepareSchedules(for: stopIDs, from: matchingFrom, through: request.through, deadline: deadline, targets: request.targets, lookback: request.scheduledLookbackSeconds)
         let started = ContinuousClock.now
-        let fetched = await boards(for: stopIDs, request: request, deadline: acquisitionDeadline)
-        let fetchMilliseconds = Self.milliseconds(started.duration(to: .now))
+        let telemetry = BoardTelemetry()
+        let fetched = await boards(for: stopIDs, request: request, deadline: acquisitionDeadline, telemetry: telemetry)
+        let fetchFinished = ContinuousClock.now
+        let fetchMilliseconds = Self.milliseconds(started.duration(to: fetchFinished))
         let prepared = await schedules
         try Task.checkCancellation()
         let matchingStarted = ContinuousClock.now
+        var timings = RealtimeBatchTimings()
+        timings.fetchStarted = started; timings.fetchFinished = fetchFinished
+        timings.matchingStarted = matchingStarted
         var patches: [String: RealtimeTripPatch] = [:]
         var unfinished = Set<String>()
         var rejections: [RealtimeMatchingRejection: Int] = [:]
         for stopID in stopIDs {
+            let stopStarted = ContinuousClock.now
+            defer {
+                timings.boards.append(.init(stopID: stopID, arrived: fetched[stopID]?.arrivedAt,
+                                            matchingStarted: stopStarted, matchingFinished: .now))
+            }
             guard matchingNow() < deadline else { unfinished.insert(stopID); continue }
             guard let result = fetched[stopID], let board = result.board else { continue }
             let scheduled = prepared.byStopID[stopID] ?? []
@@ -193,6 +205,8 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
                 $0.value.fetchedAt > $1.value.fetchedAt
             }.prefix(512).map { ($0.key, $0.value) })
         }
+        timings.matchingFinished = .now
+        timings.preparationMilliseconds = telemetry.preparationMilliseconds
         return .init(patches: patches.values.sorted { ($0.serviceDate, $0.tripID) < ($1.serviceDate, $1.tripID) },
                      requestedStopIDs: requested, coveredStopIDs: Set(fetched.values.filter { $0.board != nil }.map(\.stopID)),
                      boardFetchMilliseconds: fetchMilliseconds,
@@ -205,7 +219,8 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
                      fetchedAt: fetched.values.map(\.fetchedAt).min(),
                      httpMilliseconds: fetched.values.reduce(0) { $0 + $1.httpMilliseconds },
                      decodeMilliseconds: fetched.values.reduce(0) { $0 + $1.decodeMilliseconds },
-                     matchingRejections: rejections, transport: fetched.values.flatMap(\.transport))
+                     matchingRejections: rejections, transport: fetched.values.flatMap(\.transport),
+                     timings: timings)
     }
 
     func prepareSchedules(for stopIDs: [String], from: Date, through: Date, deadline: ContinuousClock.Instant, targets: [RealtimeBoardTarget] = [], lookback: Int = 7_200) async -> PreparedSchedules {
@@ -241,6 +256,9 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
         return .init(byStopID: result, milliseconds: Self.milliseconds(started.duration(to: .now)))
     }
 
+    nonisolated static func fractionalMilliseconds(_ duration: Duration) -> Double {
+        Double(duration.components.seconds) * 1_000 + Double(duration.components.attoseconds) / 1e15
+    }
     nonisolated static func milliseconds(_ duration: Duration) -> Int {
         Int(duration.components.seconds * 1_000 + duration.components.attoseconds / 1_000_000_000_000_000)
     }

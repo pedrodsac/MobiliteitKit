@@ -7,7 +7,7 @@ extension HafasRealtimeRoutingProvider {
     }
 
     func boards(for stopIDs: [String], request: RealtimeRoutingRequest,
-                deadline: ContinuousClock.Instant) async -> [String: BoardResult] {
+                deadline: ContinuousClock.Instant, telemetry: BoardTelemetry? = nil) async -> [String: BoardResult] {
         guard ContinuousClock.now < deadline else { return [:] }
         var ordered = stopIDs
         if request.refreshPolicy == .useCache {
@@ -55,7 +55,7 @@ extension HafasRealtimeRoutingProvider {
             prepared: { [weak self] value in
                 await self?.prepareBoard(value.board,
                     from: request.from.addingTimeInterval(-Double(request.scheduledLookbackSeconds)),
-                    through: request.through, deadline: deadline)
+                    through: request.through, deadline: deadline, telemetry: telemetry)
             }
         ) { [client, now, cacheLifetime, boardRequestScheduler] stopID in
             do {
@@ -136,7 +136,11 @@ extension HafasRealtimeRoutingProvider {
             var next = 0; var completed = 0
             func add() {
                 let stopID = stopIDs[next]; next += 1
-                group.addTask { .result(await fetch(stopID)) }
+                group.addTask {
+                    var value = await fetch(stopID)
+                    value.arrivedAt = .now
+                    return .result(value)
+                }
             }
             for _ in 0..<min(max(1, maximumConcurrentRequests), stopIDs.count) { add() }
             group.addTask {

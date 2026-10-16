@@ -80,6 +80,7 @@ extension JourneyPlanningSession {
         catch { return false }
         try Task.checkCancellation()
         recordRealtimeBatch(batch)
+        let mergeStarted = ContinuousClock.now
         let before = latestPatchesByInstance
         for incoming in batch.patches {
             let key = RealtimePatchKey(tripID: incoming.tripID, serviceDate: incoming.serviceDate)
@@ -96,9 +97,12 @@ extension JourneyPlanningSession {
         metrics.realtimeFrontierSize = requested.count
         metrics.realtimeBoardsCovered = covered.count
         metrics.realtimeIncompleteBoards = incomplete.count
+        diagnostics.record(.providerSessionMerge, since: mergeStarted)
         if before != latestPatchesByInstance {
             metrics.realtimeOverlayRevisions += 1
             if state == .unavailable { state = .partial }
+            let effectStarted = ContinuousClock.now
+            defer { diagnostics.record(.sessionRoutingEffect, since: effectStarted) }
             return routingEffectChanged(from: before)
         }
         return false
@@ -115,6 +119,7 @@ extension JourneyPlanningSession {
             diagnostics.realtimeMatchingRejections[reason, default: 0] += count
         }
         diagnostics.transport += batch.transport
+        diagnostics.recordBoards(batch.timings)
         metrics.realtimeHTTPMilliseconds += batch.httpMilliseconds
         metrics.realtimeDecodeMilliseconds += batch.decodeMilliseconds
         metrics.hafasRequests += batch.networkRequests

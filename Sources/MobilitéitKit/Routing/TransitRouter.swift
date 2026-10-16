@@ -882,6 +882,13 @@ public actor JourneyPlanningSession {
             metrics.pointRaptorScans += 1
             diagnostics.record(.walkingPreparation, since: pedestrianPreparation.started,
                 through: pedestrianPreparation.finished)
+            diagnostics.recordWarmUp(since: pedestrianPreparation.started, through: pedestrianPreparation.finished,
+                horizon: searchHorizon, rounds: pedestrianPreparation.result.roundMetrics,
+                candidates: pedestrianPreparation.result.candidates.count,
+                walkingMilliseconds: pedestrianPreparation.result.walkingTransferMilliseconds)
+            for span in pedestrianPreparation.result.spans {
+                diagnostics.record(span.stage, since: span.start, through: span.end)
+            }
         }
         var cpuMilliseconds = pedestrianPreparation?.result.cpuMilliseconds ?? 0
         var walkingPairs = pedestrianPreparation?.result.walkingTransferPairs ?? 0
@@ -898,6 +905,7 @@ public actor JourneyPlanningSession {
             preparationCache = searchResult.preparation
             searchResult.preparation = .init()
             diagnostics.record(.raptor, since: raptorStarted)
+            for span in searchResult.spans { diagnostics.record(span.stage, since: span.start, through: span.end) }
             diagnostics.recordSearch(since: raptorStarted, horizon: searchHorizon, wave: refinementWaves,
                 rounds: searchResult.roundMetrics, candidates: searchResult.candidates.count,
                 walkingMilliseconds: searchResult.walkingTransferMilliseconds)
@@ -996,20 +1004,36 @@ public actor JourneyPlanningSession {
         -> (journeys: [Journey], validCandidates: Int, representativeCount: Int) {
         var representatives: [String: BuiltJourney] = [:]
         var validCandidates = 0
+        var timings = BuildTimings()
         for candidate in candidates {
+            let normalisationStarted = ContinuousClock.now
             let candidate = RaptorWalkingShortcut.normalize(candidate, snapshot: snapshot, query: query,
                 egress: egress, patches: latestPatchesByInstance)
-            guard let journey = buildJourney(candidate, access: access, egress: egress) else { continue }
+            timings.normalisation += normalisationStarted.duration(to: .now)
+            let buildStarted = ContinuousClock.now
+            let nestedBefore = timings.nested
+            let built = buildJourney(candidate, access: access, egress: egress, timings: &timings)
+            timings.assembly += buildStarted.duration(to: .now) - (timings.nested - nestedBefore)
+            guard let journey = built else { continue }
             // Page bounds must apply before representatives and dominance: an
             // itinerary outside an arrival window cannot suppress one inside it.
             if let accepting, !accepting(journey.journey) { continue }
             validCandidates += 1
+            let deduplicationStarted = ContinuousClock.now
             if let existing = representatives[journey.tripInstanceKey] {
                 if prefers(journey, over: existing) { representatives[journey.tripInstanceKey] = journey }
             } else {
                 representatives[journey.tripInstanceKey] = journey
             }
+            timings.deduplication += deduplicationStarted.duration(to: .now)
         }
+        diagnostics.addWork(.buildNormalisation, timings.normalisation)
+        diagnostics.addWork(.buildStructuralValidation, timings.structural)
+        diagnostics.addWork(.buildAssembly, timings.assembly)
+        diagnostics.addWork(.buildTransferRules, timings.transferRules)
+        diagnostics.addWork(.buildPublicationValidation, timings.publication)
+        diagnostics.addWork(.buildDeduplication, timings.deduplication)
+        let groupsStarted = ContinuousClock.now
         var transferRepresentatives: [BuiltJourney] = []
         var indicesByVehicle: [String: [Int]] = [:]
         for journey in representatives.values.sorted(by: journeyOrder) {
@@ -1024,8 +1048,13 @@ public actor JourneyPlanningSession {
                 transferRepresentatives.append(journey)
             }
         }
-        let journeys = strictEnvelope(transferRepresentatives, preferences: query.preferences).sorted(by: journeyOrder)
-            .map { addingIntermediateStops(to: $0.journey) }
+        diagnostics.record(.buildTransferGroups, since: groupsStarted)
+        let envelopeStarted = ContinuousClock.now
+        let enveloped = strictEnvelope(transferRepresentatives, preferences: query.preferences).sorted(by: journeyOrder)
+        diagnostics.record(.buildEnvelope, since: envelopeStarted)
+        let intermediateStarted = ContinuousClock.now
+        let journeys = enveloped.map { addingIntermediateStops(to: $0.journey) }
+        diagnostics.record(.buildIntermediateStops, since: intermediateStarted)
         return (journeys, validCandidates, transferRepresentatives.count)
     }
 
@@ -1165,8 +1194,19 @@ public actor JourneyPlanningSession {
         let leg = WalkingLeg(from: origin, to: destination, departure: departure, arrival: arrival, duration: TimeInterval(route.durationSeconds), distanceMeters: route.distanceMeters, polyline: route.polyline, steps: route.steps, source: .provider, evidence: route.evidence, segments: route.segments)
         return .init(id: .init("walk:\(a.latitude),\(a.longitude):\(b.latitude),\(b.longitude)"), origin: query.origin, destination: query.destination, scheduledDeparture: departure, scheduledArrival: arrival, effectiveDeparture: departure, effectiveArrival: arrival, transferCount: 0, walkingDuration: leg.pedestrianDuration, walkingDistance: leg.pedestrianDistance, waitingDuration: 0, inVehicleDuration: leg.connectionDuration, legs: [.walk(leg)], feedGeneration: snapshot.info.generation, accessibility: .unknown, matchesPreferredMode: query.preferences.preferredMode == nil)
     }
-    private func buildJourney(_ candidate: Raptor.Candidate, access: [Edge], egress: [Edge]) -> BuiltJourney? {
-        if let failure = JourneyStructuralValidator.assess(candidate, snapshot: snapshot, query: query) {
+    /// Per-candidate phase durations. Phases alternate, so only their sums are meaningful.
+    private struct BuildTimings {
+        var normalisation = Duration.zero, structural = Duration.zero, assembly = Duration.zero
+        var transferRules = Duration.zero, publication = Duration.zero, deduplication = Duration.zero
+        /// Phases timed inside `buildJourney`; the remainder of its time is assembly.
+        var nested: Duration { structural + transferRules + publication }
+    }
+    private func buildJourney(_ candidate: Raptor.Candidate, access: [Edge], egress: [Edge],
+                              timings: inout BuildTimings) -> BuiltJourney? {
+        let structuralStarted = ContinuousClock.now
+        let failure = JourneyStructuralValidator.assess(candidate, snapshot: snapshot, query: query)
+        timings.structural += structuralStarted.duration(to: .now)
+        if let failure {
             diagnostics.rejections[failure, default: 0] += 1; return nil
         }
         guard let a = access.first(where: { $0.stop == candidate.firstStop }), let e = egress.first(where: { $0.stop == candidate.lastStop }), let firstTransit = candidate.firstTransit, let lastTransit = candidate.lastTransit else { return nil }
@@ -1219,6 +1259,8 @@ public actor JourneyPlanningSession {
                     ride.boardSequence = trip.times[item.boardPos].sequence
                     ride.alightSequence = trip.times[item.alightPos].sequence
                     if !item.continuesFromPrevious, let previous = candidate.transitLegs.last(where: { $0.boardTime < item.boardTime }) {
+                        let rulesStarted = ContinuousClock.now
+                        defer { timings.transferRules += rulesStarted.duration(to: .now) }
                         let required = Raptor.transferDecision(snapshot: snapshot, incoming: previous,
                             at: item.board, outgoing: item.trip, preferences: query.preferences)?.requiredSeconds
                         ride.requiredTotalTransferSeconds = required
@@ -1268,7 +1310,10 @@ public actor JourneyPlanningSession {
             candidate.transitLegs.contains { preferred.contains(routeType: snapshot.routes[snapshot.trips[$0.trip].route].type) }
         } ?? true
         let journey = Journey(id: .init(signature), origin: query.origin, destination: query.destination, scheduledDeparture: scheduledDepart, scheduledArrival: scheduledArrive, effectiveDeparture: depart, effectiveArrival: arrive, transferCount: max(0, candidate.transitLegs.filter { !$0.continuesFromPrevious }.count - 1), walkingDuration: walkingDuration, walkingDistance: walks.reduce(0) { $0 + $1.pedestrianDistance }, waitingDuration: waiting, inVehicleDuration: inVehicle, legs: legs, feedGeneration: snapshot.info.generation, accessibility: accessibility, matchesPreferredMode: matchesPreferredMode)
-        if case let .invalid(failure) = JourneyPublicationValidator.assess(journey, query: query) {
+        let publicationStarted = ContinuousClock.now
+        let publication = JourneyPublicationValidator.assess(journey, query: query)
+        timings.publication += publicationStarted.duration(to: .now)
+        if case let .invalid(failure) = publication {
             diagnostics.rejections[failure, default: 0] += 1; return nil
         }
         return .init(journey: journey, firstBoard: candidate.firstDeparture, tripInstanceKey: signature, equivalentTransferKey: candidate.equivalentTransferKey(snapshot: snapshot), minimumTransferSlack: candidate.minimumTransferSlack, totalTransferSlack: candidate.totalTransferSlack)

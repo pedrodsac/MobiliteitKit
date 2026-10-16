@@ -34,9 +34,19 @@ public struct HTTPTransportMetrics: Codable, Hashable, Sendable {
         public let responseWaitMilliseconds: Double?
         public let transferMilliseconds: Double?
         public let encodedResponseBytes: Int64
+        /// Absolute timestamps from `URLSessionTaskTransactionMetrics`. The durations above
+        /// are derived from these; the timestamps let a client-side gap be located.
+        public var fetchStart: Date? = nil
+        public var requestStart: Date? = nil
+        public var requestEnd: Date? = nil
+        public var responseStart: Date? = nil
+        public var responseEnd: Date? = nil
     }
     public let totalMilliseconds: Double
     public let transactions: [Transaction]
+    /// The task interval, which brackets every transaction.
+    public var taskStart: Date? = nil
+    public var taskEnd: Date? = nil
 }
 final class HTTPTaskMetricsDelegate: NSObject, URLSessionTaskDelegate, Sendable {
     private let metrics = OSAllocatedUnfairLock<HTTPTransportMetrics?>(initialState: nil)
@@ -52,8 +62,11 @@ final class HTTPTaskMetricsDelegate: NSObject, URLSessionTaskDelegate, Sendable 
                     connectionMilliseconds: elapsed(item.connectStartDate, item.connectEndDate),
                     responseWaitMilliseconds: elapsed(item.requestEndDate, item.responseStartDate),
                     transferMilliseconds: elapsed(item.responseStartDate, item.responseEndDate),
-                    encodedResponseBytes: item.countOfResponseBodyBytesReceived)
-            })
+                    encodedResponseBytes: item.countOfResponseBodyBytesReceived,
+                    fetchStart: item.fetchStartDate, requestStart: item.requestStartDate,
+                    requestEnd: item.requestEndDate, responseStart: item.responseStartDate,
+                    responseEnd: item.responseEndDate)
+            }, taskStart: value.taskInterval.start, taskEnd: value.taskInterval.end)
         metrics.withLock { $0 = result }
     }
     func result() -> HTTPTransportMetrics? { metrics.withLock { $0 } }

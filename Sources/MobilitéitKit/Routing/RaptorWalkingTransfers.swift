@@ -32,9 +32,11 @@ extension Raptor {
         reachableStops: [Bool]? = nil,
         boardingDeadlines: [Date]? = nil,
         egressStops: Set<Int> = [],
-        canBoardAgain: Bool = true
+        canBoardAgain: Bool = true,
+        recorder: StageSpanRecorder? = nil
     ) async throws -> Int {
         guard let walking else { return 0 }
+        let requestsStarted = ContinuousClock.now
         struct Pair: Hashable { let from: Int; let to: Int }
         var requests: [(from: Int, to: Int, source: Label, routeIndex: Int)] = []
         requests.reserveCapacity(labels.count * 3)
@@ -88,8 +90,12 @@ extension Raptor {
             }
         }
         try Task.checkCancellation()
+        recorder?.record(.walkingTransferRequests, since: requestsStarted)
+        let routesStarted = ContinuousClock.now
         let routes = await walking.routes(uniqueRequests, maximumConcurrency: 4)
+        recorder?.record(.walkingTransferRoutes, since: routesStarted)
         try Task.checkCancellation()
+        let workStarted = ContinuousClock.now
         // Assign IDs in the original request order. Each target profile then
         // receives its own requests in that order, so targets are independent:
         // sources are immutable labels captured before any insertion.
@@ -110,8 +116,11 @@ extension Raptor {
                 arrival: arrival, labelID: nextLabelID))
             nextLabelID += 1
         }
+        recorder?.record(.walkingTransferWork, since: workStarted)
         let reference = verifyKernel ? labels : nil
+        let applyStarted = ContinuousClock.now
         try await applyWalkingTransfers(worksByTarget, to: &labels)
+        recorder?.record(.walkingTransferApply, since: applyStarted)
         if var reference {
             // The original single loop, in global request order.
             for work in worksByTarget.values.joined().sorted(by: { $0.labelID < $1.labelID }) {

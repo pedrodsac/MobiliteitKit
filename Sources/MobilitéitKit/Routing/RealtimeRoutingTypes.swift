@@ -79,6 +79,30 @@ public struct RealtimeTripPatch: Hashable, Sendable {
         firstEventByOccurrence = index
     }
 }
+/// Instants measured inside a provider, so a client can place them on its own timeline.
+public struct RealtimeBatchTimings: Hashable, Sendable {
+    public struct Board: Hashable, Sendable {
+        public let stopID: String
+        /// When the board's data became available, after any HTTP wait and decoding.
+        public var arrived: ContinuousClock.Instant?
+        public var matchingStarted: ContinuousClock.Instant?
+        public var matchingFinished: ContinuousClock.Instant?
+        public init(stopID: String, arrived: ContinuousClock.Instant? = nil,
+                    matchingStarted: ContinuousClock.Instant? = nil,
+                    matchingFinished: ContinuousClock.Instant? = nil) {
+            self.stopID = stopID; self.arrived = arrived
+            self.matchingStarted = matchingStarted; self.matchingFinished = matchingFinished
+        }
+    }
+    public var fetchStarted: ContinuousClock.Instant?
+    public var fetchFinished: ContinuousClock.Instant?
+    public var matchingStarted: ContinuousClock.Instant?
+    public var matchingFinished: ContinuousClock.Instant?
+    /// Summed `prepareBoard` work. It runs between board arrivals.
+    public var preparationMilliseconds: Double = 0
+    public var boards: [Board] = []
+    public init() {}
+}
 public struct RealtimePatchBatch: Hashable, Sendable {
     public let patches: [RealtimeTripPatch]
     public let requestedStopIDs: Set<String>
@@ -95,6 +119,8 @@ public struct RealtimePatchBatch: Hashable, Sendable {
     public var decodeMilliseconds: Int = 0
     public var transport: [HTTPTransportMeasurement] = []
     public var matchingRejections: [RealtimeMatchingRejection: Int] = [:]
+    /// Measurement only; the provider fills it, other providers leave it empty.
+    public var timings = RealtimeBatchTimings()
     public init(
         patches: [RealtimeTripPatch],
         requestedStopIDs: Set<String>,
@@ -107,7 +133,8 @@ public struct RealtimePatchBatch: Hashable, Sendable {
         responseBytes: Int = 0,
         incompleteStopIDs: Set<String> = [],
         fetchedAt: Date? = nil, httpMilliseconds: Int = 0, decodeMilliseconds: Int = 0,
-        matchingRejections: [RealtimeMatchingRejection: Int] = [:], transport: [HTTPTransportMeasurement] = []
+        matchingRejections: [RealtimeMatchingRejection: Int] = [:], transport: [HTTPTransportMeasurement] = [],
+        timings: RealtimeBatchTimings = .init()
     ) {
         self.patches = patches
         self.requestedStopIDs = requestedStopIDs
@@ -123,6 +150,7 @@ public struct RealtimePatchBatch: Hashable, Sendable {
         self.httpMilliseconds = httpMilliseconds; self.decodeMilliseconds = decodeMilliseconds
         self.matchingRejections = matchingRejections
         self.transport = transport
+        self.timings = timings
     }
 }
 

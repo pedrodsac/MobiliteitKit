@@ -21,6 +21,8 @@ extension Raptor {
             else { return false }
             return true
         }
+        let recorder = StageSpanRecorder()
+        let overlayStarted = ContinuousClock.now
         let patchesByInstance = Dictionary(
             patches.compactMap { patch -> (PatchKey, PatchOverlay)? in
                 guard let trip = snapshot.tripByID[patch.tripID] else { return nil }
@@ -41,6 +43,7 @@ extension Raptor {
             },
             uniquingKeysWith: { _, latest in latest }
         )
+        recorder.record(.patchOverlay, since: overlayStarted)
         var activeInstancesByPattern: [Int: [ActiveTripInstance]] = [:]
         var labels: [Int: LabelProfile] = [:]
         var nextLabelID = 0
@@ -130,7 +133,9 @@ extension Raptor {
                 : 1
             maximumWorkerCount = max(maximumWorkerCount, workerCount)
             let previousLabels = labels
+            let indexStarted = ContinuousClock.now
             let boardings = BoardingIndex(labels, stopCount: snapshot.stops.count)
+            recorder.record(.boardingIndex, since: indexStarted)
             let chunkSize = max(1, (markedPatternIDs.count + workerCount * 12 - 1) / (workerCount * 12))
             let chunks = stride(from: 0, to: markedPatternIDs.count, by: chunkSize).enumerated().map { chunkIndex, start in
                 (index: chunkIndex, patterns: Array(markedPatternIDs[start..<min(start + chunkSize, markedPatternIDs.count)]))
@@ -248,17 +253,21 @@ extension Raptor {
             }
             let nextRoundLastAlight = remainingRides == 1 ? finalRoundLastAlight
                 : (remainingRides > 1 ? destinationReachability?.lastAlightPositionByRemainingRides[remainingRides - 1] : nil)
+            let deadlinesStarted = ContinuousClock.now
             let walkingDeadlines = walking == nil || remainingRides == 0 ? nil : try walkingBoardingDeadlines(
                 snapshot: snapshot, query: query, serviceDays: relevantServiceDays,
                 patches: patchesByInstance, scheduledLowerBound: scheduledLowerBound,
                 profileUpperBound: profileUpperBound, lastAlightPositions: nextRoundLastAlight)
+            if walkingDeadlines != nil { recorder.record(.walkingBoardingDeadlines, since: deadlinesStarted) }
             cpuSeconds += RoutingDiagnostics.elapsed(since: cpuStarted) / 1_000
             let walkingStarted = ContinuousClock.now
-            if query.preferences.wheelchair != .required { walkingTransferPairs += try await relaxWalkingTransfers(snapshot: snapshot, labels: &next, nextLabelID: &nextLabelID, walking: walking, reachableStops: reachableStops, boardingDeadlines: walkingDeadlines, egressStops: egressStops, canBoardAgain: remainingRides > 0) }
+            if query.preferences.wheelchair != .required { walkingTransferPairs += try await relaxWalkingTransfers(snapshot: snapshot, labels: &next, nextLabelID: &nextLabelID, walking: walking, reachableStops: reachableStops, boardingDeadlines: walkingDeadlines, egressStops: egressStops, canBoardAgain: remainingRides > 0, recorder: recorder) }
             walkingTransferSeconds += RoutingDiagnostics.elapsed(since: walkingStarted) / 1_000
+            let collectionStarted = ContinuousClock.now
             for e in egress { for label in next[e.stop]?.ordered ?? [] where label.firstDeparture != nil { destination.append(.init(legs: label.legs, firstStop: label.firstStop, lastStop: e.stop, firstDeparture: label.firstDeparture!, lastArrival: label.time, minimumTransferSlack: label.minimumSlack, totalTransferSlack: label.totalSlack, pathwaySeconds: label.pathwaySeconds, pathwayDistance: label.pathwayDistance)) } }
+            recorder.record(.candidateCollection, since: collectionStarted)
             labels = next; if labels.isEmpty { break }
         }
-        return .init(candidates: destination, scannedPatterns: scannedPatterns, scannedTripInstances: scannedTripInstances, cpuMilliseconds: Int(cpuSeconds * 1_000), walkingTransferMilliseconds: Int(walkingTransferSeconds * 1_000), walkingTransferPairs: walkingTransferPairs, maximumWorkerCount: maximumWorkerCount, roundMetrics: roundMetrics, preparation: preparation)
+        return .init(candidates: destination, scannedPatterns: scannedPatterns, scannedTripInstances: scannedTripInstances, cpuMilliseconds: Int(cpuSeconds * 1_000), walkingTransferMilliseconds: Int(walkingTransferSeconds * 1_000), walkingTransferPairs: walkingTransferPairs, maximumWorkerCount: maximumWorkerCount, roundMetrics: roundMetrics, preparation: preparation, spans: recorder.spans)
     }
 }

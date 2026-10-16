@@ -55,6 +55,21 @@ enum Raptor {
         let maximumWorkerCount: Int
         let roundMetrics: [RoutingRoundMetrics]
         var preparation = PreparationCache()
+        /// Sub-span timings for diagnostics; they never influence the search.
+        var spans: [StageSpan] = []
+    }
+    struct StageSpan: Sendable {
+        let stage: RoutingDiagnostics.Stage
+        let start: ContinuousClock.Instant
+        let end: ContinuousClock.Instant
+    }
+    /// Collects sub-spans for one search. Used from one task at a time.
+    final class StageSpanRecorder {
+        private(set) var spans: [StageSpan] = []
+        func record(_ stage: RoutingDiagnostics.Stage, since start: ContinuousClock.Instant,
+                    through end: ContinuousClock.Instant = .now) {
+            spans.append(.init(stage: stage, start: start, end: end))
+        }
     }
     struct PatchKey: Hashable, Sendable { let trip: Int; let serviceDate: GTFSDate }
     struct PatchOverlay: Equatable, Sendable {
