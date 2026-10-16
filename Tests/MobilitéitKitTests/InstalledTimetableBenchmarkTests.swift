@@ -8,7 +8,7 @@ import Testing
     func gromscheedLuxexpoKonradComparison() async throws {
         let path = try #require(ProcessInfo.processInfo.environment["ROUTING_BENCHMARK_DATABASE"])
         let router = try await TransitRouter(databaseURL: URL(fileURLWithPath: path))
-        let anchor = try #require(ISO8601DateFormatter().date(from: "2026-10-08T18:11:00+02:00"))
+        let anchor = try #require(ISO8601DateFormatter().date(from: "2026-10-22T18:11:00+02:00"))
         let query = RouteQuery(origin: .stop(id: "000200508004"), destination: .stop(id: "000200417019"),
                                departureTime: anchor, preferences: .init(preferredMode: nil, avoidTightTransfers: false), realtimePolicy: .disabled)
         let session = try await router.makeSession(for: query)
@@ -19,7 +19,7 @@ import Testing
         let match = try #require(page.journeys.first {
             $0.legs.compactMap { if case let .transit(ride) = $0 { ride.route.shortName } else { nil } } == ["322", "6"]
         })
-        #expect(match.effectiveArrival == ISO8601DateFormatter().date(from: "2026-10-08T18:39:10+02:00"))
+        #expect(match.effectiveArrival == ISO8601DateFormatter().date(from: "2026-10-22T18:39:10+02:00"))
     }
 
     @Test(.enabled(if: ProcessInfo.processInfo.environment["ROUTING_BENCHMARK_DATABASE"] != nil))
@@ -27,7 +27,7 @@ import Testing
         let path = try #require(ProcessInfo.processInfo.environment["ROUTING_BENCHMARK_DATABASE"])
         let count = Int(ProcessInfo.processInfo.environment["ROUTING_BENCHMARK_SAMPLES"] ?? "1") ?? 1
         let planner = JourneyPlanner()
-        let date = ISO8601DateFormatter().date(from: "2026-09-30T09:00:00+02:00")!
+        let date = ISO8601DateFormatter().date(from: "2026-10-22T09:00:00+02:00")!
         for sample in 0..<count {
             let started = ContinuousClock.now
             let session = try await planner.makePlanningSession(databaseURL: URL(fileURLWithPath: path),

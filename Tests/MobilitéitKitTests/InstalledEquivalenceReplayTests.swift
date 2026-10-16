@@ -14,11 +14,11 @@ import Testing
         var records: [[String: Any]] = []
         let scenarios: [(String, JourneyEndpoint, JourneyEndpoint, String, RouteQueryDirection)] = [
             ("departure", .coordinate(.init(latitude: 49.6541071, longitude: 6.2296443), label: "Gromscheed"),
-             .stop(id: "000200417019"), "2026-10-08T08:00:00+02:00", .departAfter),
+             .stop(id: "000200417019"), "2026-10-22T08:00:00+02:00", .departAfter),
             ("arrival", .stop(id: "000200417019"), .stop(id: "000200508004"),
-             "2026-10-08T09:00:00+02:00", .arriveBy),
+             "2026-10-22T09:00:00+02:00", .arriveBy),
             ("esch", .stop(id: "000220402034"), .stop(id: "000400000095"),
-             "2026-10-08T18:35:00+02:00", .departAfter)
+             "2026-10-22T18:35:00+02:00", .departAfter)
         ]
         for (name, origin, destination, timestamp, direction) in scenarios {
             let anchor = try #require(ISO8601DateFormatter().date(from: timestamp))
