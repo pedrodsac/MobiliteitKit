@@ -151,7 +151,7 @@ extension Raptor {
     static func applyWalkingTransfers(_ worksByTarget: [Int: [WalkingTransferWork]],
                                       to labels: inout [Int: LabelProfile]) async throws {
         let targets = worksByTarget.keys.sorted()
-        let workerCount = min(maximumPatternWorkers, ProcessInfo.processInfo.activeProcessorCount)
+        let workerCount = availableWorkers
         guard targets.count >= minimumTargetsForParallelWalking, workerCount > 1 else {
             for target in targets {
                 for work in worksByTarget[target]! { applyWalkingTransfer(work, to: &labels[target]) }

@@ -127,7 +127,7 @@ extension Raptor {
                 )
             }
             let preparationMilliseconds = Int(RoutingDiagnostics.elapsed(since: preparationStarted))
-            let availableWorkers = min(maximumPatternWorkers, ProcessInfo.processInfo.activeProcessorCount)
+            let availableWorkers = Self.availableWorkers
             let workerCount = markedPatternIDs.count >= minimumPatternsForParallelScan
                 ? min(availableWorkers, markedPatternIDs.count)
                 : 1

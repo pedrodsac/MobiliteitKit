@@ -9,6 +9,12 @@ enum Raptor {
     // never turns into one directions request for every alighting stop.
     static let minimumPatternsForParallelScan = 32
     static let maximumPatternWorkers = 10
+    /// Tests only: the core count that sizes the scan's workers and chunks. Chunking changes
+    /// which labels each chunk evicts, so a test can ask how results depend on it.
+    @TaskLocal static var activeProcessorCountOverride: Int?
+    static var availableWorkers: Int {
+        min(maximumPatternWorkers, activeProcessorCountOverride ?? ProcessInfo.processInfo.activeProcessorCount)
+    }
     #if DEBUG
     static let verifyProfile = ProcessInfo.processInfo.environment["ROUTING_VERIFY_PROFILE"] == "1"
     #endif
