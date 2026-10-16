@@ -63,6 +63,8 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
     var serviceDayStarts: [GTFSDate: Date] = [:]
     var schedulesByStopID: [String: ScheduleCache] = [:]
     var matchedJourneys: [String: MatchedJourney] = [:]
+    /// Batches whose matching is running; the memoization below is cleared when none are.
+    var activeMatchingBatches = 0
     var stopTimesByTripID: [String: [TripStopTime]] = [:]
     var stopTimeCacheOrder: [String] = []
     let maximumCachedTripStopTimes = 512
@@ -104,8 +106,8 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
 
     public func patches(for request: RealtimeRoutingRequest) async throws -> RealtimePatchBatch {
         try Task.checkCancellation()
-        clearMatchingMemoization()
-        defer { clearMatchingMemoization() }
+        beginMatchingBatch()
+        defer { endMatchingBatch() }
         var seen: Set<String> = []
         let stopIDs = request.stopIDs.filter { !$0.isEmpty && seen.insert($0).inserted }
         let requested = Set(stopIDs)

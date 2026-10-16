@@ -5,6 +5,20 @@ extension HafasRealtimeRoutingProvider {
     // Boards at several transfer stops repeat vehicle passlists. Memoize pure
     // conversions within the batch, without extending observation freshness or
     // caching matching decisions that could hide timetable ambiguity.
+    //
+    // The provider is an actor and batches overlap at their suspension points, so the
+    // memoization lives until the last running batch ends. An overlapping batch must not
+    // clear what another one is still using.
+    func beginMatchingBatch() {
+        if activeMatchingBatches == 0 { clearMatchingMemoization() }
+        activeMatchingBatches += 1
+    }
+
+    func endMatchingBatch() {
+        activeMatchingBatches -= 1
+        if activeMatchingBatches == 0 { clearMatchingMemoization() }
+    }
+
     func clearMatchingMemoization() {
         alignments.removeAll(keepingCapacity: true)
         timestampCache.removeAll(keepingCapacity: true)
