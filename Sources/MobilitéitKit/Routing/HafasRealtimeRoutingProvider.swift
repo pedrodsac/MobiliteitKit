@@ -129,100 +129,68 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
         async let schedules = prepareSchedules(for: stopIDs, from: matchingFrom, through: request.through, deadline: deadline, targets: request.targets, lookback: request.scheduledLookbackSeconds)
         let started = ContinuousClock.now
         let telemetry = BoardTelemetry()
-        let fetched = await boards(for: stopIDs, request: request, deadline: acquisitionDeadline, telemetry: telemetry)
-        let fetchFinished = ContinuousClock.now
-        let fetchMilliseconds = Self.milliseconds(started.duration(to: fetchFinished))
+        let (arrivals, delivery) = AsyncStream.makeStream(of: BoardResult.self)
+        async let fetching = fetchBoards(for: stopIDs, request: request, deadline: acquisitionDeadline,
+                                         telemetry: telemetry, delivery: delivery)
         let prepared = await schedules
         try Task.checkCancellation()
-        let matchingStarted = ContinuousClock.now
-        var timings = RealtimeBatchTimings()
-        timings.fetchStarted = started; timings.fetchFinished = fetchFinished
-        timings.matchingStarted = matchingStarted
-        var patches: [String: RealtimeTripPatch] = [:]
-        var unfinished = Set<String>()
-        var rejections: [RealtimeMatchingRejection: Int] = [:]
-        for stopID in stopIDs {
-            let stopStarted = ContinuousClock.now
-            defer {
-                timings.boards.append(.init(stopID: stopID, arrived: fetched[stopID]?.arrivedAt,
-                                            matchingStarted: stopStarted, matchingFinished: .now))
-            }
-            guard matchingNow() < deadline else { unfinished.insert(stopID); continue }
-            guard let result = fetched[stopID], let board = result.board else { continue }
-            let scheduled = prepared.byStopID[stopID] ?? []
-            let desired = request.tripIDs.isEmpty ? [] : scheduled.filter { request.tripIDs.contains($0.departure.tripID) }
-            for live in board.departures.values {
-                try Task.checkCancellation()
-                guard matchingNow() < deadline else { unfinished.insert(stopID); break }
-                guard request.includeTripMetadata || Self.hasRealtimeSignal(live) else { continue }
-                guard let planned = date(date: live.plannedDate, time: live.plannedTime) else {
-                    rejections[.invalidTimestamp, default: 0] += 1; continue
-                }
-                guard planned >= matchingFrom.addingTimeInterval(-90),
-                      planned <= request.through.addingTimeInterval(90) else {
-                    rejections[.outsideInterval, default: 0] += 1; continue
-                }
-                if !request.tripIDs.isEmpty,
-                   !desired.contains(where: { abs($0.scheduledDate.timeIntervalSince(planned)) <= 90 }) { continue }
-                let reference = live.journeyReference?.reference
-                let cached = reference.flatMap { matchedJourneys[$0] }
-                let reused = cached.flatMap { match -> Candidate? in
-                    guard now().timeIntervalSince(match.fetchedAt) <= cacheLifetime,
-                          let value = scheduled.first(where: {
-                              $0.departure.tripID == match.tripID && $0.serviceDate == match.serviceDate
-                                  && abs($0.scheduledDate.timeIntervalSince(planned)) <= 90
-                          }) else { return nil }
-                    return .init(departure: value.departure, serviceDate: value.serviceDate,
-                                 scheduledDate: value.scheduledDate, score: 0)
-                }
-                let candidate: Candidate?
-                if let reused { candidate = reused }
-                else {
-                    switch await uniqueCandidate(for: live, planned: planned, scheduled: scheduled, deadline: deadline) {
-                    case let .success(value): candidate = value
-                    case let .failure(error):
-                        rejections[error.reason, default: 0] += 1; candidate = nil
-                    }
-                }
-                guard matchingNow() < deadline else { unfinished.insert(stopID); break }
-                guard let candidate else { continue }
-                // Resolve ambiguity against the complete timetable first.
-                guard request.tripIDs.isEmpty || request.tripIDs.contains(candidate.departure.tripID) else { continue }
-                guard let update = await patch(for: live, candidate: candidate,
-                                               boardingStopID: stopID, observedAt: result.observations[live.cacheIdentity] ?? result.fetchedAt, deadline: deadline)
-                else { rejections[.invalidTripTimeline, default: 0] += 1; continue }
-                guard matchingNow() < deadline else { unfinished.insert(stopID); break }
-                if let reference {
-                    matchedJourneys[reference] = .init(tripID: candidate.departure.tripID,
-                                                       serviceDate: candidate.serviceDate,
-                                                       fetchedAt: result.observations[live.cacheIdentity] ?? result.fetchedAt)
-                }
-                let key = "\(update.tripID)@\(update.serviceDate.compactString)"
-                patches[key] = patches[key].map { $0.merging(update) } ?? update
-            }
-            if matchingNow() >= deadline { unfinished.insert(stopID) }
+        // Each board is resolved against the timetable as it arrives, so that work overlaps the
+        // remaining board requests. Stops are merged in request order, because `matchedJourneys`
+        // reuse and patch merging depend on it.
+        let context = MatchingContext(prepared: prepared, request: request, matchingFrom: matchingFrom, deadline: deadline)
+        var ordered = OrderedMatching(stopIDs: stopIDs)
+        var iterator = arrivals.makeAsyncIterator()
+        while let board = await iterator.next() {
+            try Task.checkCancellation()
+            try await resolve(stopID: board.stopID, result: board, in: context, ordered: &ordered)
+            try await mergeReadyBoards(&ordered, in: context)
         }
+        // Delivery ended, so the fetch has returned its placeholders for stops that never arrived.
+        let (fetched, fetchFinished) = await fetching
+        for stopID in stopIDs[ordered.merged...] where ordered.waiting[stopID] == nil {
+            try await resolve(stopID: stopID, result: fetched[stopID], in: context, ordered: &ordered)
+        }
+        try await mergeReadyBoards(&ordered, in: context)
+        var timings = RealtimeBatchTimings()
+        timings.matchingStarted = ordered.started
+        timings.matchingFinished = ordered.finished
+        timings.boards = ordered.boards
+        let matching = ordered.state
+        timings.fetchStarted = started
+        timings.fetchFinished = fetchFinished
+        timings.preparationMilliseconds = telemetry.preparationMilliseconds
+        let fetchMilliseconds = Self.milliseconds(started.duration(to: fetchFinished))
         if matchedJourneys.count > 512 {
             matchedJourneys = Dictionary(uniqueKeysWithValues: matchedJourneys.sorted {
                 $0.value.fetchedAt > $1.value.fetchedAt
             }.prefix(512).map { ($0.key, $0.value) })
         }
-        timings.matchingFinished = .now
-        timings.preparationMilliseconds = telemetry.preparationMilliseconds
-        return .init(patches: patches.values.sorted { ($0.serviceDate, $0.tripID) < ($1.serviceDate, $1.tripID) },
+        return .init(patches: matching.patches.values.sorted { ($0.serviceDate, $0.tripID) < ($1.serviceDate, $1.tripID) },
                      requestedStopIDs: requested, coveredStopIDs: Set(fetched.values.filter { $0.board != nil }.map(\.stopID)),
                      boardFetchMilliseconds: fetchMilliseconds,
                      scheduledPreparationMilliseconds: prepared.milliseconds,
-                     boardMatchingMilliseconds: Self.milliseconds(matchingStarted.duration(to: .now)),
+                     boardMatchingMilliseconds: Int(matching.workMilliseconds),
                      networkRequests: fetched.values.reduce(0) { $0 + $1.requests },
                      cacheHits: fetched.values.reduce(0) { $0 + $1.hits },
                      responseBytes: fetched.values.reduce(0) { $0 + $1.bytes },
-                     incompleteStopIDs: Set(fetched.values.filter(\.incomplete).map(\.stopID)).union(unfinished).union(requested.subtracting(prepared.byStopID.keys)),
+                     incompleteStopIDs: Set(fetched.values.filter(\.incomplete).map(\.stopID)).union(matching.unfinished).union(requested.subtracting(prepared.byStopID.keys)),
                      fetchedAt: fetched.values.map(\.fetchedAt).min(),
                      httpMilliseconds: fetched.values.reduce(0) { $0 + $1.httpMilliseconds },
                      decodeMilliseconds: fetched.values.reduce(0) { $0 + $1.decodeMilliseconds },
-                     matchingRejections: rejections, transport: fetched.values.flatMap(\.transport),
+                     matchingRejections: matching.rejections, transport: fetched.values.flatMap(\.transport),
                      timings: timings)
+    }
+
+    /// Fetches every board and ends the delivery stream once the final map is complete.
+    private func fetchBoards(for stopIDs: [String], request: RealtimeRoutingRequest,
+                             deadline: ContinuousClock.Instant, telemetry: BoardTelemetry,
+                             delivery: AsyncStream<BoardResult>.Continuation) async
+        -> (boards: [String: BoardResult], finished: ContinuousClock.Instant) {
+        defer { delivery.finish() }
+        let boards = await boards(for: stopIDs, request: request, deadline: deadline, telemetry: telemetry) {
+            delivery.yield($0)
+        }
+        return (boards, .now)
     }
 
     func prepareSchedules(for stopIDs: [String], from: Date, through: Date, deadline: ContinuousClock.Instant, targets: [RealtimeBoardTarget] = [], lookback: Int = 7_200) async -> PreparedSchedules {

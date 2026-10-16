@@ -6,8 +6,11 @@ extension HafasRealtimeRoutingProvider {
         case deadline
     }
 
+    /// `arrived` receives every board as soon as it is ready, in arrival order. The returned
+    /// map still holds every requested stop, with an incomplete placeholder for a missing one.
     func boards(for stopIDs: [String], request: RealtimeRoutingRequest,
-                deadline: ContinuousClock.Instant, telemetry: BoardTelemetry? = nil) async -> [String: BoardResult] {
+                deadline: ContinuousClock.Instant, telemetry: BoardTelemetry? = nil,
+                arrived: @escaping @Sendable (BoardResult) -> Void = { _ in }) async -> [String: BoardResult] {
         guard ContinuousClock.now < deadline else { return [:] }
         var ordered = stopIDs
         if request.refreshPolicy == .useCache {
@@ -56,7 +59,8 @@ extension HafasRealtimeRoutingProvider {
                 await self?.prepareBoard(value.board,
                     from: request.from.addingTimeInterval(-Double(request.scheduledLookbackSeconds)),
                     through: request.through, deadline: deadline, telemetry: telemetry)
-            }
+            },
+            arrived: arrived
         ) { [client, now, cacheLifetime, boardRequestScheduler] stopID in
             do {
                 return try await boardRequestScheduler.withPermit {
@@ -129,6 +133,7 @@ extension HafasRealtimeRoutingProvider {
     private nonisolated static func fetchResults(
         stopIDs: [String], maximumConcurrentRequests: Int, timeout: Duration,
         prepared: @escaping @Sendable (BoardResult) async -> Void = { _ in },
+        arrived: @escaping @Sendable (BoardResult) -> Void = { _ in },
         fetch: @escaping @Sendable (String) async -> BoardResult
     ) async -> [String: BoardResult] {
         guard !stopIDs.isEmpty else { return [:] }
@@ -155,13 +160,14 @@ extension HafasRealtimeRoutingProvider {
                     // Drain cancelled children: they retain completed slices and
                     // mark coverage incomplete instead of discarding useful data.
                     while let remaining = await group.next() {
-                        if case let .result(value) = remaining { result[value.stopID] = value }
+                        if case let .result(value) = remaining { result[value.stopID] = value; arrived(value) }
                     }
                     return result
                 case let .result(value):
                     result[value.stopID] = value; completed += 1
                     if next < stopIDs.count, !Task.isCancelled { add() }
                     await prepared(value)
+                    arrived(value)
                     if completed == stopIDs.count { group.cancelAll(); return result }
                 }
             }
