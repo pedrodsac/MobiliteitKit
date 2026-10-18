@@ -2,6 +2,11 @@ import Foundation
 import os
 
 extension Raptor {
+    /// Tests only: the shard count to use instead of the default.
+    @TaskLocal static var mergeShardCountOverride: Int?
+    /// One shard per worker: stops of different shards merge at the same time.
+    static func mergeShardCount(workerCount: Int) -> Int { max(1, mergeShardCountOverride ?? workerCount) }
+
     /// Tests only: how long the merger pauses after each chunk, to make it the slower side.
     @TaskLocal static var mergeDelayForTests: Duration?
 
@@ -68,11 +73,12 @@ extension Raptor {
         let (progress, progressSink) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(1))
         let mergedCount = OSAllocatedUnfairLock(initialState: 0)
         let chunkCount = chunks.count
+        let shardCount = mergeShardCount(workerCount: workerCount)
         var scanEnded = scanStarted
         var peakOutstanding = 0
         let merge = try await withThrowingTaskGroup(of: ScanTaskResult.self) { group in
             group.addTask(priority: .userInitiated) {
-                .merged(await mergeInOrder(finished, chunkCount: chunkCount, nextLabelID: nextLabelID) {
+                .merged(await mergeInOrder(finished, chunkCount: chunkCount, nextLabelID: nextLabelID, shardCount: shardCount) {
                     mergedCount.withLock { $0 += 1 }
                     progressSink.yield()
                 })
@@ -144,22 +150,57 @@ extension Raptor {
             peakOutstandingChunks: peakOutstanding)
     }
 
-    /// Merge finished chunks strictly in chunk-index order, whatever order they
-    /// arrive in. A chunk is released as soon as it has been merged.
+    /// Merge finished chunks strictly in chunk-index order, whatever order they arrive in.
+    /// With more than one shard, each shard merges its stops of every chunk, in chunk order, in a
+    /// task of its own. `merged` reports each chunk once no shard needs it any more.
     static func mergeInOrder(_ finished: AsyncStream<PatternScanResult>, chunkCount: Int, nextLabelID: Int,
-        merged: () -> Void) async -> PatternScanMerge {
-        var merge = PatternScanMerge(nextID: nextLabelID)
+        shardCount: Int = 1, merged: @escaping @Sendable () -> Void) async -> PatternScanMerge {
+        var merge = PatternScanMerge(nextID: nextLabelID, shardCount: shardCount)
         var pending: [Int: PatternScanResult] = [:]
         var nextChunk = 0
-        for await result in finished {
-            pending[result.chunkIndex] = result
-            while let ready = pending.removeValue(forKey: nextChunk) {
-                merge.append(ready)
-                nextChunk += 1
-                merged()
-                if let delay = mergeDelayForTests { try? await Task.sleep(for: delay) }
+        var shards = [MergeShard](repeating: .init(), count: merge.shardCount)
+        await withTaskGroup(of: MergeShard.self) { group in
+            var inboxes: [AsyncStream<ShardWork>.Continuation] = []
+            if merge.shardCount > 1 {
+                shards = []
+                for _ in 0..<merge.shardCount {
+                    let (inbox, sink) = AsyncStream.makeStream(of: ShardWork.self)
+                    inboxes.append(sink)
+                    group.addTask(priority: .userInitiated) {
+                        var shard = MergeShard()
+                        for await work in inbox {
+                            shard.merge(work)
+                            work.ticket?.consumed()
+                        }
+                        return shard
+                    }
+                }
             }
+            for await result in finished {
+                pending[result.chunkIndex] = result
+                while let ready = pending.removeValue(forKey: nextChunk) {
+                    nextChunk += 1
+                    if let split = merge.append(ready) {
+                        let busy = split.busyShards
+                        if inboxes.isEmpty {
+                            shards[0].merge(split.work(shard: 0, ticket: nil))
+                            merged()
+                        } else if busy.isEmpty {
+                            merged()
+                        } else {
+                            let ticket = ChunkTicket(shards: busy.count, merged: merged)
+                            for shard in busy { inboxes[shard].yield(split.work(shard: shard, ticket: ticket)) }
+                        }
+                    } else {
+                        merged()
+                    }
+                    if let delay = mergeDelayForTests { try? await Task.sleep(for: delay) }
+                }
+            }
+            for inbox in inboxes { inbox.finish() }
+            for await shard in group { shards.append(shard) }
         }
+        merge.finish(shards)
         // A cancelled scan ends the stream early.
         if !Task.isCancelled { precondition(pending.isEmpty && nextChunk == chunkCount) }
         return merge

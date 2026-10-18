@@ -1,4 +1,5 @@
 import Foundation
+import os
 import Testing
 @testable import MobiliteitKit
 
@@ -105,7 +106,8 @@ import Testing
     }
 
     /// `trickle` hands the chunks over one at a time while the merger waits, instead of all at once.
-    static func merge(_ chunks: [Raptor.PatternScanResult], order: [Int], trickle: Bool) async -> (merge: Raptor.PatternScanMerge, steps: Int) {
+    static func merge(_ chunks: [Raptor.PatternScanResult], order: [Int], shards: Int, trickle: Bool)
+        async -> (merge: Raptor.PatternScanMerge, steps: Int) {
         let (finished, sink) = AsyncStream.makeStream(of: Raptor.PatternScanResult.self)
         if !trickle {
             for index in order { sink.yield(chunks[index]) }
@@ -119,21 +121,27 @@ import Testing
             }
             sink.finish()
         }
-        var steps = 0
-        let merge = await Raptor.mergeInOrder(finished, chunkCount: chunks.count, nextLabelID: baseID) { steps += 1 }
+        let steps = OSAllocatedUnfairLock(initialState: 0)
+        let merge = await Raptor.mergeInOrder(finished, chunkCount: chunks.count, nextLabelID: baseID, shardCount: shards) {
+            steps.withLock { $0 += 1 }
+        }
         await producer.value
-        return (merge, steps)
+        return (merge, steps.withLock { $0 })
     }
 
-    @Test(arguments: [0, 1, 2, 3], [false, true])
-    func chunksMergeInIndexOrderWhateverTheArrivalOrder(kind: Int, trickle: Bool) async throws {
+    /// Shard counts 1 (merged in place), 3 (stops spread unevenly) and 10 (more shards than a chunk has
+    /// stops, so some get no work).
+    @Test(.timeLimit(.minutes(1)), arguments: [0, 1, 2, 3].flatMap { kind in
+        [1, 3, 10].flatMap { shards in [false, true].map { (kind, shards, $0) } }
+    })
+    func chunksMergeInIndexOrderWhateverTheArrivalOrder(kind: Int, shards: Int, trickle: Bool) async throws {
         let seed: UInt64 = 0x51ced + UInt64(kind)
         let chunks = try Self.makeChunks(seed: seed)
         let expected = Self.serialMerge(chunks, nextLabelID: Self.baseID)
         // The generator has to produce a merge with evictions, or the comparison proves little.
         #expect(expected.profiles.values.contains { $0.ordered.count == Raptor.profileWidth })
         let order = Self.arrivalOrder(kind, count: chunks.count, seed: seed)
-        let (merge, steps) = await Self.merge(chunks, order: order, trickle: trickle)
+        let (merge, steps) = await Self.merge(chunks, order: order, shards: shards, trickle: trickle)
         #expect(steps == chunks.count)
         #expect(merge.nextID == expected.nextID)
         #expect(Self.description(merge.mergedProfiles) == Self.description(expected.profiles))
@@ -142,5 +150,22 @@ import Testing
         #expect(merge.labelAttempts == chunks.map(\.labelAttempts).reduce(0, +))
         #expect(merge.retainedLabels == chunks.map(\.retainedLabels).reduce(0, +))
         #expect(merge.slowestChunkMilliseconds == chunks.count - 1)
+    }
+
+    /// A label gets the ID the serial loop would give it: the IDs before its chunk, plus the labels of
+    /// the chunk at lower stops, plus its slot. IDs never repeat and have no gap.
+    @Test(arguments: [1, 3, 10])
+    func labelIDsAreTheSerialLoopsIDs(shards: Int) async throws {
+        let chunks = try Self.makeChunks(seed: 99)
+        let expected = Self.serialMerge(chunks, nextLabelID: Self.baseID)
+        let issued = chunks.reduce(0) { total, chunk in
+            total + chunk.compactLabels!.values.reduce(0) { $0 + $1.ordered.count }
+        }
+        #expect(expected.nextID == Self.baseID + issued)
+        let (merge, _) = await Self.merge(chunks, order: Self.arrivalOrder(2, count: chunks.count, seed: 5), shards: shards, trickle: true)
+        #expect(merge.nextID == Self.baseID + issued)
+        let ids = merge.mergedProfiles.values.flatMap { profile in profile.ordered.map { profile.keys[$0]!.id } }
+        #expect(Set(ids).count == ids.count)
+        #expect(ids.allSatisfy { $0 >= Self.baseID && $0 < Self.baseID + issued })
     }
 }

@@ -1,10 +1,13 @@
 import Foundation
+import os
 
 extension Raptor {
-    /// Merge finished chunks in their original order. `Raptor.mergeInOrder` feeds it, so
-    /// each chunk is released as soon as it is merged and merging overlaps later scans.
-    struct PatternScanMerge {
+    /// Counts for the merge of one round and the label IDs it assigns. `Raptor.mergeInOrder`
+    /// feeds it finished chunks in index order. It splits each chunk by stop across the shards,
+    /// which hold the merged profiles, so stops of different shards merge at the same time.
+    struct PatternScanMerge: Sendable {
         var nextID: Int
+        let shardCount: Int
         private var referenceID: Int
         private var mergedCompact: [Int: CompactProfile] = [:]
         private var referenceNext: [Int: LabelProfile] = [:]
@@ -14,9 +17,18 @@ extension Raptor {
         var slowestChunkMilliseconds = 0, summedChunkMilliseconds = 0
         var mergedProfiles: [Int: CompactProfile] { mergedCompact }
 
-        init(nextID: Int) { self.nextID = nextID; self.referenceID = nextID }
+        init(nextID: Int, shardCount: Int = 1) {
+            self.nextID = nextID; self.shardCount = max(1, shardCount); self.referenceID = nextID
+        }
 
-        mutating func append(_ result: PatternScanResult) {
+        /// Count the chunk and give its labels their IDs. A stop's labels go to shard
+        /// `stop % shardCount`. Returns what each shard has to merge into its profiles, or nil
+        /// for a chunk without compact profiles, which is merged here.
+        ///
+        /// The serial merge gave every label of the chunk the next ID, stops in ascending order,
+        /// whether or not it survives. A stop's first ID is therefore the IDs before this chunk
+        /// plus the labels of this chunk at lower stops; the shard adds the slot.
+        mutating func append(_ result: PatternScanResult) -> ChunkSplit? {
             patterns += result.scannedPatterns
             tripInstances += result.scannedTripInstances
             boardingChecks += result.boardingChecks
@@ -25,30 +37,9 @@ extension Raptor {
             labelAttempts += result.labelAttempts
             retainedLabels += result.retainedLabels
             rejectedBeforeAllocation += result.rejectedBeforeAllocation
-            if let compact = result.compactLabels {
-                for stop in compact.keys.sorted() {
-                    let profile = compact[stop]!
-                    var target = mergedCompact.removeValue(forKey: stop) ?? CompactProfile()
-                    for slot in profile.ordered {
-                        var key = profile.keys[slot]!
-                        key.id = nextID; nextID += 1
-                        let peers = target.byIncomingTrip[key.incomingTrip, default: 0]
-                        if !target.isDominated(key, peers: peers),
-                           !target.cannotEnter(key, peers: peers) {
-                            _ = target.insert(key, path: profile.paths[slot]!)
-                        }
-                    }
-                    mergedCompact[stop] = target
-                }
-                if Raptor.verifyKernel {
-                    for stop in result.labels.keys.sorted() {
-                        for label in result.labels[stop]!.ordered {
-                            _ = Raptor.insert(label.replacingID(with: referenceID), at: stop, into: &referenceNext)
-                            referenceID += 1
-                        }
-                    }
-                }
-            } else {
+            slowestChunkMilliseconds = max(slowestChunkMilliseconds, result.elapsedMilliseconds)
+            summedChunkMilliseconds += result.elapsedMilliseconds
+            guard let compact = result.compactLabels else {
                 for stop in result.labels.keys.sorted() {
                     for candidate in result.labels[stop]?.ordered ?? [] {
                         let candidate = candidate.replacingID(with: nextID)
@@ -56,9 +47,27 @@ extension Raptor {
                         _ = Raptor.insert(candidate, at: stop, into: &labels)
                     }
                 }
+                return nil
             }
-            slowestChunkMilliseconds = max(slowestChunkMilliseconds, result.elapsedMilliseconds)
-            summedChunkMilliseconds += result.elapsedMilliseconds
+            var stopsByShard = [[(stop: Int, firstID: Int)]](repeating: [], count: shardCount)
+            for (stop, profile) in compact.sorted(by: { $0.key < $1.key }) {
+                stopsByShard[stop % shardCount].append((stop, nextID))
+                nextID += profile.ordered.count
+            }
+            if Raptor.verifyKernel {
+                for stop in result.labels.keys.sorted() {
+                    for label in result.labels[stop]!.ordered {
+                        _ = Raptor.insert(label.replacingID(with: referenceID), at: stop, into: &referenceNext)
+                        referenceID += 1
+                    }
+                }
+            }
+            return .init(profiles: compact, stopsByShard: stopsByShard)
+        }
+
+        /// Take over the shards' profiles once every chunk has been merged into them.
+        mutating func finish(_ shards: [MergeShard]) {
+            for shard in shards { mergedCompact.merge(shard.profiles) { _, shardProfile in shardProfile } }
         }
 
         mutating func materialized(boardings: BoardingIndex) -> [Int: LabelProfile] {
@@ -89,6 +98,67 @@ extension Raptor {
             }
 
             return labels
+        }
+    }
+}
+
+extension Raptor {
+    /// A chunk's profiles, with the stops each shard has to merge and the ID of the first label at each.
+    struct ChunkSplit: Sendable {
+        let profiles: [Int: CompactProfile]
+        let stopsByShard: [[(stop: Int, firstID: Int)]]
+
+        var busyShards: [Int] { stopsByShard.indices.filter { !stopsByShard[$0].isEmpty } }
+
+        func work(shard: Int, ticket: ChunkTicket?) -> ShardWork {
+            .init(profiles: profiles, stops: stopsByShard[shard], ticket: ticket)
+        }
+    }
+
+    /// One chunk's share of a shard: the stops of the chunk that belong to it, with the ID of
+    /// the first label at each.
+    struct ShardWork: Sendable {
+        let profiles: [Int: CompactProfile]
+        let stops: [(stop: Int, firstID: Int)]
+        let ticket: ChunkTicket?
+    }
+
+    /// The merged profiles of a set of stops. A shard must receive the chunks in index order.
+    struct MergeShard: Sendable {
+        private(set) var profiles: [Int: CompactProfile] = [:]
+
+        mutating func merge(_ work: ShardWork) {
+            for (stop, firstID) in work.stops {
+                let profile = work.profiles[stop]!
+                var target = profiles.removeValue(forKey: stop) ?? CompactProfile()
+                var id = firstID
+                for slot in profile.ordered {
+                    var key = profile.keys[slot]!
+                    key.id = id; id += 1
+                    let peers = target.byIncomingTrip[key.incomingTrip, default: 0]
+                    if !target.isDominated(key, peers: peers),
+                       !target.cannotEnter(key, peers: peers) {
+                        _ = target.insert(key, path: profile.paths[slot]!)
+                    }
+                }
+                profiles[stop] = target
+            }
+        }
+    }
+
+    /// Counts the shards that still have to read a chunk. The last one reports the chunk as merged,
+    /// and the chunk's profiles are freed once the shards have dropped their work.
+    final class ChunkTicket: Sendable {
+        private let remaining: OSAllocatedUnfairLock<Int>
+        private let merged: @Sendable () -> Void
+
+        init(shards: Int, merged: @escaping @Sendable () -> Void) {
+            remaining = .init(initialState: shards)
+            self.merged = merged
+        }
+
+        func consumed() {
+            if remaining.withLock({ $0 -= 1; return $0 == 0 }) { merged() }
         }
     }
 }
