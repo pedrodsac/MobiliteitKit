@@ -78,7 +78,7 @@ extension Raptor {
         var peakOutstanding = 0
         let merge = try await withThrowingTaskGroup(of: ScanTaskResult.self) { group in
             group.addTask(priority: .userInitiated) {
-                .merged(await mergeInOrder(finished, chunkCount: chunkCount, nextLabelID: nextLabelID, shardCount: shardCount) {
+                .merged(await mergeInOrder(finished, chunkCount: chunkCount, nextLabelID: nextLabelID, shardCount: shardCount, boardings: inputs.boardings) {
                     mergedCount.withLock { $0 += 1 }
                     progressSink.yield()
                 })
@@ -152,14 +152,16 @@ extension Raptor {
 
     /// Merge finished chunks strictly in chunk-index order, whatever order they arrive in.
     /// With more than one shard, each shard merges its stops of every chunk, in chunk order, in a
-    /// task of its own. `merged` reports each chunk once no shard needs it any more.
+    /// task of its own, and, given the `boardings`, turns its merged profiles into labels while the
+    /// other shards do the same. `merged` reports each chunk once no shard needs it any more.
     static func mergeInOrder(_ finished: AsyncStream<PatternScanResult>, chunkCount: Int, nextLabelID: Int,
-        shardCount: Int = 1, merged: @escaping @Sendable () -> Void) async -> PatternScanMerge {
+        shardCount: Int = 1, boardings: BoardingIndex? = nil, merged: @escaping @Sendable () -> Void) async -> PatternScanMerge {
         var merge = PatternScanMerge(nextID: nextLabelID, shardCount: shardCount)
         var pending: [Int: PatternScanResult] = [:]
         var nextChunk = 0
         var shards = [MergeShard](repeating: .init(), count: merge.shardCount)
-        await withTaskGroup(of: MergeShard.self) { group in
+        var materialized: [Int: LabelProfile]?
+        await withTaskGroup(of: (shard: MergeShard, labels: [Int: LabelProfile]).self) { group in
             var inboxes: [AsyncStream<ShardWork>.Continuation] = []
             if merge.shardCount > 1 {
                 shards = []
@@ -172,7 +174,7 @@ extension Raptor {
                             shard.merge(work)
                             work.ticket?.consumed()
                         }
-                        return shard
+                        return (shard, boardings.map { Raptor.materialize(shard.profiles, boardings: $0) } ?? [:])
                     }
                 }
             }
@@ -198,9 +200,14 @@ extension Raptor {
                 }
             }
             for inbox in inboxes { inbox.finish() }
-            for await shard in group { shards.append(shard) }
+            var labels: [Int: LabelProfile] = [:]
+            for await outcome in group {
+                shards.append(outcome.shard)
+                labels.merge(outcome.labels) { _, shardLabels in shardLabels }
+            }
+            if boardings != nil, !inboxes.isEmpty { materialized = labels }
         }
-        merge.finish(shards)
+        merge.finish(shards, materialized: materialized)
         // A cancelled scan ends the stream early.
         if !Task.isCancelled { precondition(pending.isEmpty && nextChunk == chunkCount) }
         return merge

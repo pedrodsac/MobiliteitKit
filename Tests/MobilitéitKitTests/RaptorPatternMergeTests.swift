@@ -106,8 +106,8 @@ import Testing
     }
 
     /// `trickle` hands the chunks over one at a time while the merger waits, instead of all at once.
-    static func merge(_ chunks: [Raptor.PatternScanResult], order: [Int], shards: Int, trickle: Bool)
-        async -> (merge: Raptor.PatternScanMerge, steps: Int) {
+    static func merge(_ chunks: [Raptor.PatternScanResult], order: [Int], shards: Int, trickle: Bool,
+        boardings: Raptor.BoardingIndex? = nil) async -> (merge: Raptor.PatternScanMerge, steps: Int) {
         let (finished, sink) = AsyncStream.makeStream(of: Raptor.PatternScanResult.self)
         if !trickle {
             for index in order { sink.yield(chunks[index]) }
@@ -122,7 +122,7 @@ import Testing
             sink.finish()
         }
         let steps = OSAllocatedUnfairLock(initialState: 0)
-        let merge = await Raptor.mergeInOrder(finished, chunkCount: chunks.count, nextLabelID: baseID, shardCount: shards) {
+        let merge = await Raptor.mergeInOrder(finished, chunkCount: chunks.count, nextLabelID: baseID, shardCount: shards, boardings: boardings) {
             steps.withLock { $0 += 1 }
         }
         await producer.value
@@ -167,5 +167,43 @@ import Testing
         let ids = merge.mergedProfiles.values.flatMap { profile in profile.ordered.map { profile.keys[$0]!.id } }
         #expect(Set(ids).count == ids.count)
         #expect(ids.allSatisfy { $0 >= Self.baseID && $0 < Self.baseID + issued })
+    }
+
+    /// Six boarding labels, the sources the generated paths point at.
+    static func makeBoardings() throws -> Raptor.BoardingIndex {
+        let day = try GTFSDate(year: 2026, month: 10, day: 22)
+        var profiles: [Int: Raptor.LabelProfile] = [:]
+        for index in 0..<6 {
+            let label = Raptor.Label(id: index, time: Date(timeIntervalSinceReferenceDate: Double(index)), firstStop: 0,
+                firstDeparture: nil, lastTransit: nil, minimumSlack: .max, totalSlack: 0, accessSeconds: 0,
+                accessDistance: 0, pathwaySeconds: 0, pathwayDistance: 0, transferWalkSeconds: 0,
+                containsPreferredMode: false, walkingStopsVisited: .one(0),
+                tripKey: Raptor.TripKey().appending(.init(trip: index, day: day)))
+            _ = Raptor.insert(label, at: 0, into: &profiles)
+        }
+        let boardings = Raptor.BoardingIndex(profiles, stopCount: stopCount)
+        #expect(boardings.sources.count == 6)
+        return boardings
+    }
+
+    /// Each shard builds the labels of its own stops; together they are what one `materialize` of all
+    /// merged profiles builds.
+    @Test(arguments: [3, 10])
+    func shardsMaterializeTheLabelsOfOneMaterialize(shards: Int) async throws {
+        let chunks = try Self.makeChunks(seed: 7)
+        let boardings = try Self.makeBoardings()
+        let (merge, _) = await Self.merge(chunks, order: Self.arrivalOrder(2, count: chunks.count, seed: 3),
+                                          shards: shards, trickle: false, boardings: boardings)
+        let actual = try #require(merge.materializedLabels)
+        let expected = Raptor.materialize(Self.serialMerge(chunks, nextLabelID: Self.baseID).profiles, boardings: boardings)
+        #expect(actual.keys.sorted() == expected.keys.sorted())
+        #expect(actual.count > 1)
+        func describe(_ profile: Raptor.LabelProfile) -> [String] {
+            profile.ordered.map { "\($0.id) \($0.time) \($0.firstDeparture as Any) \($0.minimumSlack) \($0.totalSlack) \(String(reflecting: $0.legs))" }
+                + ["walk", profile.byWalk.map { String($0.id) }.joined(separator: ","),
+                   "arrival", profile.byArrival.map { String($0.id) }.joined(separator: ","),
+                   "last", "\(profile.lastUnprotectedArrival?.id as Any) \(profile.lastPreferredArrival?.id as Any)"]
+        }
+        for stop in expected.keys.sorted() { #expect(describe(actual[stop]!) == describe(expected[stop]!), "stop \(stop)") }
     }
 }

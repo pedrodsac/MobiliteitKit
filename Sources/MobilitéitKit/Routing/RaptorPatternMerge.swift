@@ -12,6 +12,7 @@ extension Raptor {
         private var mergedCompact: [Int: CompactProfile] = [:]
         private var referenceNext: [Int: LabelProfile] = [:]
         private var labels: [Int: LabelProfile] = [:]
+        private(set) var materializedLabels: [Int: LabelProfile]?
         var patterns = 0, tripInstances = 0, boardingChecks = 0, feasibleBoardings = 0
         var alightingChecks = 0, labelAttempts = 0, retainedLabels = 0, rejectedBeforeAllocation = 0
         var slowestChunkMilliseconds = 0, summedChunkMilliseconds = 0
@@ -65,14 +66,17 @@ extension Raptor {
             return .init(profiles: compact, stopsByShard: stopsByShard)
         }
 
-        /// Take over the shards' profiles once every chunk has been merged into them.
-        mutating func finish(_ shards: [MergeShard]) {
+        /// Take over the shards' profiles once every chunk has been merged into them. The shards
+        /// may already have turned their profiles into labels; stops are never shared, so those
+        /// labels are the ones `materialize` would build from all the profiles.
+        mutating func finish(_ shards: [MergeShard], materialized: [Int: LabelProfile]? = nil) {
             for shard in shards { mergedCompact.merge(shard.profiles) { _, shardProfile in shardProfile } }
+            materializedLabels = materialized
         }
 
         mutating func materialized(boardings: BoardingIndex) -> [Int: LabelProfile] {
             if !mergedCompact.isEmpty {
-                labels = Raptor.materialize(mergedCompact, boardings: boardings)
+                labels = materializedLabels ?? Raptor.materialize(mergedCompact, boardings: boardings)
                 if Raptor.verifyKernel {
                     precondition(labels.keys.sorted() == referenceNext.keys.sorted(), "Merged stops mismatch")
                     for stop in labels.keys {
