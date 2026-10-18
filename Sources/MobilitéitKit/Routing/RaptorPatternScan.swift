@@ -41,8 +41,10 @@ extension Raptor {
         inputs: PatternScanInputs, nextLabelID: Int) async throws -> PatternScanOutcome {
         let scanStarted = ContinuousClock.now
         let snapshot = inputs.snapshot
-        // Schedule costly chunks first, but merge in the original index order.
-        let schedulingWindow = max(1, workerCount * 2)
+        // Schedule costly chunks first, but merge in the original index order. A window
+        // holds six times the workers' chunks, so the costliest ones start early instead
+        // of in the last window, where their scan would end the round.
+        let schedulingWindow = max(1, workerCount * 6)
         let scheduled = stride(from: 0, to: chunks.count, by: schedulingWindow).flatMap { start in
             chunks[start..<min(start + schedulingWindow, chunks.count)].sorted { a, b in
                 func cost(_ patterns: [Int]) -> Int {
@@ -55,11 +57,13 @@ extension Raptor {
                 return left == right ? a.index < b.index : left > right
             }
         }
-        // Chunks that were started and not yet merged: finished ones wait for an
-        // earlier chunk or for the merger, running ones hold a worker. A window starts
-        // only after the previous one, so the lowest unmerged chunk has always started
-        // when this many are outstanding, and the merger can always make progress.
-        let outstandingLimit = workerCount + schedulingWindow
+        // Chunks that were started and not yet merged: running ones, finished ones that wait
+        // for an earlier chunk, and finished ones that wait for the merger. A window starts only
+        // after the previous one has been handed out, so while the lowest unmerged chunk has not
+        // started, fewer than a window of chunks are outstanding. A limit of one window therefore
+        // never keeps the merger from making progress, and it bounds the memory of chunks that
+        // are scanned but not merged.
+        let outstandingLimit = schedulingWindow
         let (finished, finishedSink) = AsyncStream.makeStream(of: PatternScanResult.self)
         let (progress, progressSink) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(1))
         let mergedCount = OSAllocatedUnfairLock(initialState: 0)

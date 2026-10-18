@@ -44,7 +44,7 @@ import Testing
         #expect(chunks.count >= 80)
         #expect(outcome.merge.patterns == chunks.count)
         #expect(outcome.merge.nextID == 100)
-        #expect(outcome.peakOutstandingChunks == 3 * workers)
+        #expect(outcome.peakOutstandingChunks == 6 * workers)
         #expect(outcome.mergeTailMilliseconds > 0)
     }
 
