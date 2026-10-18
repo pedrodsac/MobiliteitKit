@@ -105,6 +105,80 @@ import ZIPFoundation
     #expect(mismatched.patches.isEmpty)
 }
 
+@Test func boardRowOfTheOppositeDirectionDoesNotPatchTheTrip() async throws {
+    let folder = FileManager.default.temporaryDirectory
+        .appendingPathComponent("HafasRouting-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let archiveURL = folder.appendingPathComponent("fixture.zip")
+    let databaseURL = folder.appendingPathComponent("fixture.sqlite")
+    let files = [
+        "agency.txt": "agency_id,agency_name,agency_url,agency_timezone\noperator,Operator,https://example.com,Europe/Luxembourg\n",
+        "calendar_dates.txt": "service_id,date,exception_type\nservice,20260924,1\n",
+        "routes.txt": "route_id,agency_id,route_short_name,route_long_name,route_type\nroute-322,operator,322,Bus 322,3\n",
+        "stops.txt": "stop_id,stop_name,stop_lat,stop_lon\nb,Gromscheed,49.651,6.231\nc,Destination,49.630,6.180\n",
+        "trips.txt": "route_id,service_id,trip_id,trip_headsign,trip_short_name,direction_id,block_id\nroute-322,service,trip-322,Destination,,,\n",
+        "stop_times.txt": "trip_id,arrival_time,departure_time,stop_id,stop_sequence\ntrip-322,09:20:00,09:20:00,b,1\ntrip-322,09:35:00,09:35:00,c,2\n",
+    ]
+    let archive = try Archive(url: archiveURL, accessMode: .create)
+    for (path, content) in files {
+        let data = Data(content.utf8)
+        try archive.addEntry(with: path, type: .file, uncompressedSize: Int64(data.count),
+                             compressionMethod: .deflate) { position, size in
+            data.subdata(in: Int(position)..<(Int(position) + size))
+        }
+    }
+    _ = try await GTFSArchiveInstaller.install(archiveAt: archiveURL, databaseAt: databaseURL)
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(identifier: "Europe/Luxembourg")!
+    let from = try #require(calendar.date(from: DateComponents(
+        year: 2026, month: 9, day: 24, hour: 9, minute: 10
+    )))
+
+    // The same board row, once for the trip's own destination and once for the other direction.
+    for (prefix, expectedPatches) in [("same-direction-", 1), ("opposite-direction-", 0)] {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DirectionBoardProtocol.self]
+        let client = MobiliteitAPIClient(
+            apiKey: "test",
+            baseURL: URL(string: "https://\(prefix)\(UUID().uuidString).invalid")!,
+            session: URLSession(configuration: configuration)
+        )
+        let provider = try HafasRealtimeRoutingProvider(databaseURL: databaseURL, client: client)
+        let batch = try await provider.patches(
+            for: ["b"], from: from, through: from.addingTimeInterval(20 * 60),
+            refreshPolicy: .forceRefresh
+        )
+        #expect(batch.patches.count == expectedPatches, "\(prefix)")
+    }
+}
+
+private final class DirectionBoardProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool {
+        request.url?.host()?.hasPrefix("same-direction-") == true
+            || request.url?.host()?.hasPrefix("opposite-direction-") == true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let stopID = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?
+            .queryItems?.first(where: { $0.name == "id" })?.value
+        let direction = request.url?.host()?.hasPrefix("opposite-direction-") == true
+            ? "Opposite direction" : "Destination"
+        let body = """
+        {"Departure":[{"JourneyDetailRef":{"ref":"one-journey"},"Product":{"name":"Bus 322","line":"322","cls":"32"},"direction":"\(direction)","time":"09:20:00","date":"2026-09-24","rtTime":"09:21:00","rtDate":"2026-09-24","prognosisType":"PROGNOSED"}]}
+        """
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200,
+                                       httpVersion: "HTTP/1.1", headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data((stopID == "b" ? body : "{\"Departure\":[]}").utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
 private final class CancelledJourneyBoardProtocol: URLProtocol {
     override class func canInit(with request: URLRequest) -> Bool {
         request.url?.host()?.hasPrefix("cancelled-") == true

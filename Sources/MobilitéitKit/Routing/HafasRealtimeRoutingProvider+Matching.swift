@@ -23,16 +23,18 @@ extension HafasRealtimeRoutingProvider {
             guard let lineScore = lineScore(live.product, route: value.departure.route)
             else { continue }
 
-            // A cancelled board row has no realtime position to disambiguate
-            // opposite-direction trips on the same line. Never cancel a GTFS
-            // trip based on line and departure time alone.
-            if live.cancelled == true {
-                let directionMatches = live.direction.flatMap { direction in
-                    value.departure.headsign.map { normalizedName(direction) == normalizedName($0) }
-                } == true
+            // Opposite directions of one line share the stop, and at a shared mast the minute. A
+            // cancelled row has no realtime position to tell them apart, so it needs the destination
+            // or two stops of its passlist on the trip: never cancel a GTFS trip on line and
+            // departure time alone. A row whose destination contradicts the trip needs the same
+            // proof; otherwise the other direction's vehicle would put its times on this trip.
+            let directionMatches = live.direction.flatMap { direction in
+                value.departure.headsign.map { normalizedName(direction) == normalizedName($0) }
+            }
+            if live.cancelled == true || directionMatches == false {
                 let stopTimes = await cachedStopTimes(forTripID: value.departure.tripID)
                 let passlistMatches = align(live.passlist.values, to: stopTimes, serviceDate: value.serviceDate, deadline: deadline).count
-                guard directionMatches || passlistMatches >= 2 else { continue }
+                guard directionMatches == true || passlistMatches >= 2 else { continue }
             }
 
             var score = lineScore
