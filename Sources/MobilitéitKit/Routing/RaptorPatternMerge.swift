@@ -1,9 +1,8 @@
 import Foundation
 
 extension Raptor {
-    /// Merge finished chunks in their original order. Releasing each chunk as
-    /// soon as its predecessors finish avoids retaining the entire scan's
-    /// temporary profiles and overlaps deterministic merging with later work.
+    /// Merge finished chunks in their original order. `Raptor.mergeInOrder` feeds it, so
+    /// each chunk is released as soon as it is merged and merging overlaps later scans.
     struct PatternScanMerge {
         var nextID: Int
         private var referenceID: Int
@@ -13,12 +12,11 @@ extension Raptor {
         var patterns = 0, tripInstances = 0, boardingChecks = 0, feasibleBoardings = 0
         var alightingChecks = 0, labelAttempts = 0, retainedLabels = 0, rejectedBeforeAllocation = 0
         var slowestChunkMilliseconds = 0, summedChunkMilliseconds = 0
-        var elapsedMilliseconds = 0.0
+        var mergedProfiles: [Int: CompactProfile] { mergedCompact }
 
         init(nextID: Int) { self.nextID = nextID; self.referenceID = nextID }
 
         mutating func append(_ result: PatternScanResult) {
-            let started = ContinuousClock.now
             patterns += result.scannedPatterns
             tripInstances += result.scannedTripInstances
             boardingChecks += result.boardingChecks
@@ -61,7 +59,6 @@ extension Raptor {
             }
             slowestChunkMilliseconds = max(slowestChunkMilliseconds, result.elapsedMilliseconds)
             summedChunkMilliseconds += result.elapsedMilliseconds
-            elapsedMilliseconds += RoutingDiagnostics.elapsed(since: started)
         }
 
         mutating func materialized(boardings: BoardingIndex) -> [Int: LabelProfile] {

@@ -140,76 +140,17 @@ extension Raptor {
             let chunks = stride(from: 0, to: markedPatternIDs.count, by: chunkSize).enumerated().map { chunkIndex, start in
                 (index: chunkIndex, patterns: Array(markedPatternIDs[start..<min(start + chunkSize, markedPatternIDs.count)]))
             }
-            let currentRound = round
-            let finalRoundAlightStopSnapshot = finalRoundAlightStops
-            let activeInstanceSnapshot = activeInstancesByPattern
-            let patternStartPositionSnapshot = patternStartPositions
             let reachableStops = remainingRides == 0 ? finalRoundReachable
                 : destinationReachability?.stopsByRemainingRides[remainingRides]
-            let scanStarted = ContinuousClock.now
-            var merge = PatternScanMerge(nextID: nextLabelID)
-            try await withThrowingTaskGroup(of: PatternScanResult.self) { group in
-                var availableScratch: [CompactScratch] = []
-                // Schedule costly chunks first, but merge in the original index order.
-                let schedulingWindow = max(1, workerCount * 2)
-                let scheduled = stride(from: 0, to: chunks.count, by: schedulingWindow).flatMap { start in
-                    chunks[start..<min(start + schedulingWindow, chunks.count)].sorted { a, b in
-                        func cost(_ patterns: [Int]) -> Int {
-                            patterns.reduce(0) { total, pattern in
-                                total + (activeInstanceSnapshot[pattern]?.count ?? 0)
-                                    * snapshot.patterns[pattern].stops.count
-                            }
-                        }
-                        let left = cost(a.patterns), right = cost(b.patterns)
-                        return left == right ? a.index < b.index : left > right
-                    }
-                }
-                var cursor = 0
-                var active = 0
-                func enqueue() {
-                    let chunk = scheduled[cursor]
-                    cursor += 1
-                    active += 1
-                    let scratch = availableScratch.popLast() ?? CompactScratch()
-                    group.addTask(priority: .userInitiated) {
-                        try scanPatterns(
-                            chunkIndex: chunk.index,
-                            patternIDs: chunk.patterns,
-                            snapshot: snapshot,
-                            query: query,
-                            previousLabels: previousLabels,
-                            boardings: boardings,
-                            patternStartPositions: patternStartPositionSnapshot,
-                            activeInstancesByPattern: activeInstanceSnapshot,
-                            reachableStops: reachableStops,
-                            round: currentRound,
-                            maxRounds: maxRounds,
-                            finalRoundAlightStops: finalRoundAlightStopSnapshot, scratch: scratch
-                        )
-                    }
-                }
-                for _ in 0..<min(workerCount, scheduled.count) { enqueue() }
-                var pending: [Int: PatternScanResult] = [:]
-                var nextChunk = 0
-                while var value = try await group.next() {
-                    if let scratch = value.scratch { availableScratch.append(scratch); value.scratch = nil }
-                    active -= 1
-                    pending[value.chunkIndex] = value
-                    while let ready = pending.removeValue(forKey: nextChunk) {
-                        merge.append(ready)
-                        nextChunk += 1
-                    }
-                    // Every earlier chunk in this window has already started
-                    // before the completed buffer can fill. Bound that buffer
-                    // instead of retaining all workers' full profile arrays.
-                    while active < workerCount, cursor < scheduled.count, pending.count < schedulingWindow {
-                        enqueue()
-                    }
-                }
-                precondition(pending.isEmpty && nextChunk == chunks.count)
-            }
-            // Charge serial merge work once, even when worker scans overlap it.
-            let scanMilliseconds = Int(max(0, RoutingDiagnostics.elapsed(since: scanStarted) - merge.elapsedMilliseconds))
+            let outcome = try await scanAndMerge(
+                chunks: chunks, workerCount: workerCount,
+                inputs: .init(snapshot: snapshot, query: query, previousLabels: previousLabels, boardings: boardings,
+                    patternStartPositions: patternStartPositions, activeInstancesByPattern: activeInstancesByPattern,
+                    reachableStops: reachableStops, round: round, maxRounds: maxRounds,
+                    finalRoundAlightStops: finalRoundAlightStops),
+                nextLabelID: nextLabelID)
+            var merge = outcome.merge
+            let scanMilliseconds = Int(outcome.scanMilliseconds)
             let mergeStarted = ContinuousClock.now
             next = merge.materialized(boardings: boardings)
             nextLabelID = merge.nextID
@@ -223,7 +164,8 @@ extension Raptor {
                     labels: &next, nextLabelID: &nextLabelID)
             }
 
-            let mergeMilliseconds = Int(merge.elapsedMilliseconds + RoutingDiagnostics.elapsed(since: mergeStarted))
+            // Chunks merge while later ones scan; only the merge left after the last scan counts here.
+            let mergeMilliseconds = Int(outcome.mergeTailMilliseconds + RoutingDiagnostics.elapsed(since: mergeStarted))
             roundMetrics.append(.init(
                 tripPreparationMilliseconds: preparationMilliseconds,
                 patternScanMilliseconds: scanMilliseconds,

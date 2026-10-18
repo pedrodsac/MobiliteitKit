@@ -1,0 +1,146 @@
+import Foundation
+import Testing
+@testable import MobiliteitKit
+
+/// The merge of finished scan chunks, checked on hand-made chunks against the serial loop it replaced.
+@Suite struct RaptorPatternMergeTests {
+    static let baseID = 7_000
+    static let stopCount = 14
+    static let chunkCount = 36
+
+    struct Generator {
+        var state: UInt64
+        mutating func next(_ bound: Int) -> Int {
+            state = state &* 6364136223846793005 &+ 1442695040888963407
+            return Int(state >> 32) % bound
+        }
+    }
+
+    /// Chunks whose profiles overlap at every stop, so the merge has to apply dominance and the
+    /// 48-label quota across chunks.
+    static func makeChunks(seed: UInt64) throws -> [Raptor.PatternScanResult] {
+        var generator = Generator(state: seed)
+        let day = try GTFSDate(year: 2026, month: 10, day: 22)
+        return (0..<chunkCount).map { chunkIndex in
+            var profiles: [Int: Raptor.CompactProfile] = [:]
+            var nextID = (chunkIndex + 1) * 1_000_000_000
+            var attempts = 0, rejected = 0, retained = 0
+            // A few chunks cover only some stops, and one covers none.
+            let reach = chunkIndex == 5 ? 0 : (chunkIndex.isMultiple(of: 4) ? stopCount / 3 : stopCount)
+            for _ in 0..<(reach == 0 ? 0 : 120) {
+                let stop = generator.next(reach)
+                let departure = Double(generator.next(120)) + Double(generator.next(4)) / 4
+                let arrival = departure + Double(generator.next(120))
+                let walking = generator.next(5), trip = generator.next(30) + 10
+                let preferred = generator.next(3) == 0, slack = generator.next(10), total = generator.next(30)
+                let key = Raptor.ScanKey(id: nextID, arrival: arrival, departure: departure,
+                    doorDeparture: departure - Double(walking), walkingSeconds: walking,
+                    minimumSlack: slack, totalSlack: total, preferred: preferred,
+                    prefixRank: generator.next(3), incomingTrip: trip, serviceDate: day)
+                var peers = profiles[stop]?.byIncomingTrip[trip, default: 0] ?? 0
+                let board = Date(timeIntervalSinceReferenceDate: departure)
+                let alight = Date(timeIntervalSinceReferenceDate: arrival)
+                let source = generator.next(6)
+                if Raptor.consider(key, profile: &profiles[stop], peers: &peers, nextID: &nextID,
+                    attempts: &attempts, rejected: &rejected, path: {
+                        .init(sourceIndex: source, trip: trip, board: 0, alight: stop, boardPos: 0, alightPos: 1,
+                            day: day, scheduledBoard: board, scheduledAlight: alight, boardTime: board,
+                            alightTime: alight, requiredTransferSeconds: 0)
+                    }) { retained += 1 }
+            }
+            return .init(chunkIndex: chunkIndex, labels: [:], scannedPatterns: chunkIndex + 1,
+                scannedTripInstances: 2 * chunkIndex, boardingChecks: 3, feasibleBoardings: 5,
+                alightingChecks: 7, labelAttempts: attempts, retainedLabels: retained,
+                rejectedBeforeAllocation: rejected, elapsedMilliseconds: chunkIndex, compactLabels: profiles)
+        }
+    }
+
+    /// The serial loop that merged each chunk as it was handed out: chunks in index order, stops in
+    /// ascending order, one ID per label of the chunk, whether or not it survives.
+    static func serialMerge(_ chunks: [Raptor.PatternScanResult], nextLabelID: Int)
+        -> (profiles: [Int: Raptor.CompactProfile], nextID: Int) {
+        var nextID = nextLabelID
+        var merged: [Int: Raptor.CompactProfile] = [:]
+        for chunk in chunks.sorted(by: { $0.chunkIndex < $1.chunkIndex }) {
+            let compact = chunk.compactLabels!
+            for stop in compact.keys.sorted() {
+                let profile = compact[stop]!
+                var target = merged.removeValue(forKey: stop) ?? Raptor.CompactProfile()
+                for slot in profile.ordered {
+                    var key = profile.keys[slot]!
+                    key.id = nextID; nextID += 1
+                    let peers = target.byIncomingTrip[key.incomingTrip, default: 0]
+                    if !target.isDominated(key, peers: peers), !target.cannotEnter(key, peers: peers) {
+                        _ = target.insert(key, path: profile.paths[slot]!)
+                    }
+                }
+                merged[stop] = target
+            }
+        }
+        return (merged, nextID)
+    }
+
+    /// Everything a profile keeps, in its three orders.
+    static func description(_ profiles: [Int: Raptor.CompactProfile]) -> [String] {
+        profiles.keys.sorted().map { stop in
+            let profile = profiles[stop]!
+            func slots(_ values: [Int]) -> String {
+                values.map { String(reflecting: profile.keys[$0]!) + String(reflecting: profile.paths[$0]!) }.joined(separator: "|")
+            }
+            return "\(stop) ordered \(slots(profile.ordered)) arrival \(profile.byArrival.map { profile.keys[$0]!.id }) "
+                + "walk \(profile.byWalk.map { profile.keys[$0]!.id }) peers \(profile.byIncomingTrip.mapValues { $0.nonzeroBitCount }.sorted { $0.key < $1.key })"
+        }
+    }
+
+    static func arrivalOrder(_ kind: Int, count: Int, seed: UInt64) -> [Int] {
+        switch kind {
+        case 0: return Array(0..<count)
+        case 1: return Array((0..<count).reversed())
+        default:
+            var generator = Generator(state: seed)
+            var order = Array(0..<count)
+            for index in order.indices.reversed() { order.swapAt(index, generator.next(index + 1)) }
+            return order
+        }
+    }
+
+    /// `trickle` hands the chunks over one at a time while the merger waits, instead of all at once.
+    static func merge(_ chunks: [Raptor.PatternScanResult], order: [Int], trickle: Bool) async -> (merge: Raptor.PatternScanMerge, steps: Int) {
+        let (finished, sink) = AsyncStream.makeStream(of: Raptor.PatternScanResult.self)
+        if !trickle {
+            for index in order { sink.yield(chunks[index]) }
+            sink.finish()
+        }
+        let producer = Task {
+            guard trickle else { return }
+            for index in order {
+                sink.yield(chunks[index])
+                await Task.yield()
+            }
+            sink.finish()
+        }
+        var steps = 0
+        let merge = await Raptor.mergeInOrder(finished, chunkCount: chunks.count, nextLabelID: baseID) { steps += 1 }
+        await producer.value
+        return (merge, steps)
+    }
+
+    @Test(arguments: [0, 1, 2, 3], [false, true])
+    func chunksMergeInIndexOrderWhateverTheArrivalOrder(kind: Int, trickle: Bool) async throws {
+        let seed: UInt64 = 0x51ced + UInt64(kind)
+        let chunks = try Self.makeChunks(seed: seed)
+        let expected = Self.serialMerge(chunks, nextLabelID: Self.baseID)
+        // The generator has to produce a merge with evictions, or the comparison proves little.
+        #expect(expected.profiles.values.contains { $0.ordered.count == Raptor.profileWidth })
+        let order = Self.arrivalOrder(kind, count: chunks.count, seed: seed)
+        let (merge, steps) = await Self.merge(chunks, order: order, trickle: trickle)
+        #expect(steps == chunks.count)
+        #expect(merge.nextID == expected.nextID)
+        #expect(Self.description(merge.mergedProfiles) == Self.description(expected.profiles))
+        #expect(merge.patterns == chunks.map(\.scannedPatterns).reduce(0, +))
+        #expect(merge.tripInstances == chunks.map(\.scannedTripInstances).reduce(0, +))
+        #expect(merge.labelAttempts == chunks.map(\.labelAttempts).reduce(0, +))
+        #expect(merge.retainedLabels == chunks.map(\.retainedLabels).reduce(0, +))
+        #expect(merge.slowestChunkMilliseconds == chunks.count - 1)
+    }
+}
