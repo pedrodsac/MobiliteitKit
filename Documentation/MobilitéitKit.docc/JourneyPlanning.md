@@ -6,6 +6,16 @@ The timetable scan is synchronous CPU work: it performs neither SQLite access
 nor network requests. Sessions provide up to five initial profile results and
 three further results through `later()`.
 
+Building the snapshot reads the whole timetable, so a caller can give
+`JourneyPlanner` or `TransitRouter` a `snapshotCacheDirectory` (for example
+inside Caches). The snapshot is then stored there as one versioned binary file
+and loaded on the next start instead of being rebuilt. The file is keyed by the
+format version and the database it was built from (file name, size, modification
+time, SQLite header and feed metadata); a new feed, a new format or a damaged
+file is ignored, rebuilt from the database and rewritten. A loaded snapshot
+equals a built one in every table and index that routing reads.
+`JourneyPlanner.removeSnapshotCache(in:)` deletes the file.
+
 Departure and arrival are door-to-door values. A coordinate endpoint includes
 its resolved walking leg; a stop endpoint has zero walking at that stop.
 

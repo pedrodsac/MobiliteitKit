@@ -308,9 +308,9 @@ public struct ServiceInstantConverter: Sendable {
 
 // MARK: - Immutable snapshot
 
-struct SnapshotStop: Sendable { let id: String; let model: TransitStop; let parent: String? }
-struct SnapshotTime: Sendable { let stop: Int; let sequence: Int; let arrival: Int32?; let departure: Int32?; let pickup: Int; let dropoff: Int; var headsign: String? = nil }
-struct SnapshotTrip: Sendable {
+struct SnapshotStop: Sendable, Equatable { let id: String; let model: TransitStop; let parent: String? }
+struct SnapshotTime: Sendable, Equatable { let stop: Int; let sequence: Int; let arrival: Int32?; let departure: Int32?; let pickup: Int; let dropoff: Int; var headsign: String? = nil }
+struct SnapshotTrip: Sendable, Equatable {
     let id: String; let route: Int; let service: Int; let times: [SnapshotTime]; let headsign: String?
     let wheelchairAccessible: Int
     var blockID: String? = nil
@@ -337,15 +337,15 @@ struct SnapshotTrip: Sendable {
         return times.firstIndex { $0.sequence == sequence }
     }
 }
-struct SnapshotRule: Sendable { let order: Int; let from: Int?; let to: Int?; let type: Int; let minimum: Int?; let fromRoute: Int?; let toRoute: Int?; let fromTrip: Int?; let toTrip: Int? }
+struct SnapshotRule: Sendable, Equatable { let order: Int; let from: Int?; let to: Int?; let type: Int; let minimum: Int?; let fromRoute: Int?; let toRoute: Int?; let fromTrip: Int?; let toTrip: Int? }
 struct RuleGroupKey: Hashable, Sendable { let from: Int?; let to: Int? }
-struct SnapshotPath: Sendable {
+struct SnapshotPath: Sendable, Equatable {
     let from: Int; let to: Int; let seconds: Int; let distance: Double; let mode: Int
     let stairCount: Int?; let maxSlope: Double?; let minWidth: Double?
 }
-struct SnapshotPattern: Sendable { let trips: [Int]; let stops: [Int] }
-struct PatternOccurrence: Sendable { let pattern: Int; let position: Int }
-struct SnapshotServiceDay: Sendable { let offset: Int; let date: GTFSDate; let start: Date; let activeServices: Set<Int> }
+struct SnapshotPattern: Sendable, Equatable { let trips: [Int]; let stops: [Int] }
+struct PatternOccurrence: Sendable, Equatable { let pattern: Int; let position: Int }
+struct SnapshotServiceDay: Sendable, Equatable { let offset: Int; let date: GTFSDate; let start: Date; let activeServices: Set<Int> }
 private struct StopGridCell: Hashable { let latitude: Int; let longitude: Int }
 struct RoutingSnapshot: Sendable {
     let info: FeedInfo; let converter: ServiceInstantConverter; let stops: [SnapshotStop]; let stopByID: [String: Int]; let routes: [TransitRoute]; let trips: [SnapshotTrip]; let tripByID: [String: Int]; let tripIndicesByDepartureStop: [[Int]]; let serviceRoutesByStop: [[ServiceRoute]]; let boardableStops: Set<Int>; let alightableStops: Set<Int>; let serviceDays: [SnapshotServiceDay]; let lastActiveDayStartByService: [Date?]; let rulesByGroup: [RuleGroupKey: [SnapshotRule]]; let stationGroupByStop: [Int]; let pathsByFrom: [[SnapshotPath]]; let pathsByTo: [[SnapshotPath]]; let nearbyTransferStopsByStop: [[Int]]
@@ -365,7 +365,7 @@ struct ServiceRoute: Hashable, Sendable {
     let route: Int
 }
 
-private enum SnapshotBuilder {
+enum SnapshotBuilder {
     static func load(databaseURL: URL) throws -> RoutingSnapshot {
         let loadStarted = ContinuousClock.now
         let db = try SQLiteDatabase(path: databaseURL.path, readOnly: true)
@@ -457,10 +457,8 @@ private enum SnapshotBuilder {
         }
         var active = Array(repeating: Set<Int>(), count: info.firstServiceDate.days(until: info.lastServiceDate) + 1); let activeStmt = try db.prepare("SELECT day_index,service_id FROM service_date"); while try activeStmt.step() { let day = activeStmt.int(0); if active.indices.contains(day), let s = serviceIndex[activeStmt.int(1)] { active[day].insert(s) } }
         let rstmt = try db.prepare("SELECT from_stop_id,to_stop_id,transfer_type,min_transfer_sec,from_route_id,to_route_id,from_trip_id,to_trip_id FROM transfer_rule"); var rules: [SnapshotRule] = []; while try rstmt.step() { if (!rstmt.isNull(6) && tripIndex[rstmt.int(6)] == nil) || (!rstmt.isNull(7) && tripIndex[rstmt.int(7)] == nil) { continue }; rules.append(.init(order: rules.count, from: rstmt.isNull(0) ? nil : sqliteStopIndex[rstmt.int(0)], to: rstmt.isNull(1) ? nil : sqliteStopIndex[rstmt.int(1)], type: rstmt.int(2), minimum: rstmt.isNull(3) ? nil : rstmt.int(3), fromRoute: rstmt.isNull(4) ? nil : routeIndex[rstmt.int(4)], toRoute: rstmt.isNull(5) ? nil : routeIndex[rstmt.int(5)], fromTrip: rstmt.isNull(6) ? nil : tripIndex[rstmt.int(6)], toTrip: rstmt.isNull(7) ? nil : tripIndex[rstmt.int(7)])) }
-        let stationGroupByStop = stops.indices.map { stop in stops[stop].parent.flatMap { stopByID[$0] } ?? stop }
-        let rulesByGroup = Dictionary(grouping: rules) { rule in
-            RuleGroupKey(from: rule.from.map { stationGroupByStop[$0] }, to: rule.to.map { stationGroupByStop[$0] })
-        }
+        let stationGroupByStop = SnapshotDerivedIndexes.stationGroups(stops: stops, stopByID: stopByID)
+        let rulesByGroup = SnapshotDerivedIndexes.rulesByGroup(rules, stationGroupByStop: stationGroupByStop)
         var paths: [SnapshotPath] = []; if let pstmt = try? db.prepare("SELECT from_stop_id,to_stop_id,traversal_time,is_bidirectional,length,pathway_mode,stair_count,max_slope,min_width FROM pathway") { while try pstmt.step() { guard !pstmt.isNull(2), pstmt.int(2) > 0, (pstmt.isNull(4) || pstmt.double(4) >= 0), let a = sqliteStopIndex[pstmt.int(0)], let b = sqliteStopIndex[pstmt.int(1)] else { continue }; let path = SnapshotPath(from: a, to: b, seconds: pstmt.int(2), distance: pstmt.isNull(4) ? 0 : pstmt.double(4), mode: pstmt.isNull(5) ? 0 : pstmt.int(5), stairCount: pstmt.isNull(6) ? nil : pstmt.int(6), maxSlope: pstmt.isNull(7) ? nil : pstmt.double(7), minWidth: pstmt.isNull(8) ? nil : pstmt.double(8)); paths.append(path); if pstmt.int(3) == 1 { paths.append(.init(from: b, to: a, seconds: path.seconds, distance: path.distance, mode: path.mode, stairCount: path.stairCount.map { -$0 }, maxSlope: path.maxSlope.map { -$0 }, minWidth: path.minWidth)) } } }
         var pathsByFrom = Array(repeating: [SnapshotPath](), count: stops.count)
         var pathsByTo = Array(repeating: [SnapshotPath](), count: stops.count)
@@ -489,21 +487,13 @@ private enum SnapshotBuilder {
             }
         }
         let converter = ServiceInstantConverter(timeZone: zone)
-        let serviceDays = active.indices.map { offset in
-            let date = info.firstServiceDate.adding(days: offset)
-            return SnapshotServiceDay(offset: offset, date: date, start: converter.date(serviceDate: date, serviceSeconds: 0), activeServices: active[offset])
-        }
-        var lastActiveDayStartByService = Array<Date?>(repeating: nil, count: serviceIndex.count)
-        for day in serviceDays {
-            for service in day.activeServices {
-                lastActiveDayStartByService[service] = day.start
-            }
-        }
-        var nearbyTransferSourcesByStop = Array(repeating: [Int](), count: stops.count)
-        for from in nearbyTransferStopsByStop.indices {
-            for to in nearbyTransferStopsByStop[from] { nearbyTransferSourcesByStop[to].append(from) }
-        }
-        return .init(info: info, converter: converter, stops: stops, stopByID: stopByID, routes: routes, trips: trips, tripByID: tripByID, tripIndicesByDepartureStop: tripIndicesByDepartureStop, serviceRoutesByStop: serviceRoutesByStop.map(Array.init), boardableStops: boardableStops, alightableStops: alightableStops, serviceDays: serviceDays, lastActiveDayStartByService: lastActiveDayStartByService, rulesByGroup: rulesByGroup, stationGroupByStop: stationGroupByStop, pathsByFrom: pathsByFrom, pathsByTo: pathsByTo, nearbyTransferStopsByStop: nearbyTransferStopsByStop, serviceDayByDate: Dictionary(uniqueKeysWithValues: serviceDays.map { ($0.date, $0) }), nearbyTransferSourcesByStop: nearbyTransferSourcesByStop, continuations: SnapshotContinuationIndex(trips: trips, routes: routes, rules: rules, stopCount: stops.count), patterns: patterns, patternOccurrencesByStop: patternOccurrencesByStop, loadMilliseconds: Int(RoutingDiagnostics.elapsed(since: loadStarted)))
+        let serviceDays = SnapshotDerivedIndexes.serviceDays(info: info, converter: converter, active: active)
+        let lastActiveDayStartByService = SnapshotDerivedIndexes.lastActiveDayStart(serviceDays: serviceDays, serviceCount: serviceIndex.count)
+        let nearbyTransferSourcesByStop = SnapshotDerivedIndexes.nearbyTransferSources(nearbyTransferStopsByStop)
+        // Sorted so the snapshot, and the file stored from it, do not depend on
+        // the per-process order of a Set. Its only reader collects the routes into a Set.
+        let sortedServiceRoutesByStop = serviceRoutesByStop.map { $0.sorted { ($0.service, $0.route) < ($1.service, $1.route) } }
+        return .init(info: info, converter: converter, stops: stops, stopByID: stopByID, routes: routes, trips: trips, tripByID: tripByID, tripIndicesByDepartureStop: tripIndicesByDepartureStop, serviceRoutesByStop: sortedServiceRoutesByStop, boardableStops: boardableStops, alightableStops: alightableStops, serviceDays: serviceDays, lastActiveDayStartByService: lastActiveDayStartByService, rulesByGroup: rulesByGroup, stationGroupByStop: stationGroupByStop, pathsByFrom: pathsByFrom, pathsByTo: pathsByTo, nearbyTransferStopsByStop: nearbyTransferStopsByStop, serviceDayByDate: SnapshotDerivedIndexes.serviceDayByDate(serviceDays), nearbyTransferSourcesByStop: nearbyTransferSourcesByStop, continuations: SnapshotContinuationIndex(trips: trips, routes: routes, rules: rules, stopCount: stops.count), patterns: patterns, patternOccurrencesByStop: patternOccurrencesByStop, loadMilliseconds: Int(RoutingDiagnostics.elapsed(since: loadStarted)))
     }
 
     /// Precomputes a small geographic interchange frontier for every stop.
@@ -587,7 +577,25 @@ private enum SnapshotBuilder {
 
 public actor TransitRouter {
     let snapshot: RoutingSnapshot; private let walking: WalkingRouteCache?; let clock: @Sendable () -> Date; private let realtime: (any RealtimeRoutingProvider)?
-    public init(databaseURL: URL, walkingProvider: (any WalkingRoutingProvider)? = nil, realtimeProvider: (any RealtimeRoutingProvider)? = nil, clock: @escaping @Sendable () -> Date = { .now }) async throws { self.clock = clock; self.snapshot = try await Task.detached(priority: .utility) { try SnapshotBuilder.load(databaseURL: databaseURL) }.value; self.walking = walkingProvider.map { WalkingRouteCache(provider: $0) }; self.realtime = realtimeProvider }
+    /// Whether the snapshot was built from the database or loaded from the cache file.
+    public nonisolated let snapshotSource: SnapshotSource
+    nonisolated let snapshotCacheMiss: SnapshotCacheMiss?
+    /// The background store of a snapshot that was built because the cache file was unusable.
+    private(set) var snapshotCacheWrite: Task<SnapshotCacheWriteOutcome, Never>?
+    /// - Parameter snapshotCacheDirectory: A directory the caller owns, such as one inside Caches. The routing
+    ///   snapshot is stored there as a single versioned file and loaded on the next start while the database
+    ///   is unchanged. A missing, stale or damaged file is ignored and rewritten. `nil` disables the file.
+    public init(databaseURL: URL, snapshotCacheDirectory: URL? = nil, walkingProvider: (any WalkingRoutingProvider)? = nil, realtimeProvider: (any RealtimeRoutingProvider)? = nil, clock: @escaping @Sendable () -> Date = { .now }) async throws {
+        self.clock = clock
+        let load = try await Task.detached(priority: .utility) {
+            try SnapshotCache.loadOrBuild(databaseURL: databaseURL, directory: snapshotCacheDirectory)
+        }.value
+        self.snapshot = load.snapshot; self.snapshotSource = load.source; self.snapshotCacheMiss = load.miss
+        // Storing the file does not delay the router. It runs at the priority of the build itself: at background
+        // priority a CPU-bound first search starves it, and the process may end before the file exists.
+        self.snapshotCacheWrite = load.pendingWrite.map { pending in Task.detached(priority: .utility) { pending.perform() } }
+        self.walking = walkingProvider.map { WalkingRouteCache(provider: $0) }; self.realtime = realtimeProvider
+    }
     public func makeSession(for query: RouteQuery) throws -> JourneyPlanningSession { guard query.preferences.minimumTransferSeconds >= 0, query.preferences.boardingBufferSeconds >= 0, query.preferences.maximumWalkingSeconds.map({ $0 >= 0 }) ?? true, query.preferences.maxTransfers.map({ $0 >= 0 }) ?? true else { throw JourneyPlannerError.invalidPreferences }; return try JourneyPlanningSession(snapshot: snapshot, query: query, walking: walking, realtime: realtime, clock: clock) }
     /// Feeds a measured pedestrian route back into the cache before a bounded
     /// replan, so the search cannot repeat its original short estimate.

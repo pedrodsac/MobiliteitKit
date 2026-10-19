@@ -1,7 +1,7 @@
 import Foundation
 
 /// Immutable continuation lookups shared by searches, publication and trip details.
-struct SnapshotContinuationIndex: Sendable {
+struct SnapshotContinuationIndex: Sendable, Equatable {
     let blockTripsByID: [String: [Int]]
     let explicitTargetsByTrip: [[Int]]
     /// Conservative reverse edges: a vehicle at a terminal may continue to these
@@ -10,15 +10,34 @@ struct SnapshotContinuationIndex: Sendable {
     let sourcesByStop: [[Int]]
     let hasLinks: Bool
 
-    init(trips: [SnapshotTrip], routes: [TransitRoute], rules: [SnapshotRule], stopCount: Int) {
-        blockTripsByID = Dictionary(grouping: trips.indices.filter {
+    private static func blockTrips(_ trips: [SnapshotTrip]) -> [String: [Int]] {
+        Dictionary(grouping: trips.indices.filter {
             trips[$0].blockID?.isEmpty == false && !trips[$0].isFrequencyTemplate
         }, by: { trips[$0].blockID! })
-        var explicit = Array(repeating: Set<Int>(), count: trips.count)
+    }
+
+    private static func explicitTargets(_ rules: [SnapshotRule], tripCount: Int) -> (sets: [Set<Int>], sorted: [[Int]]) {
+        var explicit = Array(repeating: Set<Int>(), count: tripCount)
         for rule in rules where rule.type == 4 {
             if let from = rule.fromTrip, let to = rule.toTrip { explicit[from].insert(to) }
         }
-        explicitTargetsByTrip = explicit.map { $0.sorted() }
+        return (explicit, explicit.map { $0.sorted() })
+    }
+
+    /// Restores an index whose `sourcesByStop` was computed earlier (the
+    /// quadratic part); the block and explicit-target tables are cheap to derive.
+    init(trips: [SnapshotTrip], rules: [SnapshotRule], sourcesByStop: [[Int]]) {
+        blockTripsByID = Self.blockTrips(trips)
+        explicitTargetsByTrip = Self.explicitTargets(rules, tripCount: trips.count).sorted
+        self.sourcesByStop = sourcesByStop
+        hasLinks = sourcesByStop.contains { !$0.isEmpty }
+    }
+
+    init(trips: [SnapshotTrip], routes: [TransitRoute], rules: [SnapshotRule], stopCount: Int) {
+        blockTripsByID = Self.blockTrips(trips)
+        let targets = Self.explicitTargets(rules, tripCount: trips.count)
+        let explicit = targets.sets
+        explicitTargetsByTrip = targets.sorted
         var sources = Array(repeating: Set<Int>(), count: stopCount)
         func add(from: Int, to: Int) {
             guard let terminal = trips[from].times.last?.stop,

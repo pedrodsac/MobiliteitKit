@@ -27,8 +27,11 @@ enum InstalledEquivalenceScenarios {
         for (name, origin, destination, timestamp, direction) in scenarios {
             let anchor = try #require(ISO8601DateFormatter().date(from: timestamp))
             let live = EquivalenceRealtime(clock: anchor)
-            let router = try await TransitRouter(databaseURL: database, walkingProvider: EquivalenceWalking(),
+            // Optionally route the snapshot through a stored file, to prove that a loaded snapshot gives identical results.
+            let snapshotCache = ProcessInfo.processInfo.environment["ROUTING_EQUIVALENCE_SNAPSHOT_CACHE"].map { URL(fileURLWithPath: $0) }
+            let router = try await TransitRouter(databaseURL: database, snapshotCacheDirectory: snapshotCache, walkingProvider: EquivalenceWalking(),
                 realtimeProvider: live, clock: { anchor })
+            if snapshotCache != nil { print("EQUIVALENCE_SNAPSHOT_SOURCE \(name) \(router.snapshotSource)") }
             let session = try await router.makeSession(for: .init(origin: origin, destination: destination,
                 departureTime: anchor, direction: direction, realtimePolicy: .bestEffort(refresh: .forceRefresh)))
             let initial = try await session.initial(count: 8, searchHorizon: 3_600)

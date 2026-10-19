@@ -6,6 +6,7 @@ public actor JourneyPlanner {
     private let walkingProvider: (any WalkingRoutingProvider)?
     private let realtimeClient: MobiliteitAPIClient?
     private let suppliedRealtimeProvider: (any RealtimeRoutingProvider)?
+    private let snapshotCacheDirectory: URL?
 
     private struct DatabaseFingerprint: Equatable {
         let path: String
@@ -23,15 +24,27 @@ public actor JourneyPlanner {
     private var routerFingerprint: DatabaseFingerprint?
     private var preparation: Preparation?
 
+    /// - Parameter snapshotCacheDirectory: A directory owned by the caller, such as one inside Caches. The
+    ///   prepared routing snapshot is stored there as one versioned file, so a cold start loads it instead of
+    ///   rebuilding it from the database. The file is tied to the database it was built from; a new feed,
+    ///   a new format version or a damaged file is ignored and rewritten. `nil` keeps the snapshot in memory only.
     public init(
         walkingProvider: (any WalkingRoutingProvider)? = nil,
         realtimeClient: MobiliteitAPIClient? = nil,
-        realtimeProvider: (any RealtimeRoutingProvider)? = nil
+        realtimeProvider: (any RealtimeRoutingProvider)? = nil,
+        snapshotCacheDirectory: URL? = nil
     ) {
         self.hasRealtimeProvider = realtimeClient != nil || realtimeProvider != nil
         self.walkingProvider = walkingProvider
         self.realtimeClient = realtimeClient
         self.suppliedRealtimeProvider = realtimeProvider
+        self.snapshotCacheDirectory = snapshotCacheDirectory
+    }
+
+    /// Deletes the stored snapshot, for example when a new feed is installed.
+    /// The file is also ignored automatically once its database changes.
+    public static func removeSnapshotCache(in directory: URL) {
+        SnapshotCache.remove(in: directory)
     }
 
     public func makePlanningSession(databaseURL: URL, request: JourneyPlanningRequest,
@@ -69,6 +82,7 @@ public actor JourneyPlanner {
                     }
                     return try await TransitRouter(
                         databaseURL: databaseURL,
+                        snapshotCacheDirectory: snapshotCacheDirectory,
                         walkingProvider: walkingProvider,
                         realtimeProvider: realtimeProvider
                     )
