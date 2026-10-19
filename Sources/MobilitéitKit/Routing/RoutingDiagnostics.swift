@@ -21,6 +21,8 @@ public struct RoutingDiagnostics: Hashable, Sendable {
         case providerBoardFetch, providerBoardPreparation, providerStopMatching, providerSessionMerge
         /// The session's check of whether new live data changed any routing input.
         case sessionRoutingEffect
+        /// Inside the realtime stage: the lines a selected transfer stop's board must cover.
+        case connectionLines
     }
     public enum Counter: String, Hashable, Sendable, Codable {
         case networkRequests, boardCacheHits, responseBytes, walkingRequests, walkingCacheHits

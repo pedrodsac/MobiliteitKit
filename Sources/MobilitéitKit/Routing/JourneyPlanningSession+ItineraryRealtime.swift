@@ -23,10 +23,25 @@ extension JourneyPlanningSession {
         var seenStops: Set<String> = []
         var requestedInstances: Set<RealtimePatchKey> = []
         var matchingTripIDs: Set<String> = []
+        // Planning is bounded like discovery's, so HTTP and matching own most of the batch.
+        let connectionPlanningDeadline = min(deadline, ContinuousClock.now.advanced(by:
+            .milliseconds(min(250, max(1, budgetMilliseconds / 10)))))
+        var reachability: Raptor.DestinationReachability?
+        var connections: [ConnectionKey: ConnectionLines] = [:]
         for journey in journeys {
             guard ContinuousClock.now < deadline else { break }
+            // Set once a ride is behind the rider: when they reach the next boarding stop.
+            var reachedStopAt: Date?
+            var staysAboard = false
             for leg in journey.legs {
-                guard case let .transit(ride) = leg, let instance = ride.instance else { continue }
+                if case let .walk(walk) = leg, reachedStopAt != nil { reachedStopAt = walk.arrival }
+                if case .inSeatContinuation = leg { staysAboard = true }
+                guard case let .transit(ride) = leg else { continue }
+                // Staying aboard a continuing trip is not a transfer.
+                let transferArrival = staysAboard ? nil : reachedStopAt
+                staysAboard = false
+                reachedStopAt = ride.effectiveArrival
+                guard let instance = ride.instance else { continue }
                 let key = RealtimePatchKey(tripID: ride.tripID, serviceDate: instance.serviceDate)
                 let boarding = ItineraryBoarding(instance: key, sequence: ride.boardSequence)
                 let patch = latestPatchesByInstance[key]
@@ -47,8 +62,26 @@ extension JourneyPlanningSession {
                 if ride.scheduledArrival.timeIntervalSince(ride.scheduledDeparture) <= RealtimeTimeline.maximumPropagation {
                     requestedInstances.insert(key)
                 }
-                targets.append(.init(stopID: ride.board.stop.id, from: start, through: end,
-                    lines: ride.route.shortName.flatMap { $0.isEmpty ? nil : [$0] } ?? []))
+                var lines = ride.route.shortName.flatMap { $0.isEmpty ? nil : [$0] } ?? []
+                if let transferArrival {
+                    // The ride's own line is not the only way on from this stop: ask for every line
+                    // discovery would, and match their trips too (see `connectionLines`).
+                    let connectionKey = ConnectionKey(stopID: ride.board.stop.id, arrival: transferArrival)
+                    if connections[connectionKey] == nil {
+                        let planningStarted = ContinuousClock.now
+                        if reachability == nil { reachability = optimisticDestinationReachability(egress: egress) }
+                        connections[connectionKey] = connectionLines(atStop: connectionKey.stopID,
+                            arrival: transferArrival, from: lower, through: upper, configuration: configuration,
+                            deadline: connectionPlanningDeadline, reachability: reachability!)
+                        diagnostics.record(.connectionLines, since: planningStarted)
+                    }
+                    let connecting = connections[connectionKey]!
+                    matchingTripIDs.formUnion(connecting.tripIDs)
+                    if !lines.isEmpty {
+                        lines = connecting.unrestricted ? [] : Array(Set(lines).union(connecting.lines)).sorted()
+                    }
+                }
+                targets.append(.init(stopID: ride.board.stop.id, from: start, through: end, lines: lines))
                 if seenStops.insert(ride.board.stop.id).inserted { stopIDs.append(ride.board.stop.id) }
             }
         }
@@ -59,7 +92,7 @@ extension JourneyPlanningSession {
                 .milliseconds(min(250, max(1, budgetMilliseconds / 10)))))
             let discovered = discoveryRealtimeTargets(access: access, egress: egress, journeys: journeys,
                 preferredStops: stopIDs, anchor: anchor, searchHorizon: searchHorizon, deadline: planningDeadline,
-                requestedInstances: requestedInstances)
+                requestedInstances: requestedInstances, reachability: reachability)
             targets += discovered.targets
             matchingTripIDs.formUnion(discovered.tripIDs)
             for target in discovered.targets where seenStops.insert(target.stopID).inserted { stopIDs.append(target.stopID) }
