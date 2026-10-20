@@ -47,6 +47,9 @@ public struct HTTPTransportMetrics: Codable, Hashable, Sendable {
     /// The task interval, which brackets every transaction.
     public var taskStart: Date? = nil
     public var taskEnd: Date? = nil
+    /// The response's `Server-Timing` header as sent. The Verkéier relay reports there how long
+    /// it waited for the upstream response headers, which splits the server wait above.
+    public var serverTiming: String? = nil
 }
 final class HTTPTaskMetricsDelegate: NSObject, URLSessionTaskDelegate, Sendable {
     private let metrics = OSAllocatedUnfairLock<HTTPTransportMetrics?>(initialState: nil)

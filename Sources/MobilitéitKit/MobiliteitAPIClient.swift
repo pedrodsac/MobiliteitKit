@@ -420,11 +420,17 @@ public struct MobiliteitAPIClient: Sendable {
         let delegate = diagnostics == nil ? nil : HTTPTaskMetricsDelegate()
         let (data, response) = try await session.data(for: request, delegate: delegate)
         guard let http = response as? HTTPURLResponse else { throw MobiliteitAPIError.invalidResponse }
+        let serverTiming = http.value(forHTTPHeaderField: "Server-Timing")
+        func metrics() -> HTTPTransportMetrics? {
+            var value = delegate?.result()
+            value?.serverTiming = serverTiming
+            return value
+        }
         if let diagnostics, let publicURL {
             let successful = (200..<300).contains(http.statusCode)
                 && data.range(of: Data("\"errorCode\"".utf8)) == nil
             diagnostics.didReceive(.init(request: publicURL, statusCode: http.statusCode, receivedAt: .now,
-                transport: delegate?.result(), successfulBody: successful ? data : nil))
+                transport: metrics(), successfulBody: successful ? data : nil))
         }
         guard (200..<300).contains(http.statusCode) else {
             throw MobiliteitAPIError.httpStatus(http.statusCode, body: String(data: data.prefix(8_192), encoding: .utf8))
@@ -437,7 +443,7 @@ public struct MobiliteitAPIClient: Sendable {
             decoder.userInfo[.hafasResponseBytes] = data.count
             let value = try decoder.decode(Response.self, from: data)
             try Task.checkCancellation()
-            let transport = delegate?.result().map { [HTTPTransportMeasurement(request: publicURL ?? requestURL,
+            let transport = metrics().map { [HTTPTransportMeasurement(request: publicURL ?? requestURL,
                 statusCode: http.statusCode, startedAt: startedAt, metrics: $0)] } ?? []
             return (value, httpMilliseconds, Int(RoutingDiagnostics.elapsed(since: decodeStarted)), transport)
         } catch is CancellationError { throw CancellationError() }
