@@ -115,7 +115,8 @@ extension HafasRealtimeRoutingProvider {
         for live in board.departures.values {
             try Task.checkCancellation()
             guard matchingNow() < deadline else { resolved.finished = false; break }
-            guard request.includeTripMetadata || Self.hasRealtimeSignal(live) else { continue }
+            guard request.includeTripMetadata || Self.hasRealtimeSignal(live)
+                || Self.hasPlatformSignal(live) else { continue }
             guard let planned = date(date: live.plannedDate, time: live.plannedTime) else {
                 resolved.entries.append(.rejection(.invalidTimestamp)); continue
             }

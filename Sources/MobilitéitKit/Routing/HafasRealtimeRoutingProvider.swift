@@ -232,6 +232,17 @@ public actor HafasRealtimeRoutingProvider: RealtimeRoutingProvider {
     nonisolated static func milliseconds(_ duration: Duration) -> Int {
         Int(duration.components.seconds * 1_000 + duration.components.attoseconds / 1_000_000_000_000_000)
     }
+    /// Planned or live track data, which lets an untracked trip still show its platform.
+    nonisolated static func hasPlatformSignal(_ value: HafasDeparture) -> Bool {
+        func present(_ text: String?) -> Bool {
+            text?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        }
+        return present(value.platform?.text) || present(value.realtimePlatform?.text)
+            || value.passlist.values.contains {
+                present($0.arrivalTrack) || present($0.departureTrack)
+                    || present($0.realtimeArrivalTrack) || present($0.realtimeDepartureTrack)
+            }
+    }
     nonisolated static func hasRealtimeSignal(_ value: HafasDeparture) -> Bool {
         value.realtimeTime != nil || value.cancelled == true || value.reachable == false
             || value.passlist.values.contains {
